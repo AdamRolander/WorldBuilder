@@ -2,6 +2,7 @@
 
 ## TODO:
 
+- Requirements.txt file, setup instructions
 - Build a solid inference pipeline:
   - supply photo from path -> runs segmentation -> runs Gemini via API call -> runs inference
   - Less manual, more automatic is ideal
