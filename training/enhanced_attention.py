@@ -45,38 +45,53 @@ class MultiScaleAttentionBlock(nn.Module):
     """Multi-scale attention that processes features at different granularities."""
     def __init__(self, input_dim, num_heads=8, dropout_rate=0.1):
         super().__init__()
+    
+        self.input_dim = input_dim
         
-        # Ensure input_dim is divisible by 3 for feature grouping
-        self.feat_dim = input_dim // 3
+        # Calculate feature dimensions that work with attention
+        # Use a fixed dimension that's easily divisible
+        self.feat_dim = 64  # Fixed dimension divisible by common head counts
+        
+        # Adjust num_heads to be compatible
+        possible_heads = [1, 2, 4, 8, 16]
+        self.heads_per_group = max([h for h in possible_heads if h <= num_heads and self.feat_dim % h == 0])
+        
+        print(f"MultiScaleAttention: input_dim={input_dim}, feat_dim={self.feat_dim}, heads_per_group={self.heads_per_group}")
         
         # Group features by type for specialized attention
         self.geometric_attention = nn.MultiheadAttention(
-            embed_dim=self.feat_dim, num_heads=max(1, num_heads//2), 
+            embed_dim=self.feat_dim, num_heads=self.heads_per_group, 
             dropout=dropout_rate, batch_first=True
         )
         self.visual_attention = nn.MultiheadAttention(
-            embed_dim=self.feat_dim, num_heads=max(1, num_heads//2), 
+            embed_dim=self.feat_dim, num_heads=self.heads_per_group, 
             dropout=dropout_rate, batch_first=True
         )
         self.camera_attention = nn.MultiheadAttention(
-            embed_dim=self.feat_dim, num_heads=max(1, num_heads//2), 
+            embed_dim=self.feat_dim, num_heads=self.heads_per_group, 
             dropout=dropout_rate, batch_first=True
         )
         
         # Cross-attention to combine different feature types
+        combined_dim = self.feat_dim * 3
+        cross_heads = min(num_heads, combined_dim)
+        # Ensure cross_heads divides combined_dim
+        while combined_dim % cross_heads != 0 and cross_heads > 1:
+            cross_heads -= 1
+        
         self.cross_attention = nn.MultiheadAttention(
-            embed_dim=input_dim, num_heads=num_heads, 
+            embed_dim=combined_dim, num_heads=cross_heads, 
             dropout=dropout_rate, batch_first=True
         )
         
         self.layer_norms = nn.ModuleList([nn.LayerNorm(self.feat_dim) for _ in range(3)])
-        self.final_norm = nn.LayerNorm(input_dim)
+        self.final_norm = nn.LayerNorm(combined_dim)
         
         # Feature type projections
         self.geometric_proj = nn.Linear(input_dim, self.feat_dim)
         self.visual_proj = nn.Linear(input_dim, self.feat_dim)
         self.camera_proj = nn.Linear(input_dim, self.feat_dim)
-        self.combine_proj = nn.Linear(input_dim, input_dim)
+        self.combine_proj = nn.Linear(combined_dim, input_dim)
         
     def forward(self, x):
         # Project to different feature spaces
@@ -96,32 +111,42 @@ class MultiScaleAttentionBlock(nn.Module):
         
         # Combine all features
         combined = torch.cat([geo_out, vis_out, cam_out], dim=1)
-        combined_proj = self.combine_proj(combined).unsqueeze(1)
+        combined_proj = combined.unsqueeze(1)
         
         # Final cross-attention
         final_attn, _ = self.cross_attention(combined_proj, combined_proj, combined_proj)
         output = self.final_norm(combined_proj.squeeze(1) + final_attn.squeeze(1))
         
+        # Project back to input dimension
+        output = self.combine_proj(output)
+        
         return output
 
 
 class UncertaintyLoss(nn.Module):
-    """Loss function that incorporates prediction uncertainty."""
+    """Loss function that incorporates prediction uncertainty with better numerical stability."""
     def __init__(self, depth_weight=0.3, coord_weight=0.7):
         super().__init__()
         self.depth_weight = depth_weight
         self.coord_weight = coord_weight
         
     def forward(self, depth_mean, depth_var, coord_mean, coord_var, depth_target, coord_target):
-        # Gaussian negative log-likelihood
-        depth_loss = 0.5 * (torch.log(depth_var + 1e-8) + 
-                           (depth_target - depth_mean)**2 / (depth_var + 1e-8))
+        # More numerically stable uncertainty loss
+        depth_loss = 0.5 * (torch.log(depth_var + 1e-6) + 
+                           (depth_target - depth_mean)**2 / (depth_var + 1e-6))
         
-        coord_loss = 0.5 * (torch.log(coord_var + 1e-8) + 
-                           (coord_target - coord_mean)**2 / (coord_var + 1e-8))
+        coord_loss = 0.5 * torch.sum(torch.log(coord_var + 1e-6) + 
+                                   (coord_target - coord_mean)**2 / (coord_var + 1e-6), dim=1)
         
-        return (self.depth_weight * depth_loss.mean() + 
-                self.coord_weight * coord_loss.mean())
+        # Apply loss weights and add regularization
+        total_loss = (self.depth_weight * depth_loss.mean() + 
+                     self.coord_weight * coord_loss.mean())
+        
+        # Add small regularization to prevent variance collapse
+        var_reg = 1e-4 * (torch.mean(1.0 / (depth_var + 1e-6)) + 
+                         torch.mean(1.0 / (coord_var + 1e-6)))
+        
+        return total_loss + var_reg
 
 
 class EnhancedGeometricEstimator(nn.Module):
@@ -250,105 +275,61 @@ def calculate_unprojection(row, img_width=300, img_height=300):
     return world_coords[0], world_coords[1], world_coords[2]
 
 
-def calculate_enhanced_geometric_features_no_bbox(row, img_width=300, img_height=300):
-    """Enhanced geometric feature engineering without relying on bounding box information."""
+def calculate_comprehensive_geometric_features(row, img_width=300, img_height=300):
+    """Calculate comprehensive features including enhanced depth map data."""
+    features = {}
     
-    # Original unprojection (keep this, but use default center if bbox is zero)
-    if row.get('target_bbox_center_x', 0) == 0 and row.get('target_bbox_center_y', 0) == 0:
-        # Use image center as default
-        bbox_center_x = 0.5
-        bbox_center_y = 0.5
-        print("Warning: Using image center as default bbox center due to zero bbox data")
-    else:
-        bbox_center_x = row['target_bbox_center_x']
-        bbox_center_y = row['target_bbox_center_y']
+    # Basic unprojection (keep existing logic but improved)
+    proj_x, proj_y, proj_z = calculate_unprojection(row, img_width, img_height)
+    features.update({'proj_x': proj_x, 'proj_y': proj_y, 'proj_z': proj_z})
     
-    proj_x, proj_y, proj_z = calculate_unprojection_with_center(row, bbox_center_x, bbox_center_y, img_width, img_height)
+    # Enhanced depth features (utilize new depth map statistics)
+    depth_cols = ['depth_mean', 'depth_std', 'depth_min', 'depth_max', 
+                  'depth_median', 'depth_percentile_25', 'depth_percentile_75']
     
-    # 1. Relative positioning features
-    center_offset_x = bbox_center_x - 0.5
-    center_offset_y = bbox_center_y - 0.5
-    center_distance = np.sqrt(center_offset_x**2 + center_offset_y**2)
+    for col in depth_cols:
+        target_col = f'target_{col}'
+        ref_col = f'ref_{col}'
+        if target_col in row and ref_col in row:
+            features[target_col] = row[target_col]
+            features[ref_col] = row[ref_col]
+            
+            # Depth ratios and differences
+            if row[ref_col] > 0:
+                features[f'{col}_ratio'] = row[target_col] / row[ref_col]
+            features[f'{col}_diff'] = row[target_col] - row[ref_col]
     
-    # Angular position from center
-    angle_from_center = np.arctan2(center_offset_y, center_offset_x)
+    # Ground truth consistency features
+    if 'target_ground_truth_distance' in row:
+        features['target_gt_distance'] = row['target_ground_truth_distance']
+        features['ref_gt_distance'] = row['ref_ground_truth_distance']
+        
+        # Depth map vs ground truth consistency
+        features['target_depth_consistency'] = row.get('target_depth_gt_consistency', 0)
+        features['ref_depth_consistency'] = row.get('ref_depth_gt_consistency', 0)
     
-    # 2. Depth-based corrections
-    depth_ratio = row['target_depth_mean'] / row['ref_depth_mean'] if row['ref_depth_mean'] > 0 else 1.0
-    depth_consistency = abs(row['target_depth_mean'] - row['dist_to_ref']) / max(row['target_depth_mean'], 1e-6)
+    # Existing geometric features (keep the good ones from your original code)
+    bbox_center_x = max(0.001, min(0.999, row.get('target_bbox_center_x', 0.5)))
+    bbox_center_y = max(0.001, min(0.999, row.get('target_bbox_center_y', 0.5)))
     
-    # 3. Perspective corrections
+    features.update({
+        'center_offset_x': bbox_center_x - 0.5,
+        'center_offset_y': bbox_center_y - 0.5,
+        'center_distance': np.sqrt((bbox_center_x - 0.5)**2 + (bbox_center_y - 0.5)**2),
+        'angle_from_center': np.arctan2(bbox_center_y - 0.5, bbox_center_x - 0.5)
+    })
+    
+    # Camera and orientation features (keep existing)
     fov_rad = row['field_of_view'] * (np.pi / 180.0)
+    features.update({
+        'horizon_sin': np.sin(np.radians(row['camera_horizon'])),
+        'horizon_cos': np.cos(np.radians(row['camera_horizon'])),
+        'rot_y_sin': np.sin(np.radians(row['agent_rot_y'])),
+        'rot_y_cos': np.cos(np.radians(row['agent_rot_y'])),
+        'fov_rad': fov_rad
+    })
     
-    # Correction for field of view effects
-    fov_correction_x = np.tan(fov_rad/2) * center_offset_x * 2
-    fov_correction_y = np.tan(fov_rad/2) * center_offset_y * 2
-    
-    # 4. Camera orientation features
-    horizon_sin = np.sin(np.radians(row['camera_horizon']))
-    horizon_cos = np.cos(np.radians(row['camera_horizon']))
-    
-    # Agent rotation features (sine/cosine for periodicity)
-    rot_y_sin = np.sin(np.radians(row['agent_rot_y']))
-    rot_y_cos = np.cos(np.radians(row['agent_rot_y']))
-    rot_x_sin = np.sin(np.radians(row['agent_rot_x']))
-    rot_x_cos = np.cos(np.radians(row['agent_rot_x']))
-    
-    # 5. Modified bounding box features (use defaults when bbox is zero)
-    bbox_width = row.get('target_bbox_width', 0.1)  # Default reasonable size
-    bbox_height = row.get('target_bbox_height', 0.1)
-    
-    if bbox_width == 0 or bbox_height == 0:
-        bbox_width = 0.1
-        bbox_height = 0.1
-    
-    bbox_area = bbox_width * bbox_height
-    bbox_diagonal = np.sqrt(bbox_width**2 + bbox_height**2)
-    
-    # Expected size vs actual size (using depth)
-    expected_size = 1.0 / max(row['target_depth_mean'], 0.1)
-    size_consistency = bbox_area / expected_size
-    
-    # 6. Reference object relative features (with defaults)
-    ref_center_x = row.get('ref_bbox_center_x', 0.5)  # Default to center
-    ref_center_y = row.get('ref_bbox_center_y', 0.5)
-    
-    if ref_center_x == 0 and ref_center_y == 0:
-        ref_center_x = 0.5
-        ref_center_y = 0.5
-    
-    # Relative position between target and reference objects
-    bbox_rel_x = bbox_center_x - ref_center_x
-    bbox_rel_y = bbox_center_y - ref_center_y
-    bbox_rel_distance = np.sqrt(bbox_rel_x**2 + bbox_rel_y**2)
-    bbox_rel_angle = np.arctan2(bbox_rel_y, bbox_rel_x)
-    
-    return {
-        'proj_x': proj_x,
-        'proj_y': proj_y, 
-        'proj_z': proj_z,
-        'center_offset_x': center_offset_x,
-        'center_offset_y': center_offset_y,
-        'center_distance': center_distance,
-        'angle_from_center': angle_from_center,
-        'depth_ratio': depth_ratio,
-        'depth_consistency': depth_consistency,
-        'fov_correction_x': fov_correction_x,
-        'fov_correction_y': fov_correction_y,
-        'horizon_sin': horizon_sin,
-        'horizon_cos': horizon_cos,
-        'rot_y_sin': rot_y_sin,
-        'rot_y_cos': rot_y_cos,
-        'rot_x_sin': rot_x_sin,
-        'rot_x_cos': rot_x_cos,
-        'bbox_area': bbox_area,
-        'bbox_diagonal': bbox_diagonal,
-        'size_consistency': size_consistency,
-        'bbox_rel_x': bbox_rel_x,
-        'bbox_rel_y': bbox_rel_y,
-        'bbox_rel_distance': bbox_rel_distance,
-        'bbox_rel_angle': bbox_rel_angle
-    }
+    return features
 
 
 def calculate_unprojection_with_center(row, bbox_center_x, bbox_center_y, img_width=300, img_height=300):
@@ -432,7 +413,7 @@ def filter_high_quality_samples_no_bbox(df):
     bbox_cols, missing_bbox_cols = analyze_dataset_structure(df)
     
     # Skip bbox filtering entirely and warn user
-    print("\n⚠️  WARNING: All bounding boxes have zero area!")
+    print("\nWarning: All bounding boxes have zero area!")
     print("This indicates a problem with the dataset generation.")
     print("Proceeding without bounding box filtering, but results may be poor.")
     
@@ -494,56 +475,7 @@ def filter_high_quality_samples_no_bbox(df):
         return df
     
     print(f"Final dataset size: {len(df)} ({len(df)/initial_count:.1%} retained)")
-    print("\n⚠️  IMPORTANT: Training will proceed, but you should fix the bounding box data issue!")
-    return df.reset_index(drop=True)
-    # Remove samples where depth is inconsistent with distance (more lenient)
-    depth_consistency = np.abs(df['target_depth_mean'] - df['dist_to_ref']) / df['target_depth_mean']
-    df = df[depth_consistency < 1.0]  # More lenient: allow 100% tolerance
-    print(f"After depth consistency filtering: {len(df)}")
-    
-    if len(df) == 0:
-        print("Warning: All samples filtered out during depth consistency filtering!")
-        return df
-    
-    # Remove extreme outliers in coordinates - with robust error handling
-    try:
-        for coord in ['world_x', 'world_y', 'world_z']:
-            if len(df) == 0:
-                break
-            
-            # Check if we have enough data for quantile calculation
-            if len(df[coord]) < 10:
-                print(f"Warning: Too few samples ({len(df)}) for coordinate outlier filtering")
-                break
-                
-            # Use more lenient outlier detection (0.5th to 99.5th percentile)
-            Q1 = df[coord].quantile(0.005)
-            Q3 = df[coord].quantile(0.995)
-            
-            # Only filter if quantiles are valid
-            if not (np.isnan(Q1) or np.isnan(Q3)):
-                df = df[(df[coord] >= Q1) & (df[coord] <= Q3)]
-            else:
-                print(f"Warning: Invalid quantiles for {coord}, skipping outlier filtering")
-        
-        print(f"After coordinate outlier filtering: {len(df)}")
-    except Exception as e:
-        print(f"Warning: Error during coordinate outlier filtering: {e}")
-        print("Proceeding without coordinate outlier filtering")
-    
-    if len(df) == 0:
-        print("Warning: All samples filtered out during coordinate outlier filtering!")
-        return df
-    
-    # Remove samples with extreme relative depths (more lenient)
-    df = df[(df['relative_depth'] > 0.05) & (df['relative_depth'] < 10.0)]
-    print(f"After relative depth filtering: {len(df)}")
-    
-    if len(df) == 0:
-        print("Warning: All samples filtered out during relative depth filtering!")
-        return df
-    
-    print(f"Final dataset size: {len(df)} ({len(df)/initial_count:.1%} retained)")
+    print("\nIMPORTANT: Training will proceed, but you should fix the bounding box data issue!")
     return df.reset_index(drop=True)
 
 
@@ -599,18 +531,19 @@ class EnhancedAI2ThorTrainer:
         # Optimizer
         self.optimizer = torch.optim.AdamW(
             model.parameters(), 
-            lr=0.002, 
-            weight_decay=0.01,
-            betas=(0.9, 0.999)
+            lr=0.0005,  # Much lower learning rate
+            weight_decay=0.001,  # Lower weight decay
+            betas=(0.9, 0.999),
+            eps=1e-8
         )
-        
-        # Learning rate scheduler
+
+        # More aggressive learning rate scheduler
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer, 
             mode='min', 
-            factor=0.5, 
-            patience=10, 
-            min_lr=1e-6
+            factor=0.3,  # Reduce LR more aggressively
+            patience=5,   # Reduce patience
+            min_lr=1e-7
         )
         
         # Early stopping
@@ -632,26 +565,54 @@ class EnhancedAI2ThorTrainer:
             batch_depth_targets = batch_depth_targets.to(self.device)
             batch_coord_targets = batch_coord_targets.to(self.device)
             
+            # Check for invalid targets
+            if torch.any(torch.isnan(batch_depth_targets)) or torch.any(torch.isnan(batch_coord_targets)):
+                continue
+                
             self.optimizer.zero_grad()
             
-            if self.use_uncertainty:
-                depth_mean, coord_mean, depth_var, coord_var = self.model(batch_features, return_uncertainty=True)
-                loss = self.criterion(depth_mean, depth_var, coord_mean, coord_var, 
-                                    batch_depth_targets, batch_coord_targets)
-            else:
-                depth_pred, coord_pred = self.model(batch_features)
-                depth_loss = self.depth_criterion(depth_pred, batch_depth_targets)
-                coord_loss = self.coord_criterion(coord_pred, batch_coord_targets)
-                loss = 0.3 * depth_loss + 0.7 * coord_loss
-            
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-            self.optimizer.step()
-            
-            batch_size = batch_features.size(0)
-            total_loss += loss.item() * batch_size
-            total_samples += batch_size
+            try:
+                if self.use_uncertainty:
+                    depth_mean, coord_mean, depth_var, coord_var = self.model(batch_features, return_uncertainty=True)
+                    
+                    # Clamp predictions to reasonable ranges
+                    depth_mean = torch.clamp(depth_mean, -10, 10)
+                    coord_mean = torch.clamp(coord_mean, -10, 10)
+                    depth_var = torch.clamp(depth_var, 1e-6, 10)
+                    coord_var = torch.clamp(coord_var, 1e-6, 10)
+                    
+                    loss = self.criterion(depth_mean, depth_var, coord_mean, coord_var, 
+                                        batch_depth_targets, batch_coord_targets)
+                else:
+                    depth_pred, coord_pred = self.model(batch_features)
+                    depth_pred = torch.clamp(depth_pred, -10, 10)
+                    coord_pred = torch.clamp(coord_pred, -10, 10)
+                    
+                    depth_loss = self.depth_criterion(depth_pred, batch_depth_targets)
+                    coord_loss = self.coord_criterion(coord_pred, batch_coord_targets)
+                    loss = 0.3 * depth_loss + 0.7 * coord_loss
+                
+                # Check for invalid loss
+                if torch.isnan(loss) or torch.isinf(loss):
+                    continue
+                    
+                loss.backward()
+                
+                # More aggressive gradient clipping
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5)
+                
+                self.optimizer.step()
+                
+                batch_size = batch_features.size(0)
+                total_loss += loss.item() * batch_size
+                total_samples += batch_size
+                
+            except RuntimeError as e:
+                print(f"Training error: {e}")
+                continue
         
+        if total_samples == 0:
+            return 0.0
         return total_loss / total_samples
     
     def validate(self):
@@ -696,8 +657,18 @@ class EnhancedAI2ThorTrainer:
         # Calculate metrics
         all_depth_preds_log = torch.cat(all_depth_preds).numpy()
         all_depth_targets_log = torch.cat(all_depth_targets).numpy()
+        
+        # Clip extreme values to prevent overflow in expm1
+        all_depth_preds_log = np.clip(all_depth_preds_log, -10, 10)
+        all_depth_targets_log = np.clip(all_depth_targets_log, -10, 10)
+        
         all_depth_preds = np.expm1(all_depth_preds_log)
         all_depth_targets = np.expm1(all_depth_targets_log)
+        
+        # Check for any remaining invalid values
+        valid_mask = np.isfinite(all_depth_preds) & np.isfinite(all_depth_targets)
+        all_depth_preds = all_depth_preds[valid_mask]
+        all_depth_targets = all_depth_targets[valid_mask]
         
         all_coord_preds = torch.cat(all_coord_preds).numpy()
         all_coord_targets = torch.cat(all_coord_targets).numpy()
@@ -785,6 +756,11 @@ def train_enhanced_ai2thor_model(dataset_path="ai2thor_coordinate_dataset.csv",
     print("Loading and enhancing AI2-THOR dataset...")
     try:
         df = pd.read_csv(dataset_path)
+        # Add this right after loading the CSV in train_enhanced_ai2thor_model:
+        print("\nDEBUG: Checking dataset quality...")
+        print(f"Non-zero target bboxes: {(df['target_bbox_width'] > 0).sum()}/{len(df)}")
+        print(f"Non-zero ref bboxes: {(df['ref_bbox_width'] > 0).sum()}/{len(df)}")
+        print(f"Sample bbox values: {df[['target_bbox_width', 'target_bbox_height']].head()}")
     except FileNotFoundError:
         print(f"Error: Dataset file '{dataset_path}' not found!")
         return None
@@ -816,25 +792,26 @@ def train_enhanced_ai2thor_model(dataset_path="ai2thor_coordinate_dataset.csv",
         return None
     
     # Calculate enhanced geometric features (with bbox workaround)
-    print("Calculating enhanced geometric features...")
+    print("Calculating comprehensive geometric features...")
     try:
-        enhanced_features = df.apply(calculate_enhanced_geometric_features_no_bbox, axis=1, result_type='expand')
+        enhanced_features = df.apply(calculate_comprehensive_geometric_features, axis=1, result_type='expand')
         
         # Add enhanced features to dataframe
         for col in enhanced_features.columns:
-            df[col] = enhanced_features[col]
+            df[f'enhanced_{col}'] = enhanced_features[col]
         
-        print("Enhanced geometric features created.")
+        print(f"Enhanced geometric features created: {len(enhanced_features.columns)} new features")
     except Exception as e:
         print(f"Error calculating enhanced features: {e}")
         return None
-    
-    # Prepare features and targets
+
+    # Update feature column selection to include new depth features
     excluded_cols = ['relative_depth', 'world_x', 'world_y', 'world_z', 
-                     'scene_name', 'scene_idx', 'pose_idx', 'target_object_type', 
-                     'ref_object_type', 'target_object_id', 'ref_object_id']
-    
-    feature_columns = [col for col in df.columns if col not in excluded_cols]
+                    'scene_name', 'scene_idx', 'pose_idx', 'target_object_type', 
+                    'ref_object_type', 'target_object_id', 'ref_object_id']
+
+    feature_columns = [col for col in df.columns if col not in excluded_cols and 
+                    not col.startswith('target_object') and not col.startswith('ref_object')]
     
     X = df[feature_columns].values
     y_depth = np.log1p(df['relative_depth'].values)
@@ -874,29 +851,21 @@ def train_enhanced_ai2thor_model(dataset_path="ai2thor_coordinate_dataset.csv",
     print(f"Training set: {len(X_train)} samples")
     print(f"Validation set: {len(X_val)} samples")
     
-    # Make sure input dimension is divisible by 3 for multi-scale attention
+    # Make sure input dimension works with multi-scale attention
     input_dim = X_train.shape[1]
-    if input_dim % 3 != 0:
-        # Pad input dimension to be divisible by 3
-        pad_size = 3 - (input_dim % 3)
-        print(f"Padding input dimension from {input_dim} to {input_dim + pad_size}")
-        
-        # Add padding to training data
-        X_train_padded = np.pad(X_train_scaled, ((0, 0), (0, pad_size)), mode='constant')
-        X_val_padded = np.pad(X_val_scaled, ((0, 0), (0, pad_size)), mode='constant')
-        
-        input_dim += pad_size
-    else:
-        X_train_padded = X_train_scaled
-        X_val_padded = X_val_scaled
+    print(f"Original input dimension: {input_dim}")
+    
+    # No need to pad - the fixed MultiScaleAttentionBlock handles any input dimension
+    X_train_final = X_train_scaled
+    X_val_final = X_val_scaled
     
     # Create enhanced datasets with augmentation
     train_dataset = EnhancedAI2ThorDataset(
-        X_train_padded, y_depth_train, y_coords_train_scaled, 
+        X_train_final, y_depth_train, y_coords_train_scaled, 
         augment=True, noise_std=0.01
     )
     val_dataset = EnhancedAI2ThorDataset(
-        X_val_padded, y_depth_val, y_coords_val_scaled, 
+        X_val_final, y_depth_val, y_coords_val_scaled, 
         augment=False
     )
     
@@ -1007,6 +976,10 @@ def create_enhanced_training_plots(trainer, coord_scaler, val_dataset, device, u
         
         depth_preds = torch.cat(all_depth_preds).numpy()
         depth_targets = torch.cat(all_depth_targets).numpy()
+        
+        # Clip extreme values to prevent overflow
+        depth_preds = np.clip(depth_preds, -10, 10)
+        depth_targets = np.clip(depth_targets, -10, 10)
         coord_preds = torch.cat(all_coord_preds).numpy()
         coord_targets = torch.cat(all_coord_targets).numpy()
         
@@ -1139,11 +1112,6 @@ def predict_coordinates(model, feature_scaler, coord_scaler, feature_names,
     features = np.array([sample_data[name] for name in feature_names]).reshape(1, -1)
     features_scaled = feature_scaler.transform(features)
     
-    # Pad if necessary
-    if features_scaled.shape[1] % 3 != 0:
-        pad_size = 3 - (features_scaled.shape[1] % 3)
-        features_scaled = np.pad(features_scaled, ((0, 0), (0, pad_size)), mode='constant')
-    
     features_tensor = torch.FloatTensor(features_scaled).to(device)
     
     with torch.no_grad():
@@ -1194,15 +1162,15 @@ if __name__ == "__main__":
     
     if result is not None:
         model, feature_scaler, coord_scaler, feature_names = result
-        print("\n🎉 Enhanced AI2-THOR coordinate estimation model training completed successfully!")
-        print("✨ Key improvements implemented:")
+        print("\nEnhanced AI2-THOR coordinate estimation model training completed successfully!")
+        print("Key improvements implemented:")
         print("   • Enhanced geometric feature engineering (25+ new features)")
         print("   • Multi-scale attention architecture with feature grouping")
         print("   • Data quality filtering and augmentation")
         print("   • Uncertainty estimation for prediction confidence")
         print("   • Balanced sampling and curriculum learning")
-        print("\n📁 Model saved as 'enhanced_ai2thor_world_coordinate_model.pth'")
-        print("📊 Training plots saved as 'enhanced_ai2thor_training_evaluation.png'")
-        print("\nReady for inference on real-world images! 🚀")
+        print("\nModel saved as 'enhanced_ai2thor_world_coordinate_model.pth'")
+        print("Training plots saved as 'enhanced_ai2thor_training_evaluation.png'")
+        print("\nReady for inference on real-world images!")
     else:
-        print("\n❌ Training failed. Please check your dataset and try again.")
+        print("\nTraining failed. Please check your dataset and try again.")
