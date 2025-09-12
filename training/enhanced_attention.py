@@ -186,12 +186,12 @@ class EnhancedGeometricEstimator(nn.Module):
             self.coord_mean_head = nn.Sequential(
                 nn.Linear(hidden_dim, hidden_dim // 2),
                 nn.ReLU(),
-                nn.Linear(hidden_dim // 2, 3)
+                nn.Linear(hidden_dim // 2, 4)
             )
             self.coord_var_head = nn.Sequential(
                 nn.Linear(hidden_dim, hidden_dim // 2),
                 nn.ReLU(),
-                nn.Linear(hidden_dim // 2, 3),
+                nn.Linear(hidden_dim // 2, 4),
                 nn.Softplus()
             )
         else:
@@ -205,7 +205,7 @@ class EnhancedGeometricEstimator(nn.Module):
             self.coord_head = nn.Sequential(
                 nn.Linear(hidden_dim, hidden_dim // 2),
                 nn.ReLU(),
-                nn.Linear(hidden_dim // 2, 3)
+                nn.Linear(hidden_dim // 2, 4)
             )
         
     def forward(self, x, return_uncertainty=None):
@@ -475,7 +475,6 @@ def filter_high_quality_samples_no_bbox(df):
         return df
     
     print(f"Final dataset size: {len(df)} ({len(df)/initial_count:.1%} retained)")
-    print("\nIMPORTANT: Training will proceed, but you should fix the bounding box data issue!")
     return df.reset_index(drop=True)
 
 
@@ -727,7 +726,7 @@ class EnhancedAI2ThorTrainer:
                     'optimizer_state_dict': self.optimizer.state_dict(),
                     'best_val_loss': self.best_val_loss,
                     'metrics': val_metrics
-                }, 'best_enhanced_ai2thor_model.pth')
+                }, 'best_enhanced_ai2thor_model_final91225.pth')
             else:
                 self.patience_counter += 1
             
@@ -746,7 +745,7 @@ class EnhancedAI2ThorTrainer:
         return self.model
 
 
-def train_enhanced_ai2thor_model(dataset_path="ai2thor_coordinate_dataset.csv", 
+def train_enhanced_ai2thor_model(dataset_path="ai2thor_coordinate_dataset_final.csv", 
                                 test_size=0.2, 
                                 batch_size=32, 
                                 epochs=200,
@@ -815,7 +814,9 @@ def train_enhanced_ai2thor_model(dataset_path="ai2thor_coordinate_dataset.csv",
     
     X = df[feature_columns].values
     y_depth = np.log1p(df['relative_depth'].values)
-    y_coords = df[['world_x', 'world_y', 'world_z']].values
+
+    df['world_y_base'] = df['target_base_y']
+    y_coords = df[['world_x', 'world_y', 'world_z', 'target_rot_y']].values
     
     print(f"Enhanced feature dimensions: {X.shape[1]}")
     print(f"Feature columns: {len(feature_columns)}")
@@ -905,8 +906,8 @@ def train_enhanced_ai2thor_model(dataset_path="ai2thor_coordinate_dataset.csv",
         'training_metrics': trainer.val_metrics[-1] if trainer.val_metrics else None
     }
     
-    torch.save(final_checkpoint, 'enhanced_ai2thor_world_coordinate_model.pth')
-    print("Enhanced model saved as 'enhanced_ai2thor_world_coordinate_model.pth'")
+    torch.save(final_checkpoint, 'best_enhanced_ai2thor_model_final91225.pth')
+    print("Enhanced model saved as 'best_enhanced_ai2thor_model_final91225.pth'")
     
     # Generate comprehensive training plots
     create_enhanced_training_plots(trainer, coord_scaler, val_dataset, device, use_uncertainty)
@@ -1067,8 +1068,8 @@ def create_enhanced_training_plots(trainer, coord_scaler, val_dataset, device, u
         ax_3d.legend()
     
     plt.tight_layout()
-    plt.savefig('enhanced_ai2thor_training_evaluation.png', dpi=150, bbox_inches='tight')
-    print("Enhanced training plots saved as 'enhanced_ai2thor_training_evaluation.png'")
+    plt.savefig('enhanced_ai2thor_training_evaluation_final.png', dpi=150, bbox_inches='tight')
+    print("Enhanced training plots saved as 'enhanced_ai2thor_training_evaluation_final.png'")
     
     # Print comprehensive final metrics
     final_metrics = trainer.val_metrics[-1]
@@ -1153,7 +1154,7 @@ if __name__ == "__main__":
     print("====================================================")
     
     result = train_enhanced_ai2thor_model(
-        dataset_path="ai2thor_coordinate_dataset.csv",
+        dataset_path="ai2thor_coordinate_dataset_final.csv",
         test_size=0.2,
         batch_size=32,
         epochs=200,
@@ -1169,8 +1170,8 @@ if __name__ == "__main__":
         print("   • Data quality filtering and augmentation")
         print("   • Uncertainty estimation for prediction confidence")
         print("   • Balanced sampling and curriculum learning")
-        print("\nModel saved as 'enhanced_ai2thor_world_coordinate_model.pth'")
-        print("Training plots saved as 'enhanced_ai2thor_training_evaluation.png'")
+        print("\nModel saved as 'best_enhanced_ai2thor_model_final91225.pth'")
+        print("Training plots saved as 'enhanced_ai2thor_training_evaluation_final.png'")
         print("\nReady for inference on real-world images!")
     else:
         print("\nTraining failed. Please check your dataset and try again.")
