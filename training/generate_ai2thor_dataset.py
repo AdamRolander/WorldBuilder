@@ -6,9 +6,9 @@ from tqdm import tqdm
 import math
 
 # --- Configuration ---
-SCENES = [f"FloorPlan{i}" for i in range(1, 31)] 
+SCENES = [f"FloorPlan{i}" for i in range(1, 5)] 
 MAX_SAMPLES_PER_SCENE = 400 
-OUTPUT_FILENAME = "ai2thor_coordinate_dataset.csv"
+OUTPUT_FILENAME = "ai2thor_coordinate_dataset_og.csv"
 OCCLUSION_THRESHOLD = 0.8
 
 def get_bbox_features(obj_meta, screen_width, screen_height):
