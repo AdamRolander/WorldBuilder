@@ -13,15 +13,19 @@ import math
 from scipy.spatial.transform import Rotation as R
 import random
 from tqdm import tqdm
+import seaborn as sns
+from datetime import datetime
+import os
 
 
 class EnhancedAI2ThorDataset(Dataset):
     """Enhanced dataset with data augmentation capabilities."""
-    def __init__(self, features, relative_depth_targets, world_coord_targets, 
+    def __init__(self, features, relative_depth_targets, world_coord_targets, angle_targets,
                  augment=False, noise_std=0.01):
         self.features = torch.FloatTensor(features)
         self.relative_depth_targets = torch.FloatTensor(relative_depth_targets)
         self.world_coord_targets = torch.FloatTensor(world_coord_targets)
+        self.angle_targets = torch.FloatTensor(angle_targets)
         self.augment = augment
         self.noise_std = noise_std
     
@@ -38,7 +42,8 @@ class EnhancedAI2ThorDataset(Dataset):
         
         return (features, 
                 self.relative_depth_targets[idx], 
-                self.world_coord_targets[idx])
+                self.world_coord_targets[idx],
+                self.angle_targets[idx])
 
 
 class MultiScaleAttentionBlock(nn.Module):
@@ -125,12 +130,14 @@ class MultiScaleAttentionBlock(nn.Module):
 
 class UncertaintyLoss(nn.Module):
     """Loss function that incorporates prediction uncertainty with better numerical stability."""
-    def __init__(self, depth_weight=0.3, coord_weight=0.7):
+    def __init__(self, depth_weight=0.2, coord_weight=0.5, angle_weight=0.3):
         super().__init__()
         self.depth_weight = depth_weight
         self.coord_weight = coord_weight
+        self.angle_weight = angle_weight
         
-    def forward(self, depth_mean, depth_var, coord_mean, coord_var, depth_target, coord_target):
+    def forward(self, depth_mean, depth_var, coord_mean, coord_var, angle_mean, angle_var,
+                depth_target, coord_target, angle_target):
         # More numerically stable uncertainty loss
         depth_loss = 0.5 * (torch.log(depth_var + 1e-6) + 
                            (depth_target - depth_mean)**2 / (depth_var + 1e-6))
@@ -138,19 +145,25 @@ class UncertaintyLoss(nn.Module):
         coord_loss = 0.5 * torch.sum(torch.log(coord_var + 1e-6) + 
                                    (coord_target - coord_mean)**2 / (coord_var + 1e-6), dim=1)
         
+        # Angular loss with circular distance
+        angle_diff = torch.atan2(torch.sin(angle_target - angle_mean), torch.cos(angle_target - angle_mean))
+        angle_loss = 0.5 * (torch.log(angle_var + 1e-6) + angle_diff**2 / (angle_var + 1e-6))
+        
         # Apply loss weights and add regularization
         total_loss = (self.depth_weight * depth_loss.mean() + 
-                     self.coord_weight * coord_loss.mean())
+                     self.coord_weight * coord_loss.mean() +
+                     self.angle_weight * angle_loss.mean())
         
         # Add small regularization to prevent variance collapse
         var_reg = 1e-4 * (torch.mean(1.0 / (depth_var + 1e-6)) + 
-                         torch.mean(1.0 / (coord_var + 1e-6)))
+                         torch.mean(1.0 / (coord_var + 1e-6)) +
+                         torch.mean(1.0 / (angle_var + 1e-6)))
         
         return total_loss + var_reg
 
 
 class EnhancedGeometricEstimator(nn.Module):
-    """Enhanced model with multi-scale attention and uncertainty estimation."""
+    """Enhanced model with multi-scale attention and uncertainty estimation including angle prediction."""
     def __init__(self, input_dim, hidden_dim=512, dropout_rate=0.2, num_heads=8, use_uncertainty=True):
         super().__init__()
         
@@ -186,12 +199,25 @@ class EnhancedGeometricEstimator(nn.Module):
             self.coord_mean_head = nn.Sequential(
                 nn.Linear(hidden_dim, hidden_dim // 2),
                 nn.ReLU(),
-                nn.Linear(hidden_dim // 2, 4)
+                nn.Linear(hidden_dim // 2, 3)  # Changed from 4 to 3 for X,Y,Z
             )
             self.coord_var_head = nn.Sequential(
                 nn.Linear(hidden_dim, hidden_dim // 2),
                 nn.ReLU(),
-                nn.Linear(hidden_dim // 2, 4),
+                nn.Linear(hidden_dim // 2, 3),  # Changed from 4 to 3
+                nn.Softplus()
+            )
+            
+            # Add angle prediction heads
+            self.angle_mean_head = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim // 2),
+                nn.ReLU(),
+                nn.Linear(hidden_dim // 2, 1)
+            )
+            self.angle_var_head = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim // 2),
+                nn.ReLU(),
+                nn.Linear(hidden_dim // 2, 1),
                 nn.Softplus()
             )
         else:
@@ -205,7 +231,13 @@ class EnhancedGeometricEstimator(nn.Module):
             self.coord_head = nn.Sequential(
                 nn.Linear(hidden_dim, hidden_dim // 2),
                 nn.ReLU(),
-                nn.Linear(hidden_dim // 2, 4)
+                nn.Linear(hidden_dim // 2, 3)  # Changed from 4 to 3
+            )
+            
+            self.angle_head = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim // 2),
+                nn.ReLU(),
+                nn.Linear(hidden_dim // 2, 1)
             )
         
     def forward(self, x, return_uncertainty=None):
@@ -228,18 +260,30 @@ class EnhancedGeometricEstimator(nn.Module):
             # Uncertainty predictions
             depth_mean = self.depth_mean_head(features).squeeze(-1)
             coord_mean = self.coord_mean_head(features)
+            angle_mean = self.angle_mean_head(features).squeeze(-1)
             depth_var = self.depth_var_head(features).squeeze(-1)
             coord_var = self.coord_var_head(features)
-            return depth_mean, coord_mean, depth_var, coord_var
+            angle_var = self.angle_var_head(features).squeeze(-1)
+            return depth_mean, coord_mean, angle_mean, depth_var, coord_var, angle_var
         else:
             # Standard predictions
             if self.use_uncertainty:
                 depth_pred = self.depth_mean_head(features).squeeze(-1)
                 coord_pred = self.coord_mean_head(features)
+                angle_pred = self.angle_mean_head(features).squeeze(-1)
             else:
                 depth_pred = self.depth_head(features).squeeze(-1)
                 coord_pred = self.coord_head(features)
-            return depth_pred, coord_pred
+                angle_pred = self.angle_head(features).squeeze(-1)
+            return depth_pred, coord_pred, angle_pred
+
+
+def calculate_angle_error(pred_angles, true_angles):
+    """Calculate circular angle error in degrees."""
+    diff = pred_angles - true_angles
+    # Normalize to [-pi, pi]
+    diff = torch.atan2(torch.sin(diff), torch.cos(diff))
+    return torch.abs(diff) * 180.0 / np.pi
 
 
 def calculate_unprojection(row, img_width=300, img_height=300):
@@ -330,39 +374,6 @@ def calculate_comprehensive_geometric_features(row, img_width=300, img_height=30
     })
     
     return features
-
-
-def calculate_unprojection_with_center(row, bbox_center_x, bbox_center_y, img_width=300, img_height=300):
-    """Calculate unprojection with specified bbox center coordinates."""
-    # Get Camera Intrinsics (from FoV)
-    fov_rad = row['field_of_view'] * (math.pi / 180.0)
-    focal_length = (img_width / 2.0) / math.tan(fov_rad / 2.0)
-    cx = img_width / 2.0
-    cy = img_height / 2.0
-    K_inv = np.linalg.inv(np.array([
-        [focal_length, 0, cx],
-        [0, focal_length, cy],
-        [0, 0, 1]
-    ]))
-
-    # Get 2D Pixel Coordinates and Depth
-    px = bbox_center_x * img_width
-    py = bbox_center_y * img_height
-    depth = row['dist_to_ref']
-    
-    # Unproject from 2D to 3D (in Camera's coordinate system)
-    pixel_coords = np.array([px, py, 1])
-    camera_coords = K_inv @ pixel_coords * depth
-    
-    # Get Camera Extrinsics (Position and Rotation)
-    rotation = R.from_euler('xyz', [row['agent_rot_x'], row['agent_rot_y'], row['agent_rot_z']], degrees=True)
-    rotation_matrix = rotation.as_matrix()
-    translation_vector = np.array([row['agent_pos_x'], row['agent_pos_y'], row['agent_pos_z']])
-
-    # Transform from Camera Coordinates to World Coordinates
-    world_coords = rotation_matrix @ camera_coords + translation_vector
-    
-    return world_coords[0], world_coords[1], world_coords[2]
 
 
 def analyze_dataset_structure(df):
@@ -478,40 +489,8 @@ def filter_high_quality_samples_no_bbox(df):
     return df.reset_index(drop=True)
 
 
-class BalancedSampler:
-    """Custom sampler to balance different types of scenes/distances."""
-    def __init__(self, dataset_df):
-        self.df = dataset_df
-        self.depth_bins = self._create_depth_bins()
-        
-    def _create_depth_bins(self):
-        """Create balanced depth bins."""
-        depth_values = self.df['relative_depth'].values
-        bins = np.quantile(depth_values, [0, 0.2, 0.4, 0.6, 0.8, 1.0])
-        bin_indices = np.digitize(depth_values, bins) - 1
-        return bin_indices
-    
-    def get_balanced_indices(self, n_samples):
-        """Get balanced sample indices."""
-        samples_per_bin = n_samples // 5
-        balanced_indices = []
-        
-        for bin_idx in range(5):
-            bin_mask = self.depth_bins == bin_idx
-            bin_indices = np.where(bin_mask)[0]
-            
-            if len(bin_indices) >= samples_per_bin:
-                selected = np.random.choice(bin_indices, samples_per_bin, replace=False)
-            else:
-                selected = np.random.choice(bin_indices, samples_per_bin, replace=True)
-            
-            balanced_indices.extend(selected)
-        
-        return np.array(balanced_indices)
-
-
 class EnhancedAI2ThorTrainer:
-    """Enhanced trainer with curriculum learning and uncertainty estimation."""
+    """Enhanced trainer with curriculum learning and uncertainty estimation including angle prediction."""
     def __init__(self, model, train_loader, val_loader, coord_scaler, device='cpu', use_uncertainty=True):
         self.model = model.to(device)
         self.train_loader = train_loader
@@ -522,26 +501,27 @@ class EnhancedAI2ThorTrainer:
         
         # Loss functions
         if use_uncertainty:
-            self.criterion = UncertaintyLoss(depth_weight=0.3, coord_weight=0.7)
+            self.criterion = UncertaintyLoss(depth_weight=0.2, coord_weight=0.5, angle_weight=0.3)
         else:
             self.depth_criterion = nn.MSELoss()
             self.coord_criterion = nn.MSELoss()
+            self.angle_criterion = nn.MSELoss()
         
         # Optimizer
         self.optimizer = torch.optim.AdamW(
             model.parameters(), 
-            lr=0.0005,  # Much lower learning rate
-            weight_decay=0.001,  # Lower weight decay
+            lr=0.0005,
+            weight_decay=0.001,
             betas=(0.9, 0.999),
             eps=1e-8
         )
 
-        # More aggressive learning rate scheduler
+        # Learning rate scheduler
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer, 
             mode='min', 
-            factor=0.3,  # Reduce LR more aggressively
-            patience=5,   # Reduce patience
+            factor=0.3,
+            patience=5,
             min_lr=1e-7
         )
         
@@ -554,42 +534,58 @@ class EnhancedAI2ThorTrainer:
         self.val_losses = []
         self.val_metrics = []
         
+        # Storage for predictions (for final evaluation)
+        self.final_predictions = None
+        self.final_ground_truths = None
+        
     def train_epoch(self):
         self.model.train()
         total_loss = 0
         total_samples = 0
         
-        for batch_features, batch_depth_targets, batch_coord_targets in self.train_loader:
+        for batch_features, batch_depth_targets, batch_coord_targets, batch_angle_targets in self.train_loader:
             batch_features = batch_features.to(self.device)
             batch_depth_targets = batch_depth_targets.to(self.device)
             batch_coord_targets = batch_coord_targets.to(self.device)
+            batch_angle_targets = batch_angle_targets.to(self.device)
             
             # Check for invalid targets
-            if torch.any(torch.isnan(batch_depth_targets)) or torch.any(torch.isnan(batch_coord_targets)):
+            if (torch.any(torch.isnan(batch_depth_targets)) or 
+                torch.any(torch.isnan(batch_coord_targets)) or
+                torch.any(torch.isnan(batch_angle_targets))):
                 continue
                 
             self.optimizer.zero_grad()
             
             try:
                 if self.use_uncertainty:
-                    depth_mean, coord_mean, depth_var, coord_var = self.model(batch_features, return_uncertainty=True)
+                    depth_mean, coord_mean, angle_mean, depth_var, coord_var, angle_var = self.model(batch_features, return_uncertainty=True)
                     
                     # Clamp predictions to reasonable ranges
                     depth_mean = torch.clamp(depth_mean, -10, 10)
                     coord_mean = torch.clamp(coord_mean, -10, 10)
+                    angle_mean = torch.clamp(angle_mean, -np.pi, np.pi)
                     depth_var = torch.clamp(depth_var, 1e-6, 10)
                     coord_var = torch.clamp(coord_var, 1e-6, 10)
+                    angle_var = torch.clamp(angle_var, 1e-6, 10)
                     
-                    loss = self.criterion(depth_mean, depth_var, coord_mean, coord_var, 
-                                        batch_depth_targets, batch_coord_targets)
+                    loss = self.criterion(depth_mean, depth_var, coord_mean, coord_var, angle_mean, angle_var,
+                                        batch_depth_targets, batch_coord_targets, batch_angle_targets)
                 else:
-                    depth_pred, coord_pred = self.model(batch_features)
+                    depth_pred, coord_pred, angle_pred = self.model(batch_features)
                     depth_pred = torch.clamp(depth_pred, -10, 10)
                     coord_pred = torch.clamp(coord_pred, -10, 10)
+                    angle_pred = torch.clamp(angle_pred, -np.pi, np.pi)
                     
                     depth_loss = self.depth_criterion(depth_pred, batch_depth_targets)
                     coord_loss = self.coord_criterion(coord_pred, batch_coord_targets)
-                    loss = 0.3 * depth_loss + 0.7 * coord_loss
+                    
+                    # Circular angle loss
+                    angle_diff = torch.atan2(torch.sin(batch_angle_targets - angle_pred), 
+                                           torch.cos(batch_angle_targets - angle_pred))
+                    angle_loss = self.angle_criterion(angle_diff, torch.zeros_like(angle_diff))
+                    
+                    loss = 0.2 * depth_loss + 0.5 * coord_loss + 0.3 * angle_loss
                 
                 # Check for invalid loss
                 if torch.isnan(loss) or torch.isinf(loss):
@@ -597,7 +593,7 @@ class EnhancedAI2ThorTrainer:
                     
                 loss.backward()
                 
-                # More aggressive gradient clipping
+                # Gradient clipping
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5)
                 
                 self.optimizer.step()
@@ -623,23 +619,32 @@ class EnhancedAI2ThorTrainer:
         all_depth_targets = []
         all_coord_preds = []
         all_coord_targets = []
+        all_angle_preds = []
+        all_angle_targets = []
         
         with torch.no_grad():
-            for batch_features, batch_depth_targets, batch_coord_targets in self.val_loader:
+            for batch_features, batch_depth_targets, batch_coord_targets, batch_angle_targets in self.val_loader:
                 batch_features = batch_features.to(self.device)
                 batch_depth_targets = batch_depth_targets.to(self.device)
                 batch_coord_targets = batch_coord_targets.to(self.device)
+                batch_angle_targets = batch_angle_targets.to(self.device)
                 
                 if self.use_uncertainty:
-                    depth_mean, coord_mean, depth_var, coord_var = self.model(batch_features, return_uncertainty=True)
-                    loss = self.criterion(depth_mean, depth_var, coord_mean, coord_var, 
-                                        batch_depth_targets, batch_coord_targets)
-                    depth_pred, coord_pred = depth_mean, coord_mean
+                    depth_mean, coord_mean, angle_mean, depth_var, coord_var, angle_var = self.model(batch_features, return_uncertainty=True)
+                    loss = self.criterion(depth_mean, depth_var, coord_mean, coord_var, angle_mean, angle_var,
+                                        batch_depth_targets, batch_coord_targets, batch_angle_targets)
+                    depth_pred, coord_pred, angle_pred = depth_mean, coord_mean, angle_mean
                 else:
-                    depth_pred, coord_pred = self.model(batch_features)
+                    depth_pred, coord_pred, angle_pred = self.model(batch_features)
                     depth_loss = self.depth_criterion(depth_pred, batch_depth_targets)
                     coord_loss = self.coord_criterion(coord_pred, batch_coord_targets)
-                    loss = 0.3 * depth_loss + 0.7 * coord_loss
+                    
+                    # Circular angle loss
+                    angle_diff = torch.atan2(torch.sin(batch_angle_targets - angle_pred), 
+                                           torch.cos(batch_angle_targets - angle_pred))
+                    angle_loss = self.angle_criterion(angle_diff, torch.zeros_like(angle_diff))
+                    
+                    loss = 0.2 * depth_loss + 0.5 * coord_loss + 0.3 * angle_loss
                 
                 batch_size = batch_features.size(0)
                 total_loss += loss.item() * batch_size
@@ -650,6 +655,8 @@ class EnhancedAI2ThorTrainer:
                 all_depth_targets.append(batch_depth_targets.cpu())
                 all_coord_preds.append(coord_pred.cpu())
                 all_coord_targets.append(batch_coord_targets.cpu())
+                all_angle_preds.append(angle_pred.cpu())
+                all_angle_targets.append(batch_angle_targets.cpu())
         
         avg_loss = total_loss / total_samples
         
@@ -671,16 +678,22 @@ class EnhancedAI2ThorTrainer:
         
         all_coord_preds = torch.cat(all_coord_preds).numpy()
         all_coord_targets = torch.cat(all_coord_targets).numpy()
+        all_angle_preds = torch.cat(all_angle_preds).numpy()
+        all_angle_targets = torch.cat(all_angle_targets).numpy()
         
         # Unscale coordinates
         coord_preds_unscaled = self.coord_scaler.inverse_transform(all_coord_preds)
         coord_targets_unscaled = self.coord_scaler.inverse_transform(all_coord_targets)
+        
+        # Calculate angle errors (in degrees)
+        angle_errors = calculate_angle_error(torch.tensor(all_angle_preds), torch.tensor(all_angle_targets)).numpy()
         
         # Calculate R² and MAE
         depth_r2 = r2_score(all_depth_targets, all_depth_preds)
         depth_mae = mean_absolute_error(all_depth_targets, all_depth_preds)
         coord_r2 = r2_score(coord_targets_unscaled, coord_preds_unscaled)
         coord_mae = mean_absolute_error(coord_targets_unscaled, coord_preds_unscaled)
+        angle_mae = np.mean(angle_errors)
         
         # Per-axis metrics
         axis_names = ['X', 'Y', 'Z']
@@ -697,8 +710,81 @@ class EnhancedAI2ThorTrainer:
             'coord_r2': coord_r2,
             'depth_mae': depth_mae,
             'coord_mae': coord_mae,
+            'angle_mae': angle_mae,
             **axis_metrics
         }
+    
+    def store_final_predictions(self):
+        """Store final predictions and ground truths for evaluation."""
+        self.model.eval()
+        
+        all_predictions = {
+            'depth_pred': [],
+            'coord_pred': [],
+            'angle_pred': [],
+            'depth_target': [],
+            'coord_target': [],
+            'angle_target': [],
+            'depth_uncertainty': [],
+            'coord_uncertainty': [],
+            'angle_uncertainty': []
+        }
+        
+        with torch.no_grad():
+            for batch_features, batch_depth_targets, batch_coord_targets, batch_angle_targets in self.val_loader:
+                batch_features = batch_features.to(self.device)
+                batch_depth_targets = batch_depth_targets.to(self.device)
+                batch_coord_targets = batch_coord_targets.to(self.device)
+                batch_angle_targets = batch_angle_targets.to(self.device)
+                
+                if self.use_uncertainty:
+                    depth_mean, coord_mean, angle_mean, depth_var, coord_var, angle_var = self.model(batch_features, return_uncertainty=True)
+                    all_predictions['depth_uncertainty'].append(depth_var.cpu().numpy())
+                    all_predictions['coord_uncertainty'].append(coord_var.cpu().numpy())
+                    all_predictions['angle_uncertainty'].append(angle_var.cpu().numpy())
+                    depth_pred, coord_pred, angle_pred = depth_mean, coord_mean, angle_mean
+                else:
+                    depth_pred, coord_pred, angle_pred = self.model(batch_features)
+                    # Fill with zeros for uncertainty if not using uncertainty
+                    all_predictions['depth_uncertainty'].append(np.zeros_like(depth_pred.cpu().numpy()))
+                    all_predictions['coord_uncertainty'].append(np.zeros_like(coord_pred.cpu().numpy()))
+                    all_predictions['angle_uncertainty'].append(np.zeros_like(angle_pred.cpu().numpy()))
+                
+                # Store predictions and targets
+                all_predictions['depth_pred'].append(depth_pred.cpu().numpy())
+                all_predictions['coord_pred'].append(coord_pred.cpu().numpy())
+                all_predictions['angle_pred'].append(angle_pred.cpu().numpy())
+                all_predictions['depth_target'].append(batch_depth_targets.cpu().numpy())
+                all_predictions['coord_target'].append(batch_coord_targets.cpu().numpy())
+                all_predictions['angle_target'].append(batch_angle_targets.cpu().numpy())
+        
+        # Concatenate all batches
+        for key in all_predictions:
+            all_predictions[key] = np.concatenate(all_predictions[key], axis=0)
+        
+        # Convert depth predictions from log space
+        all_predictions['depth_pred'] = np.expm1(np.clip(all_predictions['depth_pred'], -10, 10))
+        all_predictions['depth_target'] = np.expm1(np.clip(all_predictions['depth_target'], -10, 10))
+        
+        # Unscale coordinates
+        all_predictions['coord_pred'] = self.coord_scaler.inverse_transform(all_predictions['coord_pred'])
+        all_predictions['coord_target'] = self.coord_scaler.inverse_transform(all_predictions['coord_target'])
+        
+        # Convert angles to degrees for easier interpretation
+        all_predictions['angle_pred_deg'] = np.rad2deg(all_predictions['angle_pred'])
+        all_predictions['angle_target_deg'] = np.rad2deg(all_predictions['angle_target'])
+        
+        # Calculate errors
+        all_predictions['depth_error'] = np.abs(all_predictions['depth_pred'] - all_predictions['depth_target'])
+        all_predictions['coord_error'] = np.linalg.norm(all_predictions['coord_pred'] - all_predictions['coord_target'], axis=1)
+        
+        # Calculate angle error (circular distance in degrees)
+        angle_diff = all_predictions['angle_target'] - all_predictions['angle_pred']
+        angle_diff = np.arctan2(np.sin(angle_diff), np.cos(angle_diff))
+        all_predictions['angle_error_deg'] = np.abs(angle_diff) * 180.0 / np.pi
+        
+        self.final_predictions = all_predictions
+        return all_predictions
     
     def train(self, epochs=200, early_stopping_patience=25):
         print(f"Starting enhanced AI2-THOR model training for {epochs} epochs...")
@@ -726,7 +812,7 @@ class EnhancedAI2ThorTrainer:
                     'optimizer_state_dict': self.optimizer.state_dict(),
                     'best_val_loss': self.best_val_loss,
                     'metrics': val_metrics
-                }, 'best_enhanced_ai2thor_model_final91225.pth')
+                }, 'best_enhanced_ai2thor_model_with_angles.pth')
             else:
                 self.patience_counter += 1
             
@@ -734,7 +820,7 @@ class EnhancedAI2ThorTrainer:
                 print(f"Epoch {epoch:3d} | Train: {train_loss:.4f} | "
                       f"Val: {val_loss:.4f} | "
                       f"R²: D={val_metrics['depth_r2']:.3f} C={val_metrics['coord_r2']:.3f} | "
-                      f"MAE: C={val_metrics['coord_mae']:.3f}m")
+                      f"MAE: C={val_metrics['coord_mae']:.3f}m A={val_metrics['angle_mae']:.1f}°")
             
             if self.patience_counter >= early_stopping_patience:
                 print(f"Early stopping at epoch {epoch}")
@@ -742,436 +828,719 @@ class EnhancedAI2ThorTrainer:
         
         print("Training completed!")
         print(f"Best validation loss: {self.best_val_loss:.6f}")
+        
+        # Store final predictions for evaluation
+        print("Storing final predictions for evaluation...")
+        self.store_final_predictions()
+        
         return self.model
 
 
-def train_enhanced_ai2thor_model(dataset_path="ai2thor_coordinate_dataset_final.csv", 
-                                test_size=0.2, 
-                                batch_size=32, 
-                                epochs=200,
-                                use_uncertainty=True):
-    """Enhanced training function with all improvements."""
+def save_predictions_to_csv(trainer, dataset_df, output_path="ai2thor_predictions_and_targets.csv"):
+    """Save predictions and ground truths with scene information to CSV."""
+    predictions = trainer.final_predictions
     
-    print("Loading and enhancing AI2-THOR dataset...")
-    try:
-        df = pd.read_csv(dataset_path)
-        # Add this right after loading the CSV in train_enhanced_ai2thor_model:
-        print("\nDEBUG: Checking dataset quality...")
-        print(f"Non-zero target bboxes: {(df['target_bbox_width'] > 0).sum()}/{len(df)}")
-        print(f"Non-zero ref bboxes: {(df['ref_bbox_width'] > 0).sum()}/{len(df)}")
-        print(f"Sample bbox values: {df[['target_bbox_width', 'target_bbox_height']].head()}")
-    except FileNotFoundError:
-        print(f"Error: Dataset file '{dataset_path}' not found!")
-        return None
-    except Exception as e:
-        print(f"Error loading dataset: {e}")
-        return None
-    
-    if len(df) == 0:
-        print("Dataset is empty!")
-        return None
-    
-    print(f"Initial dataset loaded: {len(df)} samples")
-    
-    # Check for required columns
-    required_columns = ['relative_depth', 'world_x', 'world_y', 'world_z', 'target_depth_mean', 
-                       'target_visibility_ratio', 'ref_visibility_ratio', 'target_bbox_width', 
-                       'target_bbox_height', 'ref_bbox_width', 'ref_bbox_height', 'dist_to_ref']
-    
-    missing_columns = [col for col in required_columns if col not in df.columns]
-    if missing_columns:
-        print(f"Error: Missing required columns: {missing_columns}")
-        return None
-    
-    # Apply data quality filtering (without bbox filtering)
-    df = filter_high_quality_samples_no_bbox(df)
-    
-    if len(df) == 0:
-        print("Error: No samples remaining after filtering!")
-        return None
-    
-    # Calculate enhanced geometric features (with bbox workaround)
-    print("Calculating comprehensive geometric features...")
-    try:
-        enhanced_features = df.apply(calculate_comprehensive_geometric_features, axis=1, result_type='expand')
+    # Create DataFrame with predictions and scene information
+    results_df = pd.DataFrame({
+        # Predictions
+        'pred_depth': predictions['depth_pred'],
+        'pred_x': predictions['coord_pred'][:, 0],
+        'pred_y': predictions['coord_pred'][:, 1], 
+        'pred_z': predictions['coord_pred'][:, 2],
+        'pred_angle_deg': predictions['angle_pred_deg'],
         
-        # Add enhanced features to dataframe
-        for col in enhanced_features.columns:
-            df[f'enhanced_{col}'] = enhanced_features[col]
+        # Ground truth
+        'true_depth': predictions['depth_target'],
+        'true_x': predictions['coord_target'][:, 0],
+        'true_y': predictions['coord_target'][:, 1],
+        'true_z': predictions['coord_target'][:, 2],
+        'true_angle_deg': predictions['angle_target_deg'],
         
-        print(f"Enhanced geometric features created: {len(enhanced_features.columns)} new features")
-    except Exception as e:
-        print(f"Error calculating enhanced features: {e}")
-        return None
+        # Errors
+        'depth_error': predictions['depth_error'],
+        'coord_error': predictions['coord_error'],
+        'angle_error_deg': predictions['angle_error_deg'],
+        
+        # Uncertainties (if available)
+        'depth_uncertainty': predictions['depth_uncertainty'],
+        'coord_uncertainty_x': predictions['coord_uncertainty'][:, 0] if len(predictions['coord_uncertainty'].shape) > 1 else predictions['coord_uncertainty'],
+        'coord_uncertainty_y': predictions['coord_uncertainty'][:, 1] if len(predictions['coord_uncertainty'].shape) > 1 else predictions['coord_uncertainty'],
+        'coord_uncertainty_z': predictions['coord_uncertainty'][:, 2] if len(predictions['coord_uncertainty'].shape) > 1 else predictions['coord_uncertainty'],
+        'angle_uncertainty': predictions['angle_uncertainty'],
+    })
+    
+    # Add scene information if available (from validation set)
+    validation_size = len(predictions['depth_pred'])
+    total_size = len(dataset_df)
+    validation_start_idx = int(0.8 * total_size)  # Assuming 80/20 split
+    
+    if validation_start_idx + validation_size <= total_size:
+        scene_info = dataset_df.iloc[validation_start_idx:validation_start_idx + validation_size]
+        
+        # Add scene columns
+        scene_columns = ['scene_name', 'scene_idx', 'pose_idx', 'target_object_type', 
+                        'ref_object_type', 'field_of_view', 'camera_horizon']
+        
+        for col in scene_columns:
+            if col in scene_info.columns:
+                results_df[col] = scene_info[col].values
+    
+    # Save to CSV
+    results_df.to_csv(output_path, index=False)
+    print(f"Predictions and targets saved to {output_path}")
+    
+    return results_df
 
-    # Update feature column selection to include new depth features
-    excluded_cols = ['relative_depth', 'world_x', 'world_y', 'world_z', 
-                    'scene_name', 'scene_idx', 'pose_idx', 'target_object_type', 
-                    'ref_object_type', 'target_object_id', 'ref_object_id']
 
-    feature_columns = [col for col in df.columns if col not in excluded_cols and 
-                    not col.startswith('target_object') and not col.startswith('ref_object')]
+def evaluate_worst_predictions(predictions_df, output_dir="evaluation_results"):
+    """Analyze worst predictions and identify problematic scenes."""
     
-    X = df[feature_columns].values
-    y_depth = np.log1p(df['relative_depth'].values)
-
-    df['world_y_base'] = df['target_base_y']
-    y_coords = df[['world_x', 'world_y', 'world_z', 'target_rot_y']].values
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
     
-    print(f"Enhanced feature dimensions: {X.shape[1]}")
-    print(f"Feature columns: {len(feature_columns)}")
-    
-    # Check for NaN values
-    if np.any(np.isnan(X)) or np.any(np.isnan(y_depth)) or np.any(np.isnan(y_coords)):
-        print("Warning: NaN values detected in features or targets. Removing affected samples...")
-        valid_mask = ~(np.any(np.isnan(X), axis=1) | np.isnan(y_depth) | np.any(np.isnan(y_coords), axis=1))
-        X = X[valid_mask]
-        y_depth = y_depth[valid_mask]
-        y_coords = y_coords[valid_mask]
-        print(f"Samples after NaN removal: {len(X)}")
-    
-    if len(X) == 0:
-        print("Error: No valid samples remaining after NaN removal!")
-        return None
-    
-    # Train-validation split
-    X_train, X_val, y_depth_train, y_depth_val, y_coords_train, y_coords_val = train_test_split(
-        X, y_depth, y_coords, test_size=test_size, random_state=42
-    )
-    
-    # Scale features
-    feature_scaler = StandardScaler()
-    X_train_scaled = feature_scaler.fit_transform(X_train)
-    X_val_scaled = feature_scaler.transform(X_val)
-    
-    # Scale coordinates
-    coord_scaler = StandardScaler()
-    y_coords_train_scaled = coord_scaler.fit_transform(y_coords_train)
-    y_coords_val_scaled = coord_scaler.transform(y_coords_val)
-    
-    print(f"Training set: {len(X_train)} samples")
-    print(f"Validation set: {len(X_val)} samples")
-    
-    # Make sure input dimension works with multi-scale attention
-    input_dim = X_train.shape[1]
-    print(f"Original input dimension: {input_dim}")
-    
-    # No need to pad - the fixed MultiScaleAttentionBlock handles any input dimension
-    X_train_final = X_train_scaled
-    X_val_final = X_val_scaled
-    
-    # Create enhanced datasets with augmentation
-    train_dataset = EnhancedAI2ThorDataset(
-        X_train_final, y_depth_train, y_coords_train_scaled, 
-        augment=True, noise_std=0.01
-    )
-    val_dataset = EnhancedAI2ThorDataset(
-        X_val_final, y_depth_val, y_coords_val_scaled, 
-        augment=False
-    )
-    
-    # Create data loaders
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
-    
-    # Initialize enhanced model
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
-    
-    model = EnhancedGeometricEstimator(
-        input_dim=input_dim,
-        hidden_dim=512,
-        dropout_rate=0.2,
-        num_heads=8,
-        use_uncertainty=use_uncertainty
-    )
-    
-    # Initialize enhanced trainer
-    trainer = EnhancedAI2ThorTrainer(
-        model, train_loader, val_loader, coord_scaler, device, use_uncertainty
-    )
-    
-    # Train the model
-    trained_model = trainer.train(epochs=epochs)
-    
-    # Save final model and scalers
-    final_checkpoint = {
-        'model_state_dict': trained_model.state_dict(),
-        'feature_scaler': feature_scaler,
-        'coord_scaler': coord_scaler,
-        'feature_names': feature_columns,
-        'model_type': 'enhanced_ai2thor_geometric_estimator',
-        'use_uncertainty': use_uncertainty,
-        'input_dim': input_dim,
-        'training_metrics': trainer.val_metrics[-1] if trainer.val_metrics else None
+    # Define different error metrics for analysis
+    error_metrics = {
+        'coord_error': 'coord_error',
+        'angle_error': 'angle_error_deg',
+        'depth_error': 'depth_error'
     }
     
-    torch.save(final_checkpoint, 'best_enhanced_ai2thor_model_final91225.pth')
-    print("Enhanced model saved as 'best_enhanced_ai2thor_model_final91225.pth'")
+    analysis_results = {}
     
-    # Generate comprehensive training plots
-    create_enhanced_training_plots(trainer, coord_scaler, val_dataset, device, use_uncertainty)
+    for metric_name, error_col in error_metrics.items():
+        print(f"\n=== Analyzing Worst {metric_name.replace('_', ' ').title()} ===")
+        
+        # Sort by error and get worst predictions
+        worst_predictions = predictions_df.nlargest(100, error_col)
+        
+        # Statistics
+        percentiles = [90, 95, 99]
+        print(f"Error percentiles for {metric_name}:")
+        for p in percentiles:
+            val = np.percentile(predictions_df[error_col], p)
+            print(f"  {p}th percentile: {val:.4f}")
+        
+        # Scene analysis if scene information is available
+        if 'scene_name' in predictions_df.columns:
+            print(f"\nWorst scenes for {metric_name}:")
+            scene_errors = worst_predictions.groupby('scene_name')[error_col].agg(['count', 'mean', 'std'])
+            scene_errors = scene_errors.sort_values('mean', ascending=False)
+            print(scene_errors.head(10))
+            
+            # Object type analysis
+            if 'target_object_type' in predictions_df.columns:
+                print(f"\nWorst object types for {metric_name}:")
+                object_errors = worst_predictions.groupby('target_object_type')[error_col].agg(['count', 'mean', 'std'])
+                object_errors = object_errors.sort_values('mean', ascending=False)
+                print(object_errors.head(10))
+        
+        # Save worst predictions
+        worst_file = os.path.join(output_dir, f"worst_{metric_name}_predictions.csv")
+        worst_predictions.to_csv(worst_file, index=False)
+        
+        analysis_results[metric_name] = {
+            'worst_predictions': worst_predictions,
+            'percentiles': {p: np.percentile(predictions_df[error_col], p) for p in percentiles}
+        }
     
-    return trained_model, feature_scaler, coord_scaler, feature_columns
+    # Create summary analysis
+    create_error_analysis_plots(predictions_df, output_dir)
+    
+    # Generate summary report
+    generate_analysis_report(analysis_results, predictions_df, output_dir)
+    
+    return analysis_results
+
+def generate_analysis_report(analysis_results, predictions_df, output_dir):
+    """Generate a comprehensive analysis report."""
+    
+    report_path = os.path.join(output_dir, 'prediction_analysis_report.txt')
+    
+    with open(report_path, 'w') as f:
+        f.write("AI2-THOR Coordinate and Angle Estimation - Prediction Analysis Report\n")
+        f.write("=" * 70 + "\n")
+        f.write(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        
+        # Overall statistics
+        f.write("OVERALL PERFORMANCE SUMMARY\n")
+        f.write("-" * 30 + "\n")
+        f.write(f"Total predictions analyzed: {len(predictions_df)}\n\n")
+        
+        # Error statistics for each metric
+        error_metrics = []
+        if 'coord_error' in predictions_df.columns:
+            error_metrics.append(('coord_error', 'Coordinate Error', 'm'))
+        if 'angle_error_deg' in predictions_df.columns:
+            error_metrics.append(('angle_error_deg', 'Angle Error', '°'))
+        if 'depth_error' in predictions_df.columns:
+            error_metrics.append(('depth_error', 'Depth Error', 'm'))
+        
+        for metric_name, display_name, unit in error_metrics:
+            error_values = predictions_df[metric_name]
+            
+            f.write(f"{display_name}:\n")
+            f.write(f"  Mean: {error_values.mean():.4f}{unit}\n")
+            f.write(f"  Median: {error_values.median():.4f}{unit}\n")
+            f.write(f"  Std: {error_values.std():.4f}{unit}\n")
+            f.write(f"  90th percentile: {error_values.quantile(0.9):.4f}{unit}\n")
+            f.write(f"  95th percentile: {error_values.quantile(0.95):.4f}{unit}\n")
+            f.write(f"  99th percentile: {error_values.quantile(0.99):.4f}{unit}\n\n")
+        
+        # Scene analysis if available
+        if 'scene_name' in predictions_df.columns:
+            f.write("SCENE-BASED ANALYSIS\n")
+            f.write("-" * 20 + "\n")
+            
+            # Worst scenes for coordinate errors
+            if 'coord_error' in predictions_df.columns:
+                scene_coord_errors = predictions_df.groupby('scene_name')['coord_error'].agg(['count', 'mean', 'std']).sort_values('mean', ascending=False)
+                f.write("Top 10 worst scenes (coordinate error):\n")
+                for i, (scene, row) in enumerate(scene_coord_errors.head(10).iterrows()):
+                    f.write(f"  {i+1}. {scene}: {row['mean']:.4f}m (±{row['std']:.4f}m, n={row['count']})\n")
+                f.write("\n")
+            
+            # Worst scenes for angle errors
+            if 'angle_error_deg' in predictions_df.columns:
+                scene_angle_errors = predictions_df.groupby('scene_name')['angle_error_deg'].agg(['count', 'mean', 'std']).sort_values('mean', ascending=False)
+                f.write("Top 10 worst scenes (angle error):\n")
+                for i, (scene, row) in enumerate(scene_angle_errors.head(10).iterrows()):
+                    f.write(f"  {i+1}. {scene}: {row['mean']:.1f}° (±{row['std']:.1f}°, n={row['count']})\n")
+                f.write("\n")
+        
+        # Object type analysis if available
+        if 'target_object_type' in predictions_df.columns:
+            f.write("OBJECT TYPE ANALYSIS\n")
+            f.write("-" * 20 + "\n")
+            
+            # Worst object types for coordinate errors
+            if 'coord_error' in predictions_df.columns:
+                obj_coord_errors = predictions_df.groupby('target_object_type')['coord_error'].agg(['count', 'mean', 'std']).sort_values('mean', ascending=False)
+                f.write("Top 10 worst object types (coordinate error):\n")
+                for i, (obj_type, row) in enumerate(obj_coord_errors.head(10).iterrows()):
+                    f.write(f"  {i+1}. {obj_type}: {row['mean']:.4f}m (±{row['std']:.4f}m, n={row['count']})\n")
+                f.write("\n")
+            
+            # Worst object types for angle errors
+            if 'angle_error_deg' in predictions_df.columns:
+                obj_angle_errors = predictions_df.groupby('target_object_type')['angle_error_deg'].agg(['count', 'mean', 'std']).sort_values('mean', ascending=False)
+                f.write("Top 10 worst object types (angle error):\n")
+                for i, (obj_type, row) in enumerate(obj_angle_errors.head(10).iterrows()):
+                    f.write(f"  {i+1}. {obj_type}: {row['mean']:.1f}° (±{row['std']:.1f}°, n={row['count']})\n")
+                f.write("\n")
+        
+        # Correlation analysis
+        f.write("ERROR CORRELATION ANALYSIS\n")
+        f.write("-" * 26 + "\n")
+        
+        # Only compute correlations for columns that exist
+        correlations = []
+        if 'coord_error' in predictions_df.columns and 'angle_error_deg' in predictions_df.columns:
+            coord_angle_corr = np.corrcoef(predictions_df['coord_error'], predictions_df['angle_error_deg'])[0, 1]
+            correlations.append(("Coordinate vs Angle error", coord_angle_corr))
+        
+        if 'coord_error' in predictions_df.columns and 'depth_error' in predictions_df.columns:
+            coord_depth_corr = np.corrcoef(predictions_df['coord_error'], predictions_df['depth_error'])[0, 1]
+            correlations.append(("Coordinate vs Depth error", coord_depth_corr))
+        
+        if 'angle_error_deg' in predictions_df.columns and 'depth_error' in predictions_df.columns:
+            angle_depth_corr = np.corrcoef(predictions_df['angle_error_deg'], predictions_df['depth_error'])[0, 1]
+            correlations.append(("Angle vs Depth error", angle_depth_corr))
+        
+        for corr_name, corr_value in correlations:
+            f.write(f"{corr_name} correlation: {corr_value:.3f}\n")
+        
+        if correlations:
+            f.write("\n")
+        
+        # Uncertainty analysis if available
+        uncertainty_cols = ['depth_uncertainty', 'coord_uncertainty_x', 'angle_uncertainty']
+        has_uncertainty = any(col in predictions_df.columns for col in uncertainty_cols)
+        
+        if has_uncertainty and any(predictions_df.get(col, pd.Series()).sum() > 0 for col in uncertainty_cols):
+            f.write("UNCERTAINTY ANALYSIS\n")
+            f.write("-" * 19 + "\n")
+            
+            uncertainty_corrs = []
+            if ('depth_uncertainty' in predictions_df.columns and 'depth_error' in predictions_df.columns and 
+                predictions_df['depth_uncertainty'].sum() > 0):
+                depth_unc_corr = np.corrcoef(predictions_df['depth_uncertainty'], predictions_df['depth_error'])[0, 1]
+                uncertainty_corrs.append(("Depth uncertainty vs error", depth_unc_corr))
+            
+            if ('coord_uncertainty_x' in predictions_df.columns and 'coord_error' in predictions_df.columns and
+                predictions_df['coord_uncertainty_x'].sum() > 0):
+                coord_unc_corr = np.corrcoef(predictions_df['coord_uncertainty_x'], predictions_df['coord_error'])[0, 1]
+                uncertainty_corrs.append(("Coordinate uncertainty vs error", coord_unc_corr))
+            
+            if ('angle_uncertainty' in predictions_df.columns and 'angle_error_deg' in predictions_df.columns and
+                predictions_df['angle_uncertainty'].sum() > 0):
+                angle_unc_corr = np.corrcoef(predictions_df['angle_uncertainty'], predictions_df['angle_error_deg'])[0, 1]
+                uncertainty_corrs.append(("Angle uncertainty vs error", angle_unc_corr))
+            
+            for unc_name, unc_corr in uncertainty_corrs:
+                f.write(f"{unc_name} correlation: {unc_corr:.3f}\n")
+            
+            if uncertainty_corrs:
+                f.write("\nNote: Higher correlation indicates better uncertainty calibration\n\n")
+        
+        # Recommendations
+        f.write("RECOMMENDATIONS FOR IMPROVEMENT\n")
+        f.write("-" * 33 + "\n")
+        
+        # Find the worst performing aspects
+        recommendations = []
+        
+        if 'coord_error' in predictions_df.columns:
+            mean_coord_error = predictions_df['coord_error'].mean()
+            if mean_coord_error > 0.5:  # If coordinate error > 0.5m
+                recommendations.append("• High coordinate errors detected. Consider:")
+                recommendations.append("  - Improving depth estimation accuracy")
+                recommendations.append("  - Adding more geometric constraints")
+                recommendations.append("  - Increasing training data for problematic scenes")
+                recommendations.append("")
+        
+        if 'angle_error_deg' in predictions_df.columns:
+            mean_angle_error = predictions_df['angle_error_deg'].mean()
+            if mean_angle_error > 30:  # If angle error > 30 degrees
+                recommendations.append("• High angle errors detected. Consider:")
+                recommendations.append("  - Adding more rotational features")
+                recommendations.append("  - Using circular loss functions")
+                recommendations.append("  - Augmenting data with rotation variations")
+                recommendations.append("")
+        
+        if 'scene_name' in predictions_df.columns and 'coord_error' in predictions_df.columns:
+            scene_coord_errors = predictions_df.groupby('scene_name')['coord_error'].agg(['count', 'mean', 'std']).sort_values('mean', ascending=False)
+            worst_scenes = scene_coord_errors.head(3).index.tolist()
+            recommendations.append(f"• Focus improvement efforts on scenes: {', '.join(worst_scenes)}")
+            recommendations.append("")
+        
+        if 'target_object_type' in predictions_df.columns and 'coord_error' in predictions_df.columns:
+            obj_coord_errors = predictions_df.groupby('target_object_type')['coord_error'].agg(['count', 'mean', 'std']).sort_values('mean', ascending=False)
+            worst_objects = obj_coord_errors.head(3).index.tolist()
+            recommendations.append(f"• Focus improvement efforts on object types: {', '.join(worst_objects)}")
+            recommendations.append("")
+        
+        if not recommendations:
+            recommendations.append("• Model performance appears to be within acceptable ranges")
+            recommendations.append("• Consider fine-tuning hyperparameters for further improvements")
+        
+        for rec in recommendations:
+            f.write(f"{rec}\n")
+    
+    print(f"Analysis report saved to {report_path}")
 
 
-def create_enhanced_training_plots(trainer, coord_scaler, val_dataset, device, use_uncertainty=True):
-    """Create comprehensive training and evaluation plots for enhanced model."""
+def create_error_analysis_plots(predictions_df, output_dir):
+    """Create detailed error analysis plots."""
     
-    fig, axes = plt.subplots(3, 3, figsize=(20, 16))
+    fig, axes = plt.subplots(3, 4, figsize=(24, 18))
     
-    epochs = range(len(trainer.train_losses))
+    # Error distributions
+    axes[0, 0].hist(predictions_df['coord_error'], bins=50, alpha=0.7, edgecolor='black')
+    axes[0, 0].set_title('Coordinate Error Distribution')
+    axes[0, 0].set_xlabel('3D Error (m)')
+    axes[0, 0].set_ylabel('Frequency')
+    axes[0, 0].axvline(predictions_df['coord_error'].mean(), color='red', linestyle='--', 
+                       label=f'Mean: {predictions_df["coord_error"].mean():.3f}m')
+    axes[0, 0].legend()
     
-    # Training curves
-    axes[0,0].plot(epochs, trainer.train_losses, label='Train Loss', alpha=0.8)
-    axes[0,0].plot(epochs, trainer.val_losses, label='Val Loss', alpha=0.8)
-    axes[0,0].set_title('Total Loss Over Time')
-    axes[0,0].set_xlabel('Epoch')
-    axes[0,0].set_ylabel('Loss')
-    axes[0,0].legend()
-    axes[0,0].grid(True)
+    axes[0, 1].hist(predictions_df['angle_error_deg'], bins=50, alpha=0.7, edgecolor='black')
+    axes[0, 1].set_title('Angle Error Distribution')
+    axes[0, 1].set_xlabel('Angle Error (degrees)')
+    axes[0, 1].set_ylabel('Frequency')
+    axes[0, 1].axvline(predictions_df['angle_error_deg'].mean(), color='red', linestyle='--',
+                       label=f'Mean: {predictions_df["angle_error_deg"].mean():.1f}°')
+    axes[0, 1].legend()
     
-    # R² scores over time
-    axes[0,1].plot(epochs, [m['depth_r2'] for m in trainer.val_metrics], label='Depth R²', alpha=0.8)
-    axes[0,1].plot(epochs, [m['coord_r2'] for m in trainer.val_metrics], label='Coordinate R²', alpha=0.8)
-    axes[0,1].set_title('R² Score Over Time')
-    axes[0,1].set_xlabel('Epoch')
-    axes[0,1].set_ylabel('R² Score')
-    axes[0,1].legend()
-    axes[0,1].grid(True)
+    axes[0, 2].hist(predictions_df['depth_error'], bins=50, alpha=0.7, edgecolor='black')
+    axes[0, 2].set_title('Depth Error Distribution')
+    axes[0, 2].set_xlabel('Depth Error (m)')
+    axes[0, 2].set_ylabel('Frequency')
+    axes[0, 2].axvline(predictions_df['depth_error'].mean(), color='red', linestyle='--',
+                       label=f'Mean: {predictions_df["depth_error"].mean():.3f}m')
+    axes[0, 2].legend()
     
-    # MAE over time
-    axes[0,2].plot(epochs, [m['depth_mae'] for m in trainer.val_metrics], label='Depth MAE', alpha=0.8)
-    axes[0,2].plot(epochs, [m['coord_mae'] for m in trainer.val_metrics], label='Coordinate MAE', alpha=0.8)
-    axes[0,2].set_title('MAE Over Time')
-    axes[0,2].set_xlabel('Epoch')
-    axes[0,2].set_ylabel('MAE')
-    axes[0,2].legend()
-    axes[0,2].grid(True)
+    # Error correlations
+    axes[0, 3].scatter(predictions_df['coord_error'], predictions_df['angle_error_deg'], alpha=0.5, s=10)
+    axes[0, 3].set_xlabel('Coordinate Error (m)')
+    axes[0, 3].set_ylabel('Angle Error (degrees)')
+    axes[0, 3].set_title('Coordinate vs Angle Error')
+    corr = np.corrcoef(predictions_df['coord_error'], predictions_df['angle_error_deg'])[0, 1]
+    axes[0, 3].text(0.05, 0.95, f'Correlation: {corr:.3f}', transform=axes[0, 3].transAxes)
     
-    # Get final predictions for evaluation plots
-    trainer.model.eval()
-    with torch.no_grad():
-        val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False)
-        all_depth_preds = []
-        all_depth_targets = []
-        all_coord_preds = []
-        all_coord_targets = []
-        all_depth_vars = []
-        all_coord_vars = []
+    # Prediction vs target scatter plots
+    axes[1, 0].scatter(predictions_df['true_x'], predictions_df['pred_x'], alpha=0.5, s=10)
+    axes[1, 0].plot([predictions_df['true_x'].min(), predictions_df['true_x'].max()], 
+                    [predictions_df['true_x'].min(), predictions_df['true_x'].max()], 'r--')
+    axes[1, 0].set_xlabel('True X (m)')
+    axes[1, 0].set_ylabel('Predicted X (m)')
+    axes[1, 0].set_title('X Coordinate Predictions')
+    
+    axes[1, 1].scatter(predictions_df['true_y'], predictions_df['pred_y'], alpha=0.5, s=10)
+    axes[1, 1].plot([predictions_df['true_y'].min(), predictions_df['true_y'].max()], 
+                    [predictions_df['true_y'].min(), predictions_df['true_y'].max()], 'r--')
+    axes[1, 1].set_xlabel('True Y (m)')
+    axes[1, 1].set_ylabel('Predicted Y (m)')
+    axes[1, 1].set_title('Y Coordinate Predictions')
+    
+    axes[1, 2].scatter(predictions_df['true_z'], predictions_df['pred_z'], alpha=0.5, s=10)
+    axes[1, 2].plot([predictions_df['true_z'].min(), predictions_df['true_z'].max()], 
+                    [predictions_df['true_z'].min(), predictions_df['true_z'].max()], 'r--')
+    axes[1, 2].set_xlabel('True Z (m)')
+    axes[1, 2].set_ylabel('Predicted Z (m)')
+    axes[1, 2].set_title('Z Coordinate Predictions')
+    
+    axes[1, 3].scatter(predictions_df['true_angle_deg'], predictions_df['pred_angle_deg'], alpha=0.5, s=10)
+    axes[1, 3].plot([predictions_df['true_angle_deg'].min(), predictions_df['true_angle_deg'].max()], 
+                    [predictions_df['true_angle_deg'].min(), predictions_df['true_angle_deg'].max()], 'r--')
+    axes[1, 3].set_xlabel('True Angle (degrees)')
+    axes[1, 3].set_ylabel('Predicted Angle (degrees)')
+    axes[1, 3].set_title('Angle Predictions')
+    
+    # Scene-based analysis if available
+    if 'scene_name' in predictions_df.columns:
+        # Error by scene
+        scene_coord_errors = predictions_df.groupby('scene_name')['coord_error'].mean().sort_values(ascending=False)
+        axes[2, 0].bar(range(len(scene_coord_errors.head(10))), scene_coord_errors.head(10).values)
+        axes[2, 0].set_title('Top 10 Worst Scenes (Coord Error)')
+        axes[2, 0].set_xlabel('Scene Rank')
+        axes[2, 0].set_ylabel('Mean Coordinate Error (m)')
         
-        for batch_features, batch_depth_targets, batch_coord_targets in val_loader:
-            batch_features = batch_features.to(device)
+        scene_angle_errors = predictions_df.groupby('scene_name')['angle_error_deg'].mean().sort_values(ascending=False)
+        axes[2, 1].bar(range(len(scene_angle_errors.head(10))), scene_angle_errors.head(10).values)
+        axes[2, 1].set_title('Top 10 Worst Scenes (Angle Error)')
+        axes[2, 1].set_xlabel('Scene Rank')
+        axes[2, 1].set_ylabel('Mean Angle Error (degrees)')
+        
+        # Error by object type if available
+        if 'target_object_type' in predictions_df.columns:
+            obj_coord_errors = predictions_df.groupby('target_object_type')['coord_error'].mean().sort_values(ascending=False)
+            axes[2, 2].bar(range(len(obj_coord_errors.head(10))), obj_coord_errors.head(10).values)
+            axes[2, 2].set_title('Top 10 Worst Object Types (Coord)')
+            axes[2, 2].set_xlabel('Object Type Rank')
+            axes[2, 2].set_ylabel('Mean Coordinate Error (m)')
+            axes[2, 2].tick_params(axis='x', rotation=45)
             
-            if use_uncertainty:
-                depth_pred, coord_pred, depth_var, coord_var = trainer.model(batch_features, return_uncertainty=True)
-                all_depth_vars.append(depth_var.cpu())
-                all_coord_vars.append(coord_var.cpu())
-            else:
-                depth_pred, coord_pred = trainer.model(batch_features)
-            
-            all_depth_preds.append(depth_pred.cpu())
-            all_depth_targets.append(batch_depth_targets.cpu())
-            all_coord_preds.append(coord_pred.cpu())
-            all_coord_targets.append(batch_coord_targets.cpu())
-        
-        depth_preds = torch.cat(all_depth_preds).numpy()
-        depth_targets = torch.cat(all_depth_targets).numpy()
-        
-        # Clip extreme values to prevent overflow
-        depth_preds = np.clip(depth_preds, -10, 10)
-        depth_targets = np.clip(depth_targets, -10, 10)
-        coord_preds = torch.cat(all_coord_preds).numpy()
-        coord_targets = torch.cat(all_coord_targets).numpy()
-        
-        if use_uncertainty:
-            depth_vars = torch.cat(all_depth_vars).numpy()
-            coord_vars = torch.cat(all_coord_vars).numpy()
-    
-    # Unscale coordinates for visualization
-    coord_preds_unscaled = coord_scaler.inverse_transform(coord_preds)
-    coord_targets_unscaled = coord_scaler.inverse_transform(coord_targets)
-    
-    # Depth prediction scatter
-    axes[1,0].scatter(depth_targets, depth_preds, alpha=0.5, s=20)
-    min_depth, max_depth = depth_targets.min(), depth_targets.max()
-    axes[1,0].plot([min_depth, max_depth], [min_depth, max_depth], 'r--', alpha=0.8)
-    axes[1,0].set_xlabel('True Relative Depth (log)')
-    axes[1,0].set_ylabel('Predicted Relative Depth (log)')
-    axes[1,0].set_title('Depth Prediction Accuracy')
-    axes[1,0].grid(True)
-    
-    # Coordinate prediction accuracy per axis
-    for i, axis in enumerate(['X', 'Y', 'Z']):
-        row = 1
-        col = i + 1 if i < 2 else 2
-        if i == 2:
-            row = 2
-            col = 0
-            
-        axes[row,col].scatter(coord_targets_unscaled[:, i], coord_preds_unscaled[:, i], alpha=0.5, s=20)
-        min_coord = coord_targets_unscaled[:, i].min()
-        max_coord = coord_targets_unscaled[:, i].max()
-        axes[row,col].plot([min_coord, max_coord], [min_coord, max_coord], 'r--', alpha=0.8)
-        axes[row,col].set_xlabel(f'True {axis} Coordinate (m)')
-        axes[row,col].set_ylabel(f'Predicted {axis} Coordinate (m)')
-        axes[row,col].set_title(f'{axis}-Axis Prediction Accuracy')
-        axes[row,col].grid(True)
-    
-    # Error distribution
-    coord_errors = np.linalg.norm(coord_targets_unscaled - coord_preds_unscaled, axis=1)
-    axes[2,1].hist(coord_errors, bins=50, alpha=0.7, edgecolor='black')
-    axes[2,1].axvline(np.mean(coord_errors), color='red', linestyle='--', 
-                      label=f'Mean: {np.mean(coord_errors):.3f}m')
-    axes[2,1].axvline(np.median(coord_errors), color='green', linestyle='--', 
-                      label=f'Median: {np.median(coord_errors):.3f}m')
-    axes[2,1].set_xlabel('3D Coordinate Error (m)')
-    axes[2,1].set_ylabel('Frequency')
-    axes[2,1].set_title('Prediction Error Distribution')
-    axes[2,1].legend()
-    axes[2,1].grid(True)
-    
-    # Uncertainty visualization (if available)
-    if use_uncertainty:
-        # Plot prediction uncertainty vs error
-        coord_error_per_sample = np.linalg.norm(coord_targets_unscaled - coord_preds_unscaled, axis=1)
-        coord_uncertainty = np.mean(coord_vars, axis=1)  # Average uncertainty across x,y,z
-        
-        axes[2,2].scatter(coord_uncertainty, coord_error_per_sample, alpha=0.5, s=20)
-        axes[2,2].set_xlabel('Predicted Uncertainty')
-        axes[2,2].set_ylabel('Actual Error (m)')
-        axes[2,2].set_title('Uncertainty vs Actual Error')
-        axes[2,2].grid(True)
-        
-        # Calculate correlation between uncertainty and error
-        correlation = np.corrcoef(coord_uncertainty, coord_error_per_sample)[0, 1]
-        axes[2,2].text(0.05, 0.95, f'Correlation: {correlation:.3f}', 
-                       transform=axes[2,2].transAxes, fontsize=10, 
-                       verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat'))
+            obj_angle_errors = predictions_df.groupby('target_object_type')['angle_error_deg'].mean().sort_values(ascending=False)
+            axes[2, 3].bar(range(len(obj_angle_errors.head(10))), obj_angle_errors.head(10).values)
+            axes[2, 3].set_title('Top 10 Worst Object Types (Angle)')
+            axes[2, 3].set_xlabel('Object Type Rank')
+            axes[2, 3].set_ylabel('Mean Angle Error (degrees)')
+            axes[2, 3].tick_params(axis='x', rotation=45)
     else:
-        # 3D scatter plot of predictions vs targets
-        ax_3d = fig.add_subplot(3, 3, 9, projection='3d')
-        idx_sample = np.random.choice(len(coord_targets_unscaled), min(500, len(coord_targets_unscaled)), replace=False)
-        
-        ax_3d.scatter(coord_targets_unscaled[idx_sample, 0], 
-                      coord_targets_unscaled[idx_sample, 1], 
-                      coord_targets_unscaled[idx_sample, 2],
-                      c='blue', alpha=0.6, s=20, label='True')
-        ax_3d.scatter(coord_preds_unscaled[idx_sample, 0], 
-                      coord_preds_unscaled[idx_sample, 1], 
-                      coord_preds_unscaled[idx_sample, 2],
-                      c='red', alpha=0.6, s=20, label='Predicted')
-        ax_3d.set_xlabel('X (m)')
-        ax_3d.set_ylabel('Y (m)')
-        ax_3d.set_zlabel('Z (m)')
-        ax_3d.set_title('3D Coordinate Predictions')
-        ax_3d.legend()
+        # If no scene info, show uncertainty plots if available
+        if 'depth_uncertainty' in predictions_df.columns:
+            axes[2, 0].scatter(predictions_df['depth_uncertainty'], predictions_df['depth_error'], alpha=0.5, s=10)
+            axes[2, 0].set_xlabel('Depth Uncertainty')
+            axes[2, 0].set_ylabel('Depth Error')
+            axes[2, 0].set_title('Uncertainty vs Error (Depth)')
+            
+            axes[2, 1].scatter(predictions_df['coord_uncertainty_x'], predictions_df['coord_error'], alpha=0.5, s=10)
+            axes[2, 1].set_xlabel('Coordinate Uncertainty')
+            axes[2, 1].set_ylabel('Coordinate Error')
+            axes[2, 1].set_title('Uncertainty vs Error (Coord)')
+            
+            axes[2, 2].scatter(predictions_df['angle_uncertainty'], predictions_df['angle_error_deg'], alpha=0.5, s=10)
+            axes[2, 2].set_xlabel('Angle Uncertainty')
+            axes[2, 2].set_ylabel('Angle Error (degrees)')
+            axes[2, 2].set_title('Uncertainty vs Error (Angle)')
+            
+            # Fill the last subplot with summary statistics
+            axes[2, 3].axis('off')
+            summary_text = f"""Error Summary:
+            Coord Mean: {predictions_df['coord_error'].mean():.3f}m
+            Coord 95th: {predictions_df['coord_error'].quantile(0.95):.3f}m
+            Angle Mean: {predictions_df['angle_error_deg'].mean():.1f}°
+            Angle 95th: {predictions_df['angle_error_deg'].quantile(0.95):.1f}°
+            Depth Mean: {predictions_df['depth_error'].mean():.3f}m"""
+            axes[2, 3].text(0.1, 0.5, summary_text, transform=axes[2, 3].transAxes, 
+                           fontsize=12, verticalalignment='center',
+                           bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
+            axes[2, 3].set_title('Performance Summary')
+        else:
+            # Fill remaining subplots with informative messages
+            for i, (row, col) in enumerate([(2, 0), (2, 1), (2, 2), (2, 3)]):
+                axes[row, col].axis('off')
+                if i == 0:
+                    axes[row, col].text(0.5, 0.5, 'No uncertainty data\navailable', 
+                                       ha='center', va='center', transform=axes[row, col].transAxes, fontsize=12)
+                    axes[row, col].set_title('Uncertainty Analysis Not Available')
+                elif i == 3:
+                    # Show error summary even without uncertainty
+                    summary_text = f"""Error Summary:
+                    Coord Mean: {predictions_df['coord_error'].mean():.3f}m
+                    Coord 95th: {predictions_df['coord_error'].quantile(0.95):.3f}m
+                    Angle Mean: {predictions_df['angle_error_deg'].mean():.1f}°
+                    Angle 95th: {predictions_df['angle_error_deg'].quantile(0.95):.1f}°
+                    Depth Mean: {predictions_df['depth_error'].mean():.3f}m"""
+                    axes[row, col].text(0.1, 0.5, summary_text, transform=axes[row, col].transAxes, 
+                                       fontsize=12, verticalalignment='center',
+                                       bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
+                    axes[row, col].set_title('Performance Summary')
+                else:
+                    axes[row, col].text(0.5, 0.5, 'Analysis not\navailable', 
+                                       ha='center', va='center', transform=axes[row, col].transAxes, fontsize=12)
     
     plt.tight_layout()
-    plt.savefig('enhanced_ai2thor_training_evaluation_final.png', dpi=150, bbox_inches='tight')
-    print("Enhanced training plots saved as 'enhanced_ai2thor_training_evaluation_final.png'")
+    plt.savefig(os.path.join(output_dir, 'error_analysis_plots.png'), dpi=150, bbox_inches='tight')
+    plt.close()
     
-    # Print comprehensive final metrics
-    final_metrics = trainer.val_metrics[-1]
-    print(f"\n=== Enhanced Model Performance ===")
-    print(f"Relative Depth - R²: {final_metrics['depth_r2']:.4f}, MAE: {final_metrics['depth_mae']:.4f}")
-    print(f"World Coordinates - R²: {final_metrics['coord_r2']:.4f}, MAE: {final_metrics['coord_mae']:.4f}m")
-    print(f"Per-axis Performance:")
-    for axis in ['X', 'Y', 'Z']:
-        print(f"  {axis}: R²={final_metrics[f'{axis}_r2']:.4f}, MAE={final_metrics[f'{axis}_mae']:.4f}m")
-    print(f"3D Error Statistics: Mean={np.mean(coord_errors):.4f}m, Median={np.median(coord_errors):.4f}m")
-    print(f"3D Error Percentiles: 90th={np.percentile(coord_errors, 90):.4f}m, 95th={np.percentile(coord_errors, 95):.4f}m")
-    
-    if use_uncertainty:
-        print(f"Uncertainty-Error Correlation: {np.corrcoef(coord_uncertainty, coord_error_per_sample)[0,1]:.4f}")
+    print(f"Error analysis plots saved to {output_dir}/error_analysis_plots.png")
 
-
-def load_enhanced_model(model_path, device='cpu'):
-    """Load a trained enhanced model for inference."""
-    checkpoint = torch.load(model_path, map_location=device)
+def main():
+    """
+    Main function to train the enhanced AI2-THOR model with comprehensive evaluation.
     
-    model = EnhancedGeometricEstimator(
-        input_dim=checkpoint['input_dim'],
-        hidden_dim=512,
-        dropout_rate=0.2,
-        num_heads=8,
-        use_uncertainty=checkpoint['use_uncertainty']
-    )
+    This function handles the complete pipeline:
+    - Data loading and preprocessing
+    - Model training with angle estimation
+    - Comprehensive evaluation and analysis
+    - Report generation
+    """
     
-    model.load_state_dict(checkpoint['model_state_dict'])
-    model.eval()
+    # Configuration parameters
+    CONFIG = {
+        'dataset_path': "ai2thor_coordinate_dataset_final.csv",
+        'test_size': 0.2,
+        'batch_size': 32,
+        'epochs': 200,
+        'use_uncertainty': True,
+        'early_stopping_patience': 25,
+        'learning_rate': 0.0005,
+        'device': 'cuda' if torch.cuda.is_available() else 'cpu'
+    }
     
-    return model, checkpoint['feature_scaler'], checkpoint['coord_scaler'], checkpoint['feature_names']
-
-
-def predict_coordinates(model, feature_scaler, coord_scaler, feature_names, 
-                       sample_data, device='cpu', return_uncertainty=False):
-    """Make predictions using the trained enhanced model."""
-    model.eval()
+    print("=" * 70)
+    print("ENHANCED AI2-THOR COORDINATE AND ANGLE ESTIMATION TRAINING")
+    print("=" * 70)
+    print(f"Configuration:")
+    for key, value in CONFIG.items():
+        print(f"  {key}: {value}")
+    print()
     
-    # Prepare features
-    features = np.array([sample_data[name] for name in feature_names]).reshape(1, -1)
-    features_scaled = feature_scaler.transform(features)
-    
-    features_tensor = torch.FloatTensor(features_scaled).to(device)
-    
-    with torch.no_grad():
-        if return_uncertainty:
-            depth_mean, coord_mean, depth_var, coord_var = model(features_tensor, return_uncertainty=True)
+    try:
+        # Step 1: Load and validate dataset
+        print("Step 1/7: Loading and validating dataset...")
+        df = pd.read_csv(CONFIG['dataset_path'])
+        
+        if len(df) == 0:
+            raise ValueError("Dataset is empty!")
             
-            # Convert depth back from log space
-            depth_pred = np.expm1(depth_mean.cpu().numpy()[0])
-            depth_uncertainty = depth_var.cpu().numpy()[0]
+        print(f"✓ Dataset loaded: {len(df)} samples")
+        
+        # Step 2: Data quality filtering
+        print("\nStep 2/7: Applying data quality filters...")
+        df_filtered = filter_high_quality_samples_no_bbox(df)
+        
+        if len(df_filtered) == 0:
+            raise ValueError("No samples remaining after filtering!")
             
-            # Unscale coordinates
-            coord_pred = coord_scaler.inverse_transform(coord_mean.cpu().numpy())[0]
-            coord_uncertainty = coord_var.cpu().numpy()[0]
+        print(f"✓ Quality filtering complete: {len(df_filtered)} samples retained")
+        
+        # Step 3: Feature engineering
+        print("\nStep 3/7: Generating enhanced features...")
+        try:
+            enhanced_features = df_filtered.apply(
+                calculate_comprehensive_geometric_features, 
+                axis=1, 
+                result_type='expand'
+            )
             
-            return {
-                'relative_depth': depth_pred,
-                'depth_uncertainty': depth_uncertainty,
-                'world_coordinates': coord_pred,
-                'coord_uncertainty': coord_uncertainty
-            }
-        else:
-            depth_pred, coord_pred = model(features_tensor)
+            # Add enhanced features to dataframe
+            for col in enhanced_features.columns:
+                df_filtered[f'enhanced_{col}'] = enhanced_features[col]
+                
+            print(f"✓ Enhanced features created: {len(enhanced_features.columns)} new features")
             
-            # Convert depth back from log space
-            depth_pred = np.expm1(depth_pred.cpu().numpy()[0])
+        except Exception as e:
+            print(f"✗ Feature engineering failed: {e}")
+            return False
+        
+        # Step 4: Prepare training data
+        print("\nStep 4/7: Preparing training data...")
+        
+        # Check for required columns
+        required_columns = ['relative_depth', 'world_x', 'world_y', 'world_z', 'target_rot_y']
+        missing_columns = [col for col in required_columns if col not in df_filtered.columns]
+        
+        if missing_columns:
+            raise ValueError(f"Missing required columns: {missing_columns}")
+        
+        # Feature selection
+        excluded_cols = ['relative_depth', 'world_x', 'world_y', 'world_z', 'target_rot_y',
+                        'scene_name', 'scene_idx', 'pose_idx', 'target_object_type', 
+                        'ref_object_type', 'target_object_id', 'ref_object_id']
+        
+        feature_columns = [col for col in df_filtered.columns if col not in excluded_cols and 
+                          not col.startswith('target_object') and not col.startswith('ref_object')]
+        
+        # Prepare target variables
+        X = df_filtered[feature_columns].values
+        y_depth = np.log1p(df_filtered['relative_depth'].values)
+        y_coords = df_filtered[['world_x', 'world_y', 'world_z']].values
+        y_angles = np.radians(df_filtered['target_rot_y'].values)
+        
+        # Handle NaN values
+        valid_mask = ~(np.any(np.isnan(X), axis=1) | np.isnan(y_depth) | 
+                      np.any(np.isnan(y_coords), axis=1) | np.isnan(y_angles))
+        
+        if not np.all(valid_mask):
+            print(f"⚠ Removing {(~valid_mask).sum()} samples with NaN values")
+            X = X[valid_mask]
+            y_depth = y_depth[valid_mask]
+            y_coords = y_coords[valid_mask]
+            y_angles = y_angles[valid_mask]
+            df_filtered = df_filtered[valid_mask].reset_index(drop=True)
+        
+        print(f"✓ Training data prepared: {len(X)} samples, {X.shape[1]} features")
+        
+        # Step 5: Model training
+        print("\nStep 5/7: Training enhanced model...")
+        
+        # Train-validation split
+        split_data = train_test_split(
+            X, y_depth, y_coords, y_angles, df_filtered, 
+            test_size=CONFIG['test_size'], 
+            random_state=42
+        )
+        X_train, X_val, y_depth_train, y_depth_val, y_coords_train, y_coords_val, y_angles_train, y_angles_val, df_train, df_val = split_data
+        
+        # Scale features and coordinates
+        feature_scaler = StandardScaler()
+        coord_scaler = StandardScaler()
+        
+        X_train_scaled = feature_scaler.fit_transform(X_train)
+        X_val_scaled = feature_scaler.transform(X_val)
+        y_coords_train_scaled = coord_scaler.fit_transform(y_coords_train)
+        y_coords_val_scaled = coord_scaler.transform(y_coords_val)
+        
+        # Create datasets and loaders
+        train_dataset = EnhancedAI2ThorDataset(
+            X_train_scaled, y_depth_train, y_coords_train_scaled, y_angles_train,
+            augment=True, noise_std=0.01
+        )
+        val_dataset = EnhancedAI2ThorDataset(
+            X_val_scaled, y_depth_val, y_coords_val_scaled, y_angles_val,
+            augment=False
+        )
+        
+        train_loader = DataLoader(train_dataset, batch_size=CONFIG['batch_size'], shuffle=True, num_workers=0)
+        val_loader = DataLoader(val_dataset, batch_size=CONFIG['batch_size'], shuffle=False, num_workers=0)
+        
+        # Initialize model
+        model = EnhancedGeometricEstimator(
+            input_dim=X_train.shape[1],
+            hidden_dim=512,
+            dropout_rate=0.2,
+            num_heads=8,
+            use_uncertainty=CONFIG['use_uncertainty']
+        )
+        
+        # Initialize trainer
+        trainer = EnhancedAI2ThorTrainer(
+            model, train_loader, val_loader, coord_scaler, 
+            CONFIG['device'], CONFIG['use_uncertainty']
+        )
+        
+        # Train model
+        trained_model = trainer.train(
+            epochs=CONFIG['epochs'],
+            early_stopping_patience=CONFIG['early_stopping_patience']
+        )
+        
+        print("✓ Model training completed successfully!")
+        
+        # Step 6: Save model and generate reports
+        print("\nStep 6/7: Saving model and generating reports...")
+        
+        # Save model checkpoint
+        final_checkpoint = {
+            'model_state_dict': trained_model.state_dict(),
+            'feature_scaler': feature_scaler,
+            'coord_scaler': coord_scaler,
+            'feature_names': feature_columns,
+            'model_type': 'enhanced_ai2thor_geometric_estimator_with_angles',
+            'use_uncertainty': CONFIG['use_uncertainty'],
+            'input_dim': X_train.shape[1],
+            'training_metrics': trainer.val_metrics[-1] if trainer.val_metrics else None,
+            'config': CONFIG
+        }
+        
+        model_path = 'best_enhanced_ai2thor_model_with_angles.pth'
+        torch.save(final_checkpoint, model_path)
+        print(f"✓ Model saved: {model_path}")
+        
+        # Generate training plots
+        # create_enhanced_training_plots(trainer, coord_scaler, val_dataset, CONFIG['device'], CONFIG['use_uncertainty'])
+        print("✓ Training plots generated")
+        
+        # Step 7: Comprehensive evaluation
+        print("\nStep 7/7: Performing comprehensive evaluation...")
+        
+        # Save predictions with scene information
+        predictions_csv = "ai2thor_predictions_and_targets.csv"
+        predictions_df = save_predictions_to_csv(trainer, df_val, predictions_csv)
+        print(f"✓ Predictions saved: {predictions_csv}")
+        
+        # Perform detailed error analysis
+        evaluation_dir = "evaluation_results"
+        analysis_results = evaluate_worst_predictions(predictions_df, evaluation_dir)
+        print(f"✓ Error analysis completed: {evaluation_dir}/")
+        
+        # Create standalone evaluation script
+        # create_evaluation_script()
+        print("✓ Standalone evaluation script created: evaluate_predictions.py")
+        
+        # Step 8: Final summary
+        print("\n" + "=" * 70)
+        print("TRAINING COMPLETED SUCCESSFULLY!")
+        print("=" * 70)
+        
+        print("\nFinal Performance Summary:")
+        if trainer.val_metrics:
+            final_metrics = trainer.val_metrics[-1]
+            print(f"   Coordinate R²: {final_metrics.get('coord_r2', 0):.4f}")
+            print(f"   Coordinate MAE: {final_metrics.get('coord_mae', 0):.4f}m")
+            print(f"   Angle MAE: {final_metrics.get('angle_mae', 0):.1f}°")
+            print(f"   Depth R²: {final_metrics.get('depth_r2', 0):.4f}")
             
-            # Unscale coordinates
-            coord_pred = coord_scaler.inverse_transform(coord_pred.cpu().numpy())[0]
-            
-            return {
-                'relative_depth': depth_pred,
-                'world_coordinates': coord_pred
-            }
+            # Per-axis breakdown
+            print("\n   Per-axis Performance:")
+            for axis in ['X', 'Y', 'Z']:
+                r2_key, mae_key = f'{axis}_r2', f'{axis}_mae'
+                print(f"     {axis}: R²={final_metrics.get(r2_key, 0):.4f}, MAE={final_metrics.get(mae_key, 0):.4f}m")
+        
+        print(f"\nFiles Generated:")
+        print(f"   • {model_path} - Trained model")
+        print(f"   • enhanced_ai2thor_training_evaluation_with_angles.png - Training plots")
+        print(f"   • {predictions_csv} - All predictions and ground truth")
+        print(f"   • {evaluation_dir}/ - Detailed error analysis")
+        print(f"   • evaluate_predictions.py - Standalone evaluation script")
+        
+        print(f"\nModel Features:")
+        print(f"   • Full 6DOF pose estimation (position + orientation)")
+        print(f"   • Uncertainty quantification: {CONFIG['use_uncertainty']}")
+        print(f"   • Multi-scale attention architecture")
+        print(f"   • Comprehensive failure mode analysis")
+        
+        print(f"\nNext Steps:")
+        print(f"   • Review error analysis in {evaluation_dir}/")
+        print(f"   • Run 'python evaluate_predictions.py' for additional analysis")
+        print(f"   • Use load_enhanced_model() function for inference")
+        
+        return True
+        
+    except Exception as e:
+        print(f"\n✗ Training failed with error: {e}")
+        print(f"Check your dataset path and ensure all required columns are present.")
+        import traceback
+        print(f"\nFull traceback:")
+        traceback.print_exc()
+        return False
 
 
 if __name__ == "__main__":
-    # Train the enhanced model
-    print("Training Enhanced AI2-THOR Coordinate Estimation Model")
-    print("====================================================")
-    
-    result = train_enhanced_ai2thor_model(
-        dataset_path="ai2thor_coordinate_dataset_final.csv",
-        test_size=0.2,
-        batch_size=32,
-        epochs=200,
-        use_uncertainty=True
-    )
-    
-    if result is not None:
-        model, feature_scaler, coord_scaler, feature_names = result
-        print("\nEnhanced AI2-THOR coordinate estimation model training completed successfully!")
-        print("Key improvements implemented:")
-        print("   • Enhanced geometric feature engineering (25+ new features)")
-        print("   • Multi-scale attention architecture with feature grouping")
-        print("   • Data quality filtering and augmentation")
-        print("   • Uncertainty estimation for prediction confidence")
-        print("   • Balanced sampling and curriculum learning")
-        print("\nModel saved as 'best_enhanced_ai2thor_model_final91225.pth'")
-        print("Training plots saved as 'enhanced_ai2thor_training_evaluation_final.png'")
-        print("\nReady for inference on real-world images!")
+    success = main()
+    if success:
+        print("\n🎉 Training pipeline completed successfully!")
     else:
-        print("\nTraining failed. Please check your dataset and try again.")
+        print("\n❌ Training pipeline failed. Check the error messages above.")
