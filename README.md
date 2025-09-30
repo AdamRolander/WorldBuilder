@@ -10,3 +10,5 @@
 - Better training dataset
 - Pytorch3D during training
 - Flags for occlusion?
+
+## (X, Y, Z) --> (X, Z, Y) in Blender
