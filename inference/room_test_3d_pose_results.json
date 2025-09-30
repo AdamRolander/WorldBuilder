@@ -1,0 +1,80 @@
+[
+    {
+        "id": 1,
+        "label": "couch",
+        "position_m": [
+            -0.5797364085667216,
+            -0.26243822075782536,
+            2.277429983525536
+        ],
+        "orientation_yaw_deg": 0.0,
+        "relative_depth": 1.0,
+        "abs_depth_estimate_m": 1.0,
+        "is_reference": true
+    },
+    {
+        "id": 2,
+        "label": "cabinet-merged",
+        "position_m": [
+            -0.1413610428571701,
+            0.9840312600135803,
+            1.7530066967010498
+        ],
+        "orientation_yaw_deg": 12.410411033230856,
+        "relative_depth": 1.4801222085952759,
+        "abs_depth_estimate_m": 1.4801222085952759,
+        "is_reference": false
+    },
+    {
+        "id": 3,
+        "label": "light",
+        "position_m": [
+            -0.4101317822933197,
+            0.951262354850769,
+            1.7182756662368774
+        ],
+        "orientation_yaw_deg": 13.756878667714027,
+        "relative_depth": 1.4630153179168701,
+        "abs_depth_estimate_m": 1.4630153179168701,
+        "is_reference": false
+    },
+    {
+        "id": 5,
+        "label": "tv",
+        "position_m": [
+            -0.17028386890888214,
+            0.9802514314651489,
+            1.7472354173660278
+        ],
+        "orientation_yaw_deg": 12.659417532254718,
+        "relative_depth": 1.4804060459136963,
+        "abs_depth_estimate_m": 1.4804060459136963,
+        "is_reference": false
+    },
+    {
+        "id": 7,
+        "label": "table-merged",
+        "position_m": [
+            -0.13469739258289337,
+            0.9849727153778076,
+            1.7546842098236084
+        ],
+        "orientation_yaw_deg": 12.384413625702495,
+        "relative_depth": 1.480165719985962,
+        "abs_depth_estimate_m": 1.480165719985962,
+        "is_reference": false
+    },
+    {
+        "id": 8,
+        "label": "potted plant",
+        "position_m": [
+            -0.1335514634847641,
+            0.9851415157318115,
+            1.7549997568130493
+        ],
+        "orientation_yaw_deg": 12.390963777116538,
+        "relative_depth": 1.480177879333496,
+        "abs_depth_estimate_m": 1.480177879333496,
+        "is_reference": false
+    }
+]
