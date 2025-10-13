@@ -11,8 +11,67 @@ import random
 import pandas as pd
 from typing import List, Dict, Any
 from dotenv import load_dotenv
+import cv2
 
 load_dotenv()
+
+def estimate_depth_with_midas(image_path: str, bbox_data: dict, img_width: int, img_height: int, 
+                              midas_model, midas_transform, depth_map_cache: dict = None) -> float:
+    """
+    Estimate depth for a bounding box using MiDaS depth estimation.
+    
+    Args:
+        image_path: Path to the input image
+        bbox_data: Dictionary with bbox coordinates (x_min, y_min, width, height)
+        img_width: Image width
+        img_height: Image height
+        
+    Returns:
+        Estimated depth in meters (relative scale)
+    """
+    if depth_map_cache is not None and image_path in depth_map_cache:
+        depth_map = depth_map_cache[image_path]
+    else:
+        # Load image
+        img = cv2.imread(image_path)
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        
+        # Apply transforms using the passed transform
+        input_batch = midas_transform(img).unsqueeze(0)
+        
+        # Predict depth using the passed model
+        with torch.no_grad():
+            prediction = midas_model(input_batch)
+            prediction = torch.nn.functional.interpolate(
+                prediction.unsqueeze(1),
+                size=img.shape[:2],
+                mode="bicubic",
+                align_corners=False,
+            ).squeeze()
+        
+        depth_map = prediction.cpu().numpy()
+
+        # Cache it
+        if depth_map_cache is not None:
+            depth_map_cache[image_path] = depth_map
+    
+    # Extract depth values within the bounding box
+    x_min = int(bbox_data['x_min'])
+    y_min = int(bbox_data['y_min'])
+    x_max = int(x_min + bbox_data['width'])
+    y_max = int(y_min + bbox_data['height'])
+    
+    # Clamp to image bounds
+    x_min = max(0, min(x_min, img_width - 1))
+    x_max = max(0, min(x_max, img_width))
+    y_min = max(0, min(y_min, img_height - 1))
+    y_max = max(0, min(y_max, img_height))
+    
+    # Get median depth in bbox (more robust than mean)
+    bbox_depth_values = depth_map[y_min:y_max, x_min:x_max]
+    median_depth = np.median(bbox_depth_values)
+    
+    return float(median_depth)
 
 # --- 1. RECREATE NECESSARY CLASSES FROM enhanced_attention.py ---
 
@@ -525,6 +584,20 @@ def run_enhanced_inference_pipeline(
         
     print(f"✓ Segmentation complete. Found {len(panoptic_segments)} objects.")
     
+    print("\n2.5. Loading MiDaS depth estimation model...")
+    try:
+        midas = torch.hub.load("intel-isl/MiDaS", "MiDaS_small")
+        midas.to(DEVICE)
+        midas.eval()
+        
+        midas_transforms = torch.hub.load("intel-isl/MiDaS", "transforms")
+        midas_transform = midas_transforms.small_transform
+        
+        print("✓ MiDaS model loaded successfully")
+    except Exception as e:
+        print(f"✗ ERROR: Failed to load MiDaS model: {e}")
+        return
+
     # --- 3. LLM API CALL FOR SIZE ESTIMATION ---
     print("\n3. Calling LLM for Real-World Size Estimation...")
     estimated_sizes_m = call_llm_for_size_estimation(panoptic_segments, image_path)
@@ -548,6 +621,8 @@ def run_enhanced_inference_pipeline(
     print(f"Using **{ref_segment['label']} (ID: {ref_segment['id']})** as reference object.")
     
     results = []
+    ref_midas_depth = None  # Initialize here
+    depth_map_cache = {}
     
     for target_segment in valid_segments:
         target_id = target_segment['id']
@@ -568,11 +643,60 @@ def run_enhanced_inference_pipeline(
         
         # Use a preliminary depth estimate based on the longest 3D dimension and longest 2D dimension
         # ... (rest of the calculation) ...
+        # longest_2d_dim_px = max(target_segment['bbox_data']['width'], target_segment['bbox_data']['height'])
+        
+        # # Approximate focal length for analytical depth
+        focal_length_px = (img_width / 2.0) / math.tan(ASSUMED_FOV_DEG * math.pi / 360.0)
+        # analytical_depth = (longest_3d_dim * focal_length_px) / longest_2d_dim_px if longest_2d_dim_px > 0 else 10.0
+
         longest_2d_dim_px = max(target_segment['bbox_data']['width'], target_segment['bbox_data']['height'])
         
-        # Approximate focal length for analytical depth
-        focal_length_px = (img_width / 2.0) / math.tan(ASSUMED_FOV_DEG * math.pi / 360.0)
-        analytical_depth = (longest_3d_dim * focal_length_px) / longest_2d_dim_px if longest_2d_dim_px > 0 else 10.0
+        # NEW APPROACH: Estimate depth based on bbox size relative to reference
+        ref_bbox_size_px = max(ref_segment['bbox_data']['width'], ref_segment['bbox_data']['height'])
+        target_bbox_size_px = max(target_segment['bbox_data']['width'], target_segment['bbox_data']['height'])
+        
+        print(f"   Estimating depth for {target_label} using MiDaS...")
+        
+        try:
+            # Get MiDaS depth for both target and reference
+            target_midas_depth = estimate_depth_with_midas(
+                            image_path, target_segment['bbox_data'], img_width, img_height,
+                            midas, midas_transform, depth_map_cache
+                        )            
+
+            if ref_midas_depth is None:
+                ref_midas_depth = estimate_depth_with_midas(
+                                    image_path, ref_segment['bbox_data'], img_width, img_height,
+                                    midas, midas_transform, depth_map_cache
+                                )            
+            # MiDaS gives inverse depth (closer objects = higher values)
+            # Convert to relative depth ratio
+            if ref_midas_depth > 0 and target_midas_depth > 0:
+                # Inverse depth ratio (MiDaS convention)
+                depth_ratio = ref_midas_depth / target_midas_depth
+                
+                # Scale to reasonable absolute depth (assume reference is ~3m away)
+                ref_baseline_depth = 3.0
+                analytical_depth = ref_baseline_depth * depth_ratio
+                
+                print(f"   MiDaS depth - Target: {target_midas_depth:.1f}, Ref: {ref_midas_depth:.1f}, Ratio: {depth_ratio:.2f}, Est depth: {analytical_depth:.2f}m")
+            else:
+                analytical_depth = 3.0
+                print(f"   MiDaS depth estimation failed, using default: {analytical_depth}m")
+                
+        except Exception as e:
+            print(f"   Error in MiDaS depth estimation: {e}")
+            # Fallback to bbox-size-based estimation
+            ref_bbox_size_px = max(ref_segment['bbox_data']['width'], ref_segment['bbox_data']['height'])
+            target_bbox_size_px = max(target_segment['bbox_data']['width'], target_segment['bbox_data']['height'])
+            
+            if target_bbox_size_px > 0 and ref_bbox_size_px > 0:
+                size_ratio = ref_bbox_size_px / target_bbox_size_px
+                analytical_depth = 3.0 * size_ratio
+            else:
+                analytical_depth = 3.0
+            
+            print(f"   Fallback bbox-based depth: {analytical_depth:.2f}m")
         
         # Since the model is relative, we'll use a pseudo-relative depth based on the analytical estimate
         # relative_depth = analytical_depth / ref_analytical_depth.
@@ -725,7 +849,8 @@ def run_enhanced_inference_pipeline(
             'orientation_yaw_deg': res['angle_pred_deg'],
             'relative_depth': res['rel_depth_pred'],
             'abs_depth_estimate_m': estimated_abs_depth,
-            'is_reference': res['is_reference']
+            'is_reference': res['is_reference'],
+            'dimensions_m': estimated_sizes_m[res['id']]
         })
 
     # Optional: Save final output to JSON
@@ -733,7 +858,6 @@ def run_enhanced_inference_pipeline(
     with open(output_filename, 'w') as f:
         json.dump(final_output, f, indent=4, cls=NumpyEncoder)
     print(f"\n✓ 3D pose results saved to {output_filename}")
-
 
 class NumpyEncoder(json.JSONEncoder):
     """Custom encoder for numpy data types."""
@@ -757,7 +881,7 @@ if __name__ == "__main__":
     
     # --- USER CONFIGURATION ---
     # !!! CHANGE THIS TO YOUR ACTUAL IMAGE PATH !!!
-    YOUR_LOCAL_IMAGE_PATH = r"/Users/adamrolander/WorldBuilder/inference/kitchen.jpg" 
+    YOUR_LOCAL_IMAGE_PATH = r"/Users/adamrolander/WorldBuilder/inference/room_test.png" 
     
     run_enhanced_inference_pipeline(
         image_path=YOUR_LOCAL_IMAGE_PATH,
