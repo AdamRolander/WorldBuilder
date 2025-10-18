@@ -1,0 +1,1 @@
+blenderproc run visualize_reconstruction.py room_test_3d_pose_results.json --visualize

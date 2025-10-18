@@ -3,16 +3,16 @@
         "id": 1,
         "label": "couch",
         "position_m": [
-            -0.7636718749999999,
-            -0.34570312499999994,
-            3.0
+            -0.5797364085667216,
+            -0.26243822075782536,
+            2.277429983525536
         ],
         "orientation_yaw_deg": 0.0,
         "relative_depth": 1.0,
         "abs_depth_estimate_m": 1.0,
         "is_reference": true,
         "dimensions_m": [
-            1.6,
+            1.8,
             0.9,
             0.8
         ]
@@ -21,35 +21,35 @@
         "id": 2,
         "label": "cabinet-merged",
         "position_m": [
-            -0.1942993849515915,
-            0.9786925911903381,
-            1.7383582592010498
+            0.0119706392288208,
+            1.122144103050232,
+            2.939626455307007
         ],
-        "orientation_yaw_deg": 13.056161023025956,
-        "relative_depth": 1.4792425632476807,
-        "abs_depth_estimate_m": 1.4792425632476807,
+        "orientation_yaw_deg": -8279.994629656872,
+        "relative_depth": 1.4938443899154663,
+        "abs_depth_estimate_m": 1.4938443899154663,
         "is_reference": false,
         "dimensions_m": [
             1.4,
             0.45,
-            0.6
+            0.5
         ]
     },
     {
         "id": 3,
         "label": "light",
         "position_m": [
-            -0.5221409797668457,
-            0.9369831681251526,
-            1.699657917022705
+            -0.0170937217772007,
+            1.103074550628662,
+            2.934480905532837
         ],
-        "orientation_yaw_deg": 15.857692884700917,
-        "relative_depth": 1.4391961097717285,
-        "abs_depth_estimate_m": 1.4391961097717285,
+        "orientation_yaw_deg": -8193.471323213524,
+        "relative_depth": 1.4907808303833008,
+        "abs_depth_estimate_m": 1.4907808303833008,
         "is_reference": false,
         "dimensions_m": [
-            0.35,
-            0.35,
+            0.4,
+            0.4,
             1.6
         ]
     },
@@ -57,13 +57,13 @@
         "id": 5,
         "label": "tv",
         "position_m": [
-            -0.2647576630115509,
-            0.971779465675354,
-            1.7260953187942505
+            0.006651725620031357,
+            1.1187779903411865,
+            2.939192533493042
         ],
-        "orientation_yaw_deg": 13.867338194518766,
-        "relative_depth": 1.478401780128479,
-        "abs_depth_estimate_m": 1.478401780128479,
+        "orientation_yaw_deg": -8268.321453874727,
+        "relative_depth": 1.4934666156768799,
+        "abs_depth_estimate_m": 1.4934666156768799,
         "is_reference": false,
         "dimensions_m": [
             1.25,
@@ -75,16 +75,16 @@
         "id": 7,
         "label": "table-merged",
         "position_m": [
-            -0.22898076474666595,
-            0.9751781225204468,
-            1.7326949834823608
+            0.02276773937046528,
+            1.1229063272476196,
+            2.945465564727783
         ],
-        "orientation_yaw_deg": 13.454435329944923,
-        "relative_depth": 1.478792428970337,
-        "abs_depth_estimate_m": 1.478792428970337,
+        "orientation_yaw_deg": -8306.409648611467,
+        "relative_depth": 1.4941917657852173,
+        "abs_depth_estimate_m": 1.4941917657852173,
         "is_reference": false,
         "dimensions_m": [
-            1.0,
+            1.1,
             0.6,
             0.45
         ]
@@ -93,18 +93,18 @@
         "id": 8,
         "label": "potted plant",
         "position_m": [
-            -0.2115170657634735,
-            0.9768246412277222,
-            1.7351857423782349
+            0.016352415084838867,
+            1.1224740743637085,
+            2.9418907165527344
         ],
-        "orientation_yaw_deg": 13.236441304847505,
-        "relative_depth": 1.4791322946548462,
-        "abs_depth_estimate_m": 1.4791322946548462,
+        "orientation_yaw_deg": -8289.912282897783,
+        "relative_depth": 1.4939889907836914,
+        "abs_depth_estimate_m": 1.4939889907836914,
         "is_reference": false,
         "dimensions_m": [
-            0.5,
-            0.5,
-            1.1
+            0.6,
+            0.6,
+            1.2
         ]
     }
 ]
