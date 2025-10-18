@@ -25,6 +25,9 @@ def estimate_depth_with_midas(image_path: str, bbox_data: dict, img_width: int, 
         bbox_data: Dictionary with bbox coordinates (x_min, y_min, width, height)
         img_width: Image width
         img_height: Image height
+        midas_model: Loaded MiDaS model
+        midas_transform: MiDaS transform function
+        depth_map_cache: Optional cache for depth maps
         
     Returns:
         Estimated depth in meters (relative scale)
@@ -34,14 +37,25 @@ def estimate_depth_with_midas(image_path: str, bbox_data: dict, img_width: int, 
     else:
         # Load image
         img = cv2.imread(image_path)
+        if img is None:
+            raise ValueError(f"Could not load image from {image_path}")
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         
-        # Apply transforms using the passed transform
-        input_batch = midas_transform(img).unsqueeze(0)
+        # Apply MiDaS transform - this returns a tensor ready for the model
+        input_batch = midas_transform(img)
         
-        # Predict depth using the passed model
+        # Move to device and ensure correct shape [1, 3, H, W]
+        if input_batch.dim() == 3:
+            input_batch = input_batch.unsqueeze(0)
+        
+        device = next(midas_model.parameters()).device
+        input_batch = input_batch.to(device)
+        
+        # Predict depth
         with torch.no_grad():
             prediction = midas_model(input_batch)
+            
+            # Interpolate to original image size
             prediction = torch.nn.functional.interpolate(
                 prediction.unsqueeze(1),
                 size=img.shape[:2],
@@ -67,8 +81,17 @@ def estimate_depth_with_midas(image_path: str, bbox_data: dict, img_width: int, 
     y_min = max(0, min(y_min, img_height - 1))
     y_max = max(0, min(y_max, img_height))
     
+    # Ensure valid bbox
+    if x_max <= x_min or y_max <= y_min:
+        print(f"Warning: Invalid bbox bounds after clamping: ({x_min}, {y_min}, {x_max}, {y_max})")
+        return 3.0  # Return default depth
+    
     # Get median depth in bbox (more robust than mean)
     bbox_depth_values = depth_map[y_min:y_max, x_min:x_max]
+    if bbox_depth_values.size == 0:
+        print(f"Warning: Empty bbox region")
+        return 3.0
+    
     median_depth = np.median(bbox_depth_values)
     
     return float(median_depth)
@@ -660,43 +683,52 @@ def run_enhanced_inference_pipeline(
         try:
             # Get MiDaS depth for both target and reference
             target_midas_depth = estimate_depth_with_midas(
-                            image_path, target_segment['bbox_data'], img_width, img_height,
-                            midas, midas_transform, depth_map_cache
-                        )            
+                image_path, target_segment['bbox_data'], img_width, img_height,
+                midas, midas_transform, depth_map_cache
+            )            
 
             if ref_midas_depth is None:
                 ref_midas_depth = estimate_depth_with_midas(
-                                    image_path, ref_segment['bbox_data'], img_width, img_height,
-                                    midas, midas_transform, depth_map_cache
-                                )            
+                    image_path, ref_segment['bbox_data'], img_width, img_height,
+                    midas, midas_transform, depth_map_cache
+                )
+            
             # MiDaS gives inverse depth (closer objects = higher values)
-            # Convert to relative depth ratio
             if ref_midas_depth > 0 and target_midas_depth > 0:
-                # Inverse depth ratio (MiDaS convention)
+                # Inverse depth ratio
                 depth_ratio = ref_midas_depth / target_midas_depth
                 
-                # Scale to reasonable absolute depth (assume reference is ~3m away)
-                ref_baseline_depth = 3.0
+                # Use LLM size estimate to calibrate absolute scale
+                # Assume reference object is at a distance where its bbox matches its real size
+                ref_longest_dim_m = max(ref_size_m)
+                ref_bbox_longest_px = max(ref_segment['bbox_data']['width'], ref_segment['bbox_data']['height'])
+                
+                # Estimate reference absolute depth from pinhole camera model
+                ref_baseline_depth = (ref_longest_dim_m * focal_length_px) / ref_bbox_longest_px
+                
+                # Scale target depth using MiDaS ratio
                 analytical_depth = ref_baseline_depth * depth_ratio
                 
-                print(f"   MiDaS depth - Target: {target_midas_depth:.1f}, Ref: {ref_midas_depth:.1f}, Ratio: {depth_ratio:.2f}, Est depth: {analytical_depth:.2f}m")
+                print(f"   MiDaS - Target: {target_midas_depth:.1f}, Ref: {ref_midas_depth:.1f}")
+                print(f"   Depth ratio: {depth_ratio:.2f}, Ref baseline: {ref_baseline_depth:.2f}m")
+                print(f"   Estimated absolute depth: {analytical_depth:.2f}m")
             else:
-                analytical_depth = 3.0
-                print(f"   MiDaS depth estimation failed, using default: {analytical_depth}m")
+                # Fallback to simple pinhole model
+                target_longest_dim_m = max(target_size_m_float)
+                target_bbox_longest_px = max(target_segment['bbox_data']['width'], target_segment['bbox_data']['height'])
+                analytical_depth = (target_longest_dim_m * focal_length_px) / target_bbox_longest_px if target_bbox_longest_px > 0 else 3.0
+                print(f"   MiDaS depth invalid, using pinhole model: {analytical_depth:.2f}m")
                 
         except Exception as e:
             print(f"   Error in MiDaS depth estimation: {e}")
-            # Fallback to bbox-size-based estimation
-            ref_bbox_size_px = max(ref_segment['bbox_data']['width'], ref_segment['bbox_data']['height'])
-            target_bbox_size_px = max(target_segment['bbox_data']['width'], target_segment['bbox_data']['height'])
+            import traceback
+            traceback.print_exc()
             
-            if target_bbox_size_px > 0 and ref_bbox_size_px > 0:
-                size_ratio = ref_bbox_size_px / target_bbox_size_px
-                analytical_depth = 3.0 * size_ratio
-            else:
-                analytical_depth = 3.0
-            
-            print(f"   Fallback bbox-based depth: {analytical_depth:.2f}m")
+            # Fallback to pinhole camera model
+            target_longest_dim_m = max(target_size_m_float)
+            target_bbox_longest_px = max(target_segment['bbox_data']['width'], target_segment['bbox_data']['height'])
+            analytical_depth = (target_longest_dim_m * focal_length_px) / target_bbox_longest_px if target_bbox_longest_px > 0 else 3.0
+            print(f"   Fallback pinhole-based depth: {analytical_depth:.2f}m")
         
         # Since the model is relative, we'll use a pseudo-relative depth based on the analytical estimate
         # relative_depth = analytical_depth / ref_analytical_depth.
