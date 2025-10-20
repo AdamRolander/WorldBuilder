@@ -1,50 +1,53 @@
 AI2-THOR Coordinate and Angle Estimation - Prediction Analysis Report
 ======================================================================
-Generated on: 2025-09-17 17:07:37
+Generated on: 2025-10-19 14:21:53
 
 OVERALL PERFORMANCE SUMMARY
 ------------------------------
-Total predictions analyzed: 2229
+Total predictions analyzed: 2216
 
 Coordinate Error:
-  Mean: 0.1868m
-  Median: 0.1442m
-  Std: 0.1604m
-  90th percentile: 0.3537m
-  95th percentile: 0.4643m
-  99th percentile: 0.8482m
+  Mean: 0.1870m
+  Median: 0.1222m
+  Std: 0.2394m
+  90th percentile: 0.3788m
+  95th percentile: 0.5260m
+  99th percentile: 1.1918m
 
 Angle Error:
-  Mean: 25.9553°
-  Median: 8.3627°
-  Std: 38.5610°
-  90th percentile: 76.8610°
-  95th percentile: 121.2872°
-  99th percentile: 170.2322°
+  Mean: 77.4706°
+  Median: 70.5337°
+  Std: 51.2512°
+  90th percentile: 153.9879°
+  95th percentile: 166.8223°
+  99th percentile: 178.6133°
 
 Depth Error:
-  Mean: 0.0375m
-  Median: 0.0211m
-  Std: 0.0679m
-  90th percentile: 0.0738m
-  95th percentile: 0.1149m
-  99th percentile: 0.3180m
+  Mean: 0.0387m
+  Median: 0.0173m
+  Std: 0.1934m
+  90th percentile: 0.0695m
+  95th percentile: 0.1110m
+  99th percentile: 0.2655m
 
 ERROR CORRELATION ANALYSIS
 --------------------------
-Coordinate vs Angle error correlation: 0.039
-Coordinate vs Depth error correlation: 0.111
-Angle vs Depth error correlation: -0.027
+Coordinate vs Angle error correlation: 0.010
+Coordinate vs Depth error correlation: 0.221
+Angle vs Depth error correlation: 0.050
 
 UNCERTAINTY ANALYSIS
 -------------------
-Depth uncertainty vs error correlation: 0.705
-Coordinate uncertainty vs error correlation: 0.378
-Angle uncertainty vs error correlation: 0.502
+Depth uncertainty vs error correlation: 0.539
+Coordinate uncertainty vs error correlation: 0.507
+Angle uncertainty vs error correlation: 0.149
 
 Note: Higher correlation indicates better uncertainty calibration
 
 RECOMMENDATIONS FOR IMPROVEMENT
 ---------------------------------
-• Model performance appears to be within acceptable ranges
-• Consider fine-tuning hyperparameters for further improvements
+• High angle errors detected. Consider:
+  - Adding more rotational features
+  - Using circular loss functions
+  - Augmenting data with rotation variations
+

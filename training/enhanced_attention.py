@@ -287,7 +287,8 @@ def calculate_angle_error(pred_angles, true_angles):
 
 
 def calculate_unprojection(row, img_width=300, img_height=300):
-    """Calculates an initial 3D world coordinate guess using the unprojection formula."""
+    """Calculates camera-relative 3D coordinates using unprojection formula."""
+    
     # Get Camera Intrinsics (from FoV)
     fov_rad = row['field_of_view'] * (math.pi / 180.0)
     focal_length = (img_width / 2.0) / math.tan(fov_rad / 2.0)
@@ -308,26 +309,72 @@ def calculate_unprojection(row, img_width=300, img_height=300):
     pixel_coords = np.array([px, py, 1])
     camera_coords = K_inv @ pixel_coords * depth
     
-    # Get Camera Extrinsics (Position and Rotation)
-    rotation = R.from_euler('xyz', [row['agent_rot_x'], row['agent_rot_y'], row['agent_rot_z']], degrees=True)
-    rotation_matrix = rotation.as_matrix()
-    translation_vector = np.array([row['agent_pos_x'], row['agent_pos_y'], row['agent_pos_z']])
-
-    # Transform from Camera Coordinates to World Coordinates
-    world_coords = rotation_matrix @ camera_coords + translation_vector
+    # CHANGED: Our dataset stores camera-relative coords as "world" coords
+    # Camera is always at [0,0,0] with [0,0,0] rotation
+    # So camera_coords ARE the final coordinates - no transformation needed
     
-    return world_coords[0], world_coords[1], world_coords[2]
+    return camera_coords[0], camera_coords[1], camera_coords[2]
 
 
 def calculate_comprehensive_geometric_features(row, img_width=300, img_height=300):
-    """Calculate comprehensive features including enhanced depth map data."""
+    """
+    Calculate comprehensive features for coordinate prediction.
+    Unprojection is now a FEATURE (input), not a target to correct.
+    """
     features = {}
     
-    # Basic unprojection (keep existing logic but improved)
+    # 1. Unprojection coordinates as FEATURES (not targets)
     proj_x, proj_y, proj_z = calculate_unprojection(row, img_width, img_height)
-    features.update({'proj_x': proj_x, 'proj_y': proj_y, 'proj_z': proj_z})
+    features.update({
+        'unproj_x': proj_x,
+        'unproj_y': proj_y,
+        'unproj_z': proj_z
+    })
     
-    # Enhanced depth features (utilize new depth map statistics)
+    # 2. Bounding box geometry features (CRITICAL for bbox quality assessment)
+    bbox_center_x = max(0.001, min(0.999, row.get('target_bbox_center_x', 0.5)))
+    bbox_center_y = max(0.001, min(0.999, row.get('target_bbox_center_y', 0.5)))
+    bbox_width = row.get('target_bbox_width', 0.1)
+    bbox_height = row.get('target_bbox_height', 0.1)
+    
+    ref_bbox_center_x = max(0.001, min(0.999, row.get('ref_bbox_center_x', 0.5)))
+    ref_bbox_center_y = max(0.001, min(0.999, row.get('ref_bbox_center_y', 0.5)))
+    ref_bbox_width = row.get('ref_bbox_width', 0.1)
+    ref_bbox_height = row.get('ref_bbox_height', 0.1)
+    
+    features.update({
+        # Target bbox features
+        'target_bbox_center_x': bbox_center_x,
+        'target_bbox_center_y': bbox_center_y,
+        'target_bbox_width': bbox_width,
+        'target_bbox_height': bbox_height,
+        'target_bbox_area': bbox_width * bbox_height,
+        'target_bbox_aspect_ratio': bbox_width / max(bbox_height, 1e-6),
+        
+        # Reference bbox features
+        'ref_bbox_center_x': ref_bbox_center_x,
+        'ref_bbox_center_y': ref_bbox_center_y,
+        'ref_bbox_width': ref_bbox_width,
+        'ref_bbox_height': ref_bbox_height,
+        'ref_bbox_area': ref_bbox_width * ref_bbox_height,
+        'ref_bbox_aspect_ratio': ref_bbox_width / max(ref_bbox_height, 1e-6),
+        
+        # Relative bbox features
+        'bbox_area_ratio': (bbox_width * bbox_height) / max(ref_bbox_width * ref_bbox_height, 1e-6),
+        'bbox_width_ratio': bbox_width / max(ref_bbox_width, 1e-6),
+        'bbox_height_ratio': bbox_height / max(ref_bbox_height, 1e-6),
+        
+        # Geometric relationships
+        'center_offset_x': bbox_center_x - 0.5,
+        'center_offset_y': bbox_center_y - 0.5,
+        'center_distance': np.sqrt((bbox_center_x - 0.5)**2 + (bbox_center_y - 0.5)**2),
+        'angle_from_center': np.arctan2(bbox_center_y - 0.5, bbox_center_x - 0.5),
+        
+        'ref_center_offset_x': ref_bbox_center_x - 0.5,
+        'ref_center_offset_y': ref_bbox_center_y - 0.5,
+    })
+    
+    # 3. Enhanced depth features (keep your existing depth map logic)
     depth_cols = ['depth_mean', 'depth_std', 'depth_min', 'depth_max', 
                   'depth_median', 'depth_percentile_25', 'depth_percentile_75']
     
@@ -343,35 +390,22 @@ def calculate_comprehensive_geometric_features(row, img_width=300, img_height=30
                 features[f'{col}_ratio'] = row[target_col] / row[ref_col]
             features[f'{col}_diff'] = row[target_col] - row[ref_col]
     
-    # Ground truth consistency features
+    # 4. Ground truth consistency features (if available)
     if 'target_ground_truth_distance' in row:
         features['target_gt_distance'] = row['target_ground_truth_distance']
         features['ref_gt_distance'] = row['ref_ground_truth_distance']
-        
-        # Depth map vs ground truth consistency
         features['target_depth_consistency'] = row.get('target_depth_gt_consistency', 0)
         features['ref_depth_consistency'] = row.get('ref_depth_gt_consistency', 0)
     
-    # Existing geometric features (keep the good ones from your original code)
-    bbox_center_x = max(0.001, min(0.999, row.get('target_bbox_center_x', 0.5)))
-    bbox_center_y = max(0.001, min(0.999, row.get('target_bbox_center_y', 0.5)))
-    
-    features.update({
-        'center_offset_x': bbox_center_x - 0.5,
-        'center_offset_y': bbox_center_y - 0.5,
-        'center_distance': np.sqrt((bbox_center_x - 0.5)**2 + (bbox_center_y - 0.5)**2),
-        'angle_from_center': np.arctan2(bbox_center_y - 0.5, bbox_center_x - 0.5)
-    })
-    
-    # Camera and orientation features (keep existing)
+    # 5. Camera features (simplified - no rotation since camera is at origin)
     fov_rad = row['field_of_view'] * (np.pi / 180.0)
     features.update({
-        'horizon_sin': np.sin(np.radians(row['camera_horizon'])),
-        'horizon_cos': np.cos(np.radians(row['camera_horizon'])),
-        'rot_y_sin': np.sin(np.radians(row['agent_rot_y'])),
-        'rot_y_cos': np.cos(np.radians(row['agent_rot_y'])),
-        'fov_rad': fov_rad
+        'fov_rad': fov_rad,
+        'focal_length_normalized': 1.0 / np.tan(fov_rad / 2.0)
     })
+    
+    # REMOVED: horizon_sin, horizon_cos, rot_y_sin, rot_y_cos
+    # These were confusing since camera is always at origin in training
     
     return features
 
@@ -1299,7 +1333,7 @@ def main():
     
     # Configuration parameters
     CONFIG = {
-        'dataset_path': "ai2thor_coordinate_dataset_final.csv",
+        'dataset_path': "ai2thor_adjusted.csv",
         'test_size': 0.2,
         'batch_size': 32,
         'epochs': 200,
