@@ -8,7 +8,7 @@ import math
 # --- Configuration ---
 SCENES = [f"FloorPlan{i}" for i in range(1, 31)] 
 MAX_SAMPLES_PER_SCENE = 400 
-OUTPUT_FILENAME = "ai2thor_coordinate_dataset_final.csv"
+OUTPUT_FILENAME = "ai2thor_adjusted.csv"
 OCCLUSION_THRESHOLD = 0.8
 # <<< NEW: Minimum area in pixels for a bounding box to be considered valid
 MIN_BBOX_AREA = 25 
@@ -270,11 +270,41 @@ def main():
                 ref_depth_features.get('depth_gt_consistency', 0) > 2.0):
                 continue
             
-            # <<< RESTORED: Bounding box features are now included in the dataset
+            # Calculate world coordinates as usual
+            target_world_pos = np.array([target_obj['position']['x'], 
+                                        target_obj['position']['y'], 
+                                        target_obj['position']['z']])
+
+            # NEW: Transform to camera-relative coordinates
+            from scipy.spatial.transform import Rotation as R
+
+            # Get camera pose
+            cam_pos = agent_pos  # Already defined earlier
+            cam_rot = R.from_euler('xyz', 
+                                [agent_meta['rotation']['x'], 
+                                    agent_meta['rotation']['y'], 
+                                    agent_meta['rotation']['z']], 
+                                degrees=True)
+
+            # Transform world coords to camera frame
+            cam_to_world = cam_rot.as_matrix()
+            world_to_cam = cam_to_world.T
+            target_in_cam_frame = world_to_cam @ (target_world_pos - cam_pos)
+
+            # ALSO transform reference object to camera frame
+            ref_world_pos = np.array([ref_obj['position']['x'], 
+                                    ref_obj['position']['y'], 
+                                    ref_obj['position']['z']])
+            ref_in_cam_frame = world_to_cam @ (ref_world_pos - cam_pos)
+
+            # NEW: These camera-frame coords become the "world" coords for training
+            # This makes it as if the camera was always at origin looking forward
             data_row = {
                 'scene_name': scene_name,
                 'target_object_type': target_obj['objectType'], 
                 'ref_object_type': ref_obj['objectType'],
+                
+                # ... all your existing bbox, depth, occlusion features ...
                 
                 'target_bbox_center_x': target_bbox_features['center_x'],
                 'target_bbox_center_y': target_bbox_features['center_y'],
@@ -312,29 +342,38 @@ def main():
                 'ref_is_occluded': ref_occlusion['is_occluded'],
                 'ref_visibility_ratio': ref_occlusion['visibility_ratio'],
 
-                'camera_horizon': agent_meta['cameraHorizon'],
+                # CHANGED: Store camera as if at origin
+                'camera_horizon': 0.0,  # Normalized to level
                 'field_of_view': event.metadata['fov'],
-                'agent_pos_x': agent_meta['position']['x'], 
-                'agent_pos_y': agent_meta['position']['y'], 
-                'agent_pos_z': agent_meta['position']['z'],
-                'agent_rot_x': agent_meta['rotation']['x'],
-                'agent_rot_y': agent_meta['rotation']['y'], 
-                'agent_rot_z': agent_meta['rotation']['z'],
+                'agent_pos_x': 0.0,  # Camera at origin
+                'agent_pos_y': 0.0, 
+                'agent_pos_z': 0.0,
+                'agent_rot_x': 0.0,  # Looking straight ahead
+                'agent_rot_y': 0.0, 
+                'agent_rot_z': 0.0,
                 
                 'dist_to_target': dist_to_target_ground_truth,
                 'dist_to_ref': dist_to_ref_ground_truth,
                 
                 'relative_depth': relative_depth,
-                'world_x': target_obj['position']['x'], 
-                'world_y': target_obj['position']['y'], 
-                'world_z': target_obj['position']['z'],
+                
+                # CHANGED: Use camera-frame coordinates
+                'world_x': target_in_cam_frame[0], 
+                'world_y': target_in_cam_frame[1], 
+                'world_z': target_in_cam_frame[2],
 
-                'target_rot_x': target_obj['rotation']['x'],
-                'target_rot_y': target_obj['rotation']['y'], 
-                'target_rot_z': target_obj['rotation']['z'],
-                'ref_rot_x': ref_obj['rotation']['x'],
-                'ref_rot_y': ref_obj['rotation']['y'],
-                'ref_rot_z': ref_obj['rotation']['z'],
+                # ADD: Store reference object camera-frame coordinates too
+                'ref_world_x': ref_in_cam_frame[0],
+                'ref_world_y': ref_in_cam_frame[1],
+                'ref_world_z': ref_in_cam_frame[2],
+
+                # NEW: Transform target rotation to camera frame
+                'target_rot_x': 0.0,  # Simplified - could transform if needed
+                'target_rot_y': target_obj['rotation']['y'] - agent_meta['rotation']['y'], 
+                'target_rot_z': 0.0,
+                'ref_rot_x': 0.0,
+                'ref_rot_y': ref_obj['rotation']['y'] - agent_meta['rotation']['y'],
+                'ref_rot_z': 0.0,
                 
                 'target_base_y': calculate_base_position(target_obj, event.metadata['objects']),
                 'target_on_object': classify_object_support(target_obj, event.metadata['objects']),
