@@ -1,1 +1,6 @@
 blenderproc run visualize_reconstruction.py room_test_3d_pose_results.json --visualize
+
+blenderproc run ../visualize_reconstruction.py coords_json/room_test_3d_poses.json --visualize
+python ../vishd5.py
+
+blenderproc run ../visualize_reconstruction.py coords_json/kitchen_3d_poses.json --visualize
