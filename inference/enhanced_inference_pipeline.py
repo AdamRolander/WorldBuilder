@@ -299,19 +299,48 @@ def calculate_unprojection(row, img_width=300, img_height=300):
         [0, 0, 1]
     ]))
 
+    print(f"    [K_inv DEBUG]:")
+    print(f"      fov_rad: {fov_rad}")
+    print(f"      focal_length: {focal_length}")
+    print(f"      cx, cy: {cx}, {cy}")
+    print(f"      K_inv:\n{K_inv}")
+
     # Get 2D Pixel Coordinates and an Estimated Depth
     px = row['target_bbox_center_x'] * img_width
     py = row['target_bbox_center_y'] * img_height
 
-    if 'target_depth_median' in row:
-        depth = row['target_depth_median']
-    else:
-        depth = row.get('dist_to_target', row.get('dist_to_ref', 3.0))
-    
-    print(f"    [Unprojection] Using depth: {row.get('dist_to_ref', 'MISSING')} for {row.get('target_object_id', 'unknown')}")
+    print(f"    [DEBUG] row type: {type(row)}")
+    print(f"    [DEBUG] 'target_depth_median' in row: {'target_depth_median' in row}")
+    print(f"    [DEBUG] row.get('target_depth_median'): {row.get('target_depth_median')}")
+    print(f"    [DEBUG] type of value: {type(row.get('target_depth_median'))}")
+
+    try:
+        depth = row.get('target_depth_median', None)
+        if depth is None or depth <= 0:
+            depth = row.get('dist_to_target', None)
+            if depth is None or depth <= 0:
+                depth = row.get('dist_to_ref', 3.0)
+    except (KeyError, ValueError, TypeError):
+        # Fallback chain
+        try:
+            depth = float(row.get('dist_to_target', 0))
+            if depth > 0.1:
+                depth_source = 'dist_to_target'
+            else:
+                raise ValueError("Invalid dist_to_target")
+        except (ValueError, TypeError):
+            depth = float(row.get('dist_to_ref', 3.0))
+            depth_source = 'dist_to_ref (FALLBACK)'
+        
+        print(f"    [Unprojection] Using {depth_source}: {depth:.3f}m")
+
 
     # Unproject from 2D to 3D (in Camera's coordinate system)
     pixel_coords = np.array([px, py, 1])
+    print(f"      pixel_coords: {pixel_coords}")
+    temp_result = K_inv @ pixel_coords
+    print(f"      K_inv @ pixel_coords: {temp_result}")
+    print(f"      After * depth: {temp_result * depth}")
     camera_coords = K_inv @ pixel_coords * depth
     
     # Get Camera Extrinsics (Position and Rotation - ASSUMED)
@@ -322,6 +351,12 @@ def calculate_unprojection(row, img_width=300, img_height=300):
     # Transform from Camera Coordinates to World Coordinates
     world_coords = rotation_matrix @ camera_coords + translation_vector
     
+    print(f"    [Unprojection DEBUG]:")
+    print(f"      px, py: {px:.1f}, {py:.1f}")
+    print(f"      depth: {depth:.3f}")
+    print(f"      camera_coords: {camera_coords}")
+    print(f"      world_coords: {world_coords}")
+
     return world_coords[0], world_coords[1], world_coords[2]
 
 
@@ -331,14 +366,6 @@ def calculate_comprehensive_geometric_features(row, img_width=300, img_height=30
     Unprojection is now a FEATURE (input), not a target to correct.
     """
     features = {}
-    
-    # 1. Unprojection coordinates as FEATURES (not targets)
-    proj_x, proj_y, proj_z = calculate_unprojection(row, img_width, img_height)
-    features.update({
-        'unproj_x': proj_x,
-        'unproj_y': proj_y,
-        'unproj_z': proj_z
-    })
     
     # 2. Bounding box geometry features (CRITICAL for bbox quality assessment)
     bbox_center_x = max(0.001, min(0.999, row.get('target_bbox_center_x', 0.5)))
@@ -497,8 +524,19 @@ def calculate_comprehensive_geometric_features(row, img_width=300, img_height=30
         'focal_length_normalized': 1.0 / np.tan(fov_rad / 2.0)
     })
     
+    proj_x, proj_y, proj_z = calculate_unprojection(row, img_width, img_height)
+    features.update({
+        'unproj_x': proj_x,
+        'unproj_y': proj_y,
+        'unproj_z': proj_z
+    })
     # REMOVED: horizon_sin, horizon_cos, rot_y_sin, rot_y_cos
     # These were confusing since camera is always at origin in training
+    print(f"    [Feature DEBUG] Final unproj features: {features.get('unproj_x')}, {features.get('unproj_y')}, {features.get('unproj_z')}")
+
+    # ret_features = {f'enhanced_{key}': value for key, value in features.items()}
+    
+    # print(f"    [Feature DEBUG] Final unproj features: {ret_features.get('enhanced_unproj_x')}, {features.get('enhanced_unproj_y')}, {features.get('enhanced_unproj_z')}")
     
     return features
 
@@ -985,8 +1023,37 @@ def run_enhanced_inference_pipeline(
             'target_segment_id': target_segment['id'],
             'ref_segment_id': ref_segment['id'],
             'segmentation_map': segmentation_map,
-            'normalized_metric_depth_map': depth_map_cache.get(metric_depth_map_key)
+            'normalized_metric_depth_map': depth_map_cache.get(metric_depth_map_key),
+
+            ## Non-provided inference features (DEFAULTS)
+            # Occlusion features (default values for inference)
+            'target_is_occluded': 0,
+            'target_visibility_ratio': 1.0,
+            'ref_is_occluded': 0,
+            'ref_visibility_ratio': 1.0,
+            
+            # Reference world coordinates (same as camera coords since camera at origin)
+            'ref_world_x': 0.0,
+            'ref_world_y': 0.0,
+            'ref_world_z': ref_depth_for_features,
+            
+            # Rotation features (default to 0 for camera at origin)
+            'target_rot_x': 0.0,
+            'target_rot_z': 0.0,
+            'ref_rot_x': 0.0,
+            'ref_rot_y': 0.0,
+            'ref_rot_z': 0.0,
+            
+            # Support features (defaults)
+            'target_base_y': 0.0,
+            'target_on_object': 0,
         }
+
+        # VERIFY the row has correct depth values
+        print(f"  [Row Verification]:")
+        print(f"    target_depth_median: {target_ref_row.get('target_depth_median', 'MISSING')}")
+        print(f"    dist_to_target: {target_ref_row.get('dist_to_target', 'MISSING')}")
+        print(f"    dist_to_ref: {target_ref_row.get('dist_to_ref', 'MISSING')}")
         
         metric_depth_map_key = image_path + '_metric'
         if depth_map_cache and metric_depth_map_key in depth_map_cache:
@@ -1001,15 +1068,101 @@ def run_enhanced_inference_pipeline(
             target_ref_row, img_width, img_height
         )
 
+        print(f"\n[FEATURE_DICT DEBUG]:")
+        feature_dict_keys_with_depth = [k for k in feature_dict.keys() if 'depth_mean' in k or 'depth_median' in k]
+        print(f"  Keys with 'depth_mean' or 'depth_median': {feature_dict_keys_with_depth}")
+        for key in feature_dict_keys_with_depth[:5]:
+            print(f"    {key}: {feature_dict[key]}")
+
+        combined_features = {**target_ref_row, **feature_dict}
+
+        # # Convert to numpy array in the correct order
+        # if feature_names:
+        #     feature_vector = np.array([combined_features.get(name, 0.0) for name in feature_names])
+        # else:
+        #     feature_vector = np.array(list(feature_dict.values()))
+
+
+        print(f"\n[PREFIX DEBUG]:")
+        print(f"  feature_names[0]: '{feature_names[0]}'")
+        print(f"  feature_names[10]: '{feature_names[10]}'")
+        print(f"  Sample keys from combined_features:")
+        sample_keys = list(combined_features.keys())[:20]
+        for key in sample_keys:
+            print(f"    '{key}': {combined_features[key]}")
+        
+        feature_vector_values = []
+        for name in feature_names:
+            # Try exact match first
+            if name in combined_features:
+                feature_vector_values.append(combined_features[name])
+            # Try adding enhanced_ prefix
+            elif f'enhanced_{name}' in combined_features:
+                feature_vector_values.append(combined_features[f'enhanced_{name}'])
+            # Try removing enhanced_ prefix  ← FIX THIS CASE
+            elif name.startswith('enhanced_'):
+                plain_name = name[9:]  # Remove 'enhanced_' prefix
+                if plain_name in combined_features:
+                    feature_vector_values.append(combined_features[plain_name])
+                else:
+                    feature_vector_values.append(0.0)
+            else:
+                # Not found - use 0.0 as fallback
+                feature_vector_values.append(0.0)
+
+        feature_vector = np.array(feature_vector_values)
+
+        print(f"\n[MISSING FEATURES ANALYSIS]:")
+        missing_indices = np.where(feature_vector == 0.0)[0]
+        print(f"  Total missing: {len(missing_indices)}/110")
+
+        if len(missing_indices) > 0:
+            print(f"\n  Missing feature names:")
+            for idx in missing_indices[:30]:  # Show first 30
+                name = feature_names[idx]
+                # Check what variations exist
+                has_enhanced = f'enhanced_{name}' in combined_features
+                has_plain = name.lstrip('enhanced_') in combined_features if name.startswith('enhanced_') else name in combined_features
+                
+                print(f"    [{idx}] '{name}'")
+                if has_enhanced:
+                    print(f"         → but 'enhanced_{name}' exists!")
+                if name.startswith('enhanced_'):
+                    plain_name = name[9:]
+                    if plain_name in combined_features:
+                        print(f"         → but '{plain_name}' exists!")
+
+        # Group missing features by type
+        missing_feature_names = [feature_names[idx] for idx in missing_indices]
+        depth_missing = [f for f in missing_feature_names if 'depth' in f.lower()]
+        bbox_missing = [f for f in missing_feature_names if 'bbox' in f.lower()]
+        gt_missing = [f for f in missing_feature_names if 'ground' in f.lower() or 'consistency' in f.lower()]
+
+        print(f"\n  Missing by category:")
+        print(f"    Depth-related: {len(depth_missing)}")
+        print(f"    Bbox-related: {len(bbox_missing)}")
+        print(f"    Ground truth: {len(gt_missing)}")
+        print(f"    Other: {len(missing_feature_names) - len(depth_missing) - len(bbox_missing) - len(gt_missing)}")
+
+        # Debug: check unprojection values in combined dict
+        print(f"[DEBUG] enhanced_unproj_x in combined_features: {'enhanced_unproj_x' in combined_features}")
+        print(f"[DEBUG] enhanced_unproj_x value: {combined_features.get('enhanced_unproj_x', 'MISSING')}")
+
+        ###############
         print(f"  Feature depth_mean: {feature_dict.get('target_depth_mean', 'MISSING')}")
         print(f"  Feature depth_median: {feature_dict.get('target_depth_median', 'MISSING')}") # Log the median (more stable)
         print(f"  Feature unproj_x: {feature_dict.get('unproj_x', 'MISSING')}")
 
-        # Convert to numpy array in the correct order (matching training feature_names)
-        if feature_names:
-            feature_vector = np.array([feature_dict.get(name, 0.0) for name in feature_names])
-        else:
-            feature_vector = np.array(list(feature_dict.values()))
+        print(f"\n[CRITICAL DEBUG] Feature name matching:")
+        print(f"  'unproj_x' in feature_names: {'unproj_x' in feature_names}")
+        print(f"  'unproj_y' in feature_names: {'unproj_y' in feature_names}")
+        print(f"  'unproj_z' in feature_names: {'unproj_z' in feature_names}")
+        print(f"  feature_dict has unproj_x: {'unproj_x' in feature_dict}")
+        print(f"  feature_dict['unproj_x'] value: {feature_dict.get('unproj_x', 'MISSING')}")
+
+        # Show feature_names that contain 'proj' or 'unp'
+        matching_names = [name for name in feature_names if 'proj' in name.lower() or 'unp' in name.lower()]
+        print(f"  Feature names with 'proj' or 'unp': {matching_names}")
 
         # Check critical depth features
         if feature_names:
@@ -1023,6 +1176,42 @@ def run_enhanced_inference_pipeline(
 
         print(f"\n[DEBUG] Inference features (raw): {feature_vector[:10]}")
         features_scaled = feature_scaler.transform(feature_vector.reshape(1, -1))
+        
+        # VERIFY: Check that enhanced features are being used
+        print(f"\n[FEATURE MATCHING VERIFICATION]:")
+        print(f"  Total features in vector: {len(feature_vector)}")
+        print(f"  Total feature names: {len(feature_names)}")
+
+        print(f"\n[FEATURE NAME MATCHING DEBUG]:")
+        print(f"  feature_names[52] = '{feature_names[52]}'")
+        print(f"  feature_names[53] = '{feature_names[53]}'")
+        print(f"  feature_names[54] = '{feature_names[54]}'")
+        print(f"  Keys in combined_features with 'unproj': {[k for k in combined_features.keys() if 'unproj' in k.lower()]}")
+
+        # Try to get the values
+        for i in [52, 53, 54]:
+            name = feature_names[i]
+            value = combined_features.get(name, 'NOT_FOUND')
+            print(f"  combined_features.get('{name}') = {value}")
+
+        # Check unprojection specifically
+        unproj_indices = [i for i, name in enumerate(feature_names) if 'unproj' in name.lower()]
+        print(f"  Unprojection feature indices: {unproj_indices}")
+        if unproj_indices:
+            print(f"  Unprojection feature names: {[feature_names[i] for i in unproj_indices]}")
+            print(f"  Unprojection RAW values: {[feature_vector[i] for i in unproj_indices]}")
+            print(f"  Unprojection SCALED values: {[features_scaled[0, i] for i in unproj_indices]}")
+
+        # Check depth features
+        depth_indices = [i for i, name in enumerate(feature_names) if 'depth_median' in name.lower()]
+        print(f"  Depth median feature indices: {depth_indices}")
+        if depth_indices:
+            print(f"  Depth median RAW values: {[feature_vector[i] for i in depth_indices]}")
+
+        # Count how many features are zero
+        zero_count = np.sum(feature_vector == 0.0)
+        print(f"  Features with value 0.0: {zero_count}/{len(feature_vector)}")
+
         print(f"[DEBUG] Inference features (scaled): {features_scaled[0, :10]}")
 
         print(f"\n[DIAGNOSTIC] Feature breakdown for {target_label}:")

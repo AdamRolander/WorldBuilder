@@ -1404,9 +1404,33 @@ def main():
                         'scene_name', 'scene_idx', 'pose_idx', 'target_object_type', 
                         'ref_object_type', 'target_object_id', 'ref_object_id']
         
-        feature_columns = [col for col in df_filtered.columns if col not in excluded_cols and 
-                          not col.startswith('target_object') and not col.startswith('ref_object')]
+        inference_incompatible = [
+            'is_occluded', 'visibility_ratio',           # No ground truth occlusion in real images
+            'ref_world_x', 'ref_world_y', 'ref_world_z', # Circular - we're trying to predict these!
+            'target_rot_x', 'target_rot_z',              # Object rotation unknown from single image
+            'ref_rot_x', 'ref_rot_y', 'ref_rot_z',       # Reference rotation also unknown
+            'base_y', 'on_object',                       # Support detection unreliable
+            'ground_truth', 'gt_consistency'             # No ground truth during inference
+        ]
+
+        feature_columns = [col for col in df_filtered.columns 
+                        if col not in excluded_cols 
+                        and not col.startswith('target_object') 
+                        and not col.startswith('ref_object')
+                        and not any(incompatible in col for incompatible in inference_incompatible)]
         
+        print(f"\n=== Feature Selection Summary ===")
+        print(f"Total features selected: {len(feature_columns)}")
+        print(f"\nFeature categories:")
+        bbox_features = [f for f in feature_columns if 'bbox' in f]
+        depth_features = [f for f in feature_columns if 'depth' in f]
+        enhanced_features = [f for f in feature_columns if f.startswith('enhanced_')]
+        camera_features = [f for f in feature_columns if 'agent' in f or 'camera' in f or 'fov' in f]
+        print(f"  Bbox features: {len(bbox_features)}")
+        print(f"  Depth features: {len(depth_features)}")
+        print(f"  Enhanced features: {len(enhanced_features)}")
+        print(f"  Camera features: {len(camera_features)}")
+        print(f"  Other: {len(feature_columns) - len(bbox_features) - len(depth_features) - len(enhanced_features) - len(camera_features)}")
         # Prepare target variables
         X = df_filtered[feature_columns].values
         y_depth = np.log1p(df_filtered['relative_depth'].values)
