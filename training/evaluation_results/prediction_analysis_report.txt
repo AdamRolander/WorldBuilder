@@ -1,46 +1,46 @@
 AI2-THOR Coordinate and Angle Estimation - Prediction Analysis Report
 ======================================================================
-Generated on: 2025-10-19 14:21:53
+Generated on: 2025-10-26 22:59:02
 
 OVERALL PERFORMANCE SUMMARY
 ------------------------------
 Total predictions analyzed: 2216
 
 Coordinate Error:
-  Mean: 0.1870m
-  Median: 0.1222m
-  Std: 0.2394m
-  90th percentile: 0.3788m
-  95th percentile: 0.5260m
-  99th percentile: 1.1918m
+  Mean: 0.2544m
+  Median: 0.1742m
+  Std: 0.2901m
+  90th percentile: 0.5497m
+  95th percentile: 0.7689m
+  99th percentile: 1.2984m
 
 Angle Error:
-  Mean: 77.4706°
-  Median: 70.5337°
-  Std: 51.2512°
-  90th percentile: 153.9879°
-  95th percentile: 166.8223°
-  99th percentile: 178.6133°
+  Mean: 84.0098°
+  Median: 80.5612°
+  Std: 51.9860°
+  90th percentile: 159.8262°
+  95th percentile: 170.5304°
+  99th percentile: 178.3525°
 
 Depth Error:
-  Mean: 0.0387m
-  Median: 0.0173m
-  Std: 0.1934m
-  90th percentile: 0.0695m
-  95th percentile: 0.1110m
-  99th percentile: 0.2655m
+  Mean: 0.0399m
+  Median: 0.0211m
+  Std: 0.1088m
+  90th percentile: 0.0805m
+  95th percentile: 0.1274m
+  99th percentile: 0.3282m
 
 ERROR CORRELATION ANALYSIS
 --------------------------
-Coordinate vs Angle error correlation: 0.010
-Coordinate vs Depth error correlation: 0.221
-Angle vs Depth error correlation: 0.050
+Coordinate vs Angle error correlation: 0.009
+Coordinate vs Depth error correlation: 0.188
+Angle vs Depth error correlation: 0.015
 
 UNCERTAINTY ANALYSIS
 -------------------
-Depth uncertainty vs error correlation: 0.539
-Coordinate uncertainty vs error correlation: 0.507
-Angle uncertainty vs error correlation: 0.149
+Depth uncertainty vs error correlation: 0.600
+Coordinate uncertainty vs error correlation: 0.431
+Angle uncertainty vs error correlation: 0.048
 
 Note: Higher correlation indicates better uncertainty calibration
 
