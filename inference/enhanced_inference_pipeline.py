@@ -61,13 +61,20 @@ def estimate_depth_with_midas(image_path: str, bbox_data: dict, img_width: int, 
     Returns:
         Estimated depth in meters (relative scale)
     """
+    print(f"[DEBUG] estimate_depth_with_midas called for {image_path}")
+    print(f"[DEBUG] Cache exists: {depth_map_cache is not None}")
+    print(f"[DEBUG] Image in cache: {image_path in depth_map_cache if depth_map_cache else False}")
+
     if depth_map_cache is not None and image_path in depth_map_cache:
         depth_map = depth_map_cache[image_path]
+        print(f"[DEBUG] Using cached depth map, shape: {depth_map.shape}")
     else:
+        print(f"[DEBUG] Generating new depth map...")
         # Load image
         img = cv2.imread(image_path)
         if img is None:
             raise ValueError(f"Could not load image from {image_path}")
+        print(f"[DEBUG] Image loaded, shape: {img.shape}")
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         
         # Apply MiDaS transform - this returns a tensor ready for the model
@@ -295,8 +302,14 @@ def calculate_unprojection(row, img_width=300, img_height=300):
     # Get 2D Pixel Coordinates and an Estimated Depth
     px = row['target_bbox_center_x'] * img_width
     py = row['target_bbox_center_y'] * img_height
-    depth = row['dist_to_ref'] # Here, 'dist_to_ref' is a STAND-IN for an initial depth estimate
+
+    if 'target_depth_median' in row:
+        depth = row['target_depth_median']
+    else:
+        depth = row.get('dist_to_target', row.get('dist_to_ref', 3.0))
     
+    print(f"    [Unprojection] Using depth: {row.get('dist_to_ref', 'MISSING')} for {row.get('target_object_id', 'unknown')}")
+
     # Unproject from 2D to 3D (in Camera's coordinate system)
     pixel_coords = np.array([px, py, 1])
     camera_coords = K_inv @ pixel_coords * depth
@@ -374,48 +387,94 @@ def calculate_comprehensive_geometric_features(row, img_width=300, img_height=30
     depth_cols = ['depth_mean', 'depth_std', 'depth_min', 'depth_max', 
                 'depth_median', 'depth_percentile_25', 'depth_percentile_75']
 
-    # INFERENCE: Use actual MiDaS depth statistics from bbox region
-    if 'target_depth_map_region' in row and row['target_depth_map_region'] is not None:
-        # Compute actual statistics from MiDaS depth map
-        target_depth_region = row['target_depth_map_region']
-        target_depth_stats = {
-            'depth_mean': np.mean(target_depth_region),
-            'depth_std': np.std(target_depth_region),
-            'depth_min': np.min(target_depth_region),
-            'depth_max': np.max(target_depth_region),
-            'depth_median': np.median(target_depth_region),
-            'depth_percentile_25': np.percentile(target_depth_region, 25),
-            'depth_percentile_75': np.percentile(target_depth_region, 75)
-        }
+    # INFERENCE: Use actual MiDaS depth statistics from MASK region
+    if 'normalized_metric_depth_map' in row and row['normalized_metric_depth_map'] is not None:
         
-        ref_depth_region = row['ref_depth_map_region']
-        ref_depth_stats = {
-            'depth_mean': np.mean(ref_depth_region),
-            'depth_std': np.std(ref_depth_region),
-            'depth_min': np.min(ref_depth_region),
-            'depth_max': np.max(ref_depth_region),
-            'depth_median': np.median(ref_depth_region),
-            'depth_percentile_25': np.percentile(ref_depth_region, 25),
-            'depth_percentile_75': np.percentile(ref_depth_region, 75)
-        }
-    else:
-        # Fallback to placeholders if depth map not available
-        target_depth_stats = {
-            'depth_mean': row.get('dist_to_ref', 3.0),
-            'depth_std': 0.1,
-            'depth_min': max(0.1, row.get('dist_to_ref', 3.0) - 0.5),
-            'depth_max': row.get('dist_to_ref', 3.0) + 0.5,
-            'depth_median': row.get('dist_to_ref', 3.0),
-            'depth_percentile_25': max(0.1, row.get('dist_to_ref', 3.0) - 0.2),
-            'depth_percentile_75': row.get('dist_to_ref', 3.0) + 0.2
-        }
-        ref_depth_stats = {k: v / max(1e-6, row.get('relative_depth', 1.0)) 
-                        for k, v in target_depth_stats.items()}
+        full_depth_map = row['normalized_metric_depth_map']
+        segmentation_map = row['segmentation_map'] # The full segmentation map tensor
+
+        # --- TARGET MASK-BASED DEPTH EXTRACTION ---
+        target_mask = (segmentation_map.cpu().numpy() == row['target_segment_id'])
+        target_depth_region = full_depth_map[target_mask]
+        
+        # --- REFERENCE MASK-BASED DEPTH EXTRACTION ---
+        ref_mask = (segmentation_map.cpu().numpy() == row['ref_segment_id'])
+        ref_depth_region = full_depth_map[ref_mask]
+
+        if target_depth_region.size > 0 and ref_depth_region.size > 0:
+            # ✅ FILTER OUTLIERS from both target and reference depth regions
+            def filter_depth_outliers(depth_values):
+                """Remove extreme outliers using IQR method."""
+                if depth_values.size < 10:
+                    return depth_values
+                    
+                q1 = np.percentile(depth_values, 25)
+                q3 = np.percentile(depth_values, 75)
+                iqr = q3 - q1
+                
+                lower_bound = q1 - 1.5 * iqr
+                upper_bound = q3 + 1.5 * iqr
+                
+                filtered = depth_values[
+                    (depth_values >= lower_bound) & 
+                    (depth_values <= upper_bound)
+                ]
+                
+                # Only use filtered if we retain enough data
+                return filtered if filtered.size > max(10, depth_values.size * 0.3) else depth_values
+            
+            # Apply filtering
+            target_depth_region = filter_depth_outliers(target_depth_region)
+            ref_depth_region = filter_depth_outliers(ref_depth_region)
+            
+            # Compute actual statistics from MASKED MiDaS depth map
+            target_depth_stats = {
+                'depth_mean': np.mean(target_depth_region),
+                'depth_std': np.std(target_depth_region),
+                'depth_min': np.min(target_depth_region),
+                'depth_max': np.max(target_depth_region),
+                'depth_median': np.median(target_depth_region),
+                'depth_percentile_25': np.percentile(target_depth_region, 25),
+                'depth_percentile_75': np.percentile(target_depth_region, 75)
+            }
+            
+            ref_depth_stats = {
+                'depth_mean': np.mean(ref_depth_region),
+                'depth_std': np.std(ref_depth_region),
+                'depth_min': np.min(ref_depth_region),
+                'depth_max': np.max(ref_depth_region),
+                'depth_median': np.median(ref_depth_region),
+                'depth_percentile_25': np.percentile(ref_depth_region, 25),
+                'depth_percentile_75': np.percentile(ref_depth_region, 75)
+            }
+            
+            # ✅ ADD DEBUG OUTPUT TO VERIFY FILTERING
+            print(f"    [Feature Calc] Target mask pixels: {target_depth_region.size}")
+            print(f"    [Feature Calc] Target depth median: {target_depth_stats['depth_median']:.3f}m")
+            print(f"    [Feature Calc] Ref mask pixels: {ref_depth_region.size}")
+        else:
+            # Fallback for empty mask (shouldn't happen)
+            target_depth_stats = ref_depth_stats = {
+                'depth_mean': row.get('dist_to_ref', 3.0), 'depth_std': 0.1, 
+                'depth_min': 0.1, 'depth_max': 5.0, 'depth_median': row.get('dist_to_ref', 3.0),
+                'depth_percentile_25': row.get('dist_to_ref', 3.0) - 0.2, 
+                'depth_percentile_75': row.get('dist_to_ref', 3.0) + 0.2
+            }
 
     for col in depth_cols:
         features[f'target_{col}'] = target_depth_stats[col]
         features[f'ref_{col}'] = ref_depth_stats[col]
-        features[f'{col}_ratio'] = target_depth_stats[col] / max(1e-6, ref_depth_stats[col])
+        
+        # Use median for ratios instead of raw values (more stable)
+        if col == 'depth_mean' or col == 'depth_median':
+            # For critical depth features, use median-based calculations
+            ratio_numerator = target_depth_stats['depth_median']
+            ratio_denominator = max(1e-6, ref_depth_stats['depth_median'])
+        else:
+            ratio_numerator = target_depth_stats[col]
+            ratio_denominator = max(1e-6, ref_depth_stats[col])
+        
+        features[f'{col}_ratio'] = ratio_numerator / ratio_denominator
         features[f'{col}_diff'] = target_depth_stats[col] - ref_depth_stats[col]
 
     # Ground truth consistency (set to neutral values)
@@ -701,8 +760,12 @@ def run_enhanced_inference_pipeline(
         midas_transform = midas_transforms.small_transform
         
         print("✓ MiDaS model loaded successfully")
+        print(f"[DEBUG] MiDaS model device: {next(midas.parameters()).device}")
+        print(f"[DEBUG] MiDaS model type: {type(midas)}")
     except Exception as e:
         print(f"✗ ERROR: Failed to load MiDaS model: {e}")
+        import traceback
+        traceback.print_exc()
         return
 
     # --- 3. LLM API CALL FOR SIZE ESTIMATION ---
@@ -719,17 +782,56 @@ def run_enhanced_inference_pipeline(
         return
         
     # --- 4. PREPARE FEATURE DATAFRAME AND REFERENCE ---
-    
+        
     # Choose reference object: the one with the largest pixel area
     ref_segment = max(valid_segments, key=lambda x: x['mask_area'])
     ref_size_m = estimated_sizes_m[ref_segment['id']]
-    
+
     print(f"\n4. Starting Geometric Feature Extraction...")
     print(f"Using **{ref_segment['label']} (ID: {ref_segment['id']})** as reference object.")
-    
+
     results = []
-    ref_midas_depth = None  # Initialize here
     depth_map_cache = {}
+    print(f"[DEBUG] Initialized depth_map_cache: {type(depth_map_cache)}")
+
+    ref_analytical_depth = 3.0 # Initialize to a default value (e.g., 3.0m)
+    focal_length_px = (img_width / 2.0) / math.tan(ASSUMED_FOV_DEG * math.pi / 360.0)
+
+    # --- NEW BLOCK: MiDaS Normalization ---
+    print("\n4.1. Calibrating MiDaS depth map to metric scale...")
+    metric_depth_map_key = image_path + '_metric'
+
+    # 1. Get raw MiDaS depth map and reference object's MiDaS median (inverse depth).
+    ref_midas_median = estimate_depth_with_midas(
+        image_path, ref_segment['bbox_data'], img_width, img_height,
+        midas, midas_transform, depth_map_cache
+    )
+
+    # Check if the raw depth map was successfully cached
+    raw_midas_depth_map = depth_map_cache.get(image_path)
+
+    if raw_midas_depth_map is None:
+        print("✗ WARNING: Failed to generate raw MiDaS depth map. Falling back to pinhole model only.")
+    else:
+        # 2. Calculate analytical depth for the reference object (The metric anchor)
+        ref_longest_dim_m = max(ref_size_m)
+        ref_bbox_longest_px = max(ref_segment['bbox_data']['width'], ref_segment['bbox_data']['height'])
+        
+        # Update the reference analytical depth variable
+        ref_analytical_depth = (ref_longest_dim_m * focal_length_px) / ref_bbox_longest_px
+
+        print(f"   Reference MiDaS median (inverse depth): {ref_midas_median:.3f}")
+        print(f"   Reference analytical depth (meters): {ref_analytical_depth:.3f}m")
+
+        # 3. Normalize the raw depth map to metric scale
+        metric_depth_map = normalize_midas_to_metric_depth(
+            raw_midas_depth_map, ref_analytical_depth, ref_midas_median
+        )
+
+        # 4. Cache the normalized map for feature calculation
+        depth_map_cache[metric_depth_map_key] = metric_depth_map
+        print(f"✓ Normalized metric depth map cached with key: {metric_depth_map_key}")
+    # --- END NEW BLOCK ---
     
     for target_segment in valid_segments:
         target_id = target_segment['id']
@@ -756,140 +858,82 @@ def run_enhanced_inference_pipeline(
         focal_length_px = (img_width / 2.0) / math.tan(ASSUMED_FOV_DEG * math.pi / 360.0)
         # analytical_depth = (longest_3d_dim * focal_length_px) / longest_2d_dim_px if longest_2d_dim_px > 0 else 10.0
 
-        longest_2d_dim_px = max(target_segment['bbox_data']['width'], target_segment['bbox_data']['height'])
-        
-        # NEW APPROACH: Estimate depth based on bbox size relative to reference
-        ref_bbox_size_px = max(ref_segment['bbox_data']['width'], ref_segment['bbox_data']['height'])
-        target_bbox_size_px = max(target_segment['bbox_data']['width'], target_segment['bbox_data']['height'])
-        
         print(f"   Estimating depth for {target_label} using MiDaS...")
-        
+        analytical_depth = (max(target_size_m_float) * focal_length_px) / max(target_segment['bbox_data']['width'], target_segment['bbox_data']['height'])
+
         try:
-            # Get MiDaS depth for both target and reference
-            target_midas_depth = estimate_depth_with_midas(
-                image_path, target_segment['bbox_data'], img_width, img_height,
-                midas, midas_transform, depth_map_cache
-            )            
-
-            if ref_midas_depth is None:
-                ref_midas_depth = estimate_depth_with_midas(
-                    image_path, ref_segment['bbox_data'], img_width, img_height,
-                    midas, midas_transform, depth_map_cache
-                )
+            # 1. Use cached normalized map if available, otherwise use pinhole model
+            metric_depth_map_key = image_path + '_metric'
             
-            # === NEW: Compute analytical depth for reference object ===
-            ref_longest_dim_m = max(ref_size_m)
-            ref_bbox_longest_px = max(ref_segment['bbox_data']['width'], ref_segment['bbox_data']['height'])
-            ref_analytical_depth = (ref_longest_dim_m * focal_length_px) / ref_bbox_longest_px
-            
-            # === NEW: Normalize MiDaS depth map to metric scale ===
-            if image_path in depth_map_cache:
-                raw_depth_map = depth_map_cache[image_path]
+            if metric_depth_map_key in depth_map_cache:
+                metric_depth_map = depth_map_cache[metric_depth_map_key]
                 
-                # Normalize entire depth map using reference object
-                metric_depth_map = normalize_midas_to_metric_depth(
-                    raw_depth_map,
-                    reference_object_depth_estimate=ref_analytical_depth,
-                    reference_midas_median=ref_midas_depth
-                )
+                # ✅ USE SEGMENTATION MASK, NOT BOUNDING BOX
+                target_mask = (segmentation_map.cpu().numpy() == target_id)
+                target_depth_values = metric_depth_map[target_mask]
                 
-                # Update cache with normalized depth map
-                depth_map_cache[image_path + '_metric'] = metric_depth_map
-                
-                # Re-extract target depth from normalized map
-                tx1, ty1 = int(target_segment['bbox_data']['x_min']), int(target_segment['bbox_data']['y_min'])
-                tx2 = int(tx1 + target_segment['bbox_data']['width'])
-                ty2 = int(ty1 + target_segment['bbox_data']['height'])
-                tx1, ty1 = max(0, tx1), max(0, ty1)
-                tx2, ty2 = min(img_width, tx2), min(img_height, ty2)
-                
-                if ty2 > ty1 and tx2 > tx1:
-                    target_depth_region_normalized = metric_depth_map[ty1:ty2, tx1:tx2]
-                    target_midas_depth_normalized = np.median(target_depth_region_normalized)
-                    analytical_depth = target_midas_depth_normalized
+                if target_depth_values.size > 0:
+                    # ✅ OUTLIER FILTERING
+                    q1 = np.percentile(target_depth_values, 25)
+                    q3 = np.percentile(target_depth_values, 75)
+                    iqr = q3 - q1
+                    
+                    lower_bound = q1 - 1.5 * iqr
+                    upper_bound = q3 + 1.5 * iqr
+                    
+                    filtered_depth_values = target_depth_values[
+                        (target_depth_values >= lower_bound) & 
+                        (target_depth_values <= upper_bound)
+                    ]
+                    
+                    if filtered_depth_values.size > max(10, target_depth_values.size * 0.3):
+                        outliers_removed = target_depth_values.size - filtered_depth_values.size
+                        print(f"  Filtered {outliers_removed} outliers ({outliers_removed/target_depth_values.size*100:.1f}%)")
+                        target_depth_values = filtered_depth_values
+                    
+                    # Update analytical_depth with MiDaS median
+                    analytical_depth = np.median(target_depth_values)
+                    depth_mean = np.mean(target_depth_values)
+                    depth_std = np.std(target_depth_values)
+                    
+                    print(f"\n[DEBUG] Depth estimation for {target_label}:")
+                    print(f"  MiDaS median: {analytical_depth:.3f}m")
+                    print(f"  MiDaS mean: {depth_mean:.3f}m")
+                    print(f"  MiDaS std: {depth_std:.3f}m")
+                    print(f"  Mask pixel count: {target_depth_values.size}")
+                    print(f"  Reference analytical depth: {ref_analytical_depth:.3f}m")
+                    print(f"  Relative depth ratio: {analytical_depth / ref_analytical_depth:.3f}")
+                    
+                    depth_diff_pct = abs(depth_mean - analytical_depth) / analytical_depth * 100
+                    if depth_diff_pct > 20:
+                        print(f"  ⚠️  High variance in MiDaS depth ({depth_diff_pct:.1f}%)")
+                        print(f"      Consider using median only for this object")
+                    else:
+                        print(f"  ✓ Depth estimates consistent ({depth_diff_pct:.1f}% difference)")
                 else:
-                    # Fallback
-                    analytical_depth = (max(target_size_m_float) * focal_length_px) / max(target_segment['bbox_data']['width'], target_segment['bbox_data']['height'])
+                    print(f"\n[DEBUG] Empty segmentation mask for {target_label}, using pinhole fallback")
+                    print(f"  Pinhole depth: {analytical_depth:.2f}m")
             else:
-                # Fallback if no depth map
-                analytical_depth = (max(target_size_m_float) * focal_length_px) / max(target_segment['bbox_data']['width'], target_segment['bbox_data']['height'])
-            
-            print(f"   MiDaS normalized depth: {analytical_depth:.2f}m (was {target_midas_depth:.1f} raw)")
-
-            print(f"\n[DEBUG] MiDaS depth values:")
-            print(f"  Target: {target_midas_depth:.3f}")
-            print(f"  Reference: {ref_midas_depth:.3f}")
-            print(f"  Ratio: {target_midas_depth / ref_midas_depth:.3f}")
-
-            # Compare to analytical depth
-            print(f"  Analytical depth: {analytical_depth:.3f}")
-            
-            # MiDaS gives inverse depth (closer objects = higher values)
-            if ref_midas_depth > 0 and target_midas_depth > 0:
-                # Inverse depth ratio
-                depth_ratio = ref_midas_depth / target_midas_depth
-                
-                # Use LLM size estimate to calibrate absolute scale
-                # Assume reference object is at a distance where its bbox matches its real size
-                ref_longest_dim_m = max(ref_size_m)
-                ref_bbox_longest_px = max(ref_segment['bbox_data']['width'], ref_segment['bbox_data']['height'])
-                
-                # Estimate reference absolute depth from pinhole camera model
-                ref_baseline_depth = (ref_longest_dim_m * focal_length_px) / ref_bbox_longest_px
-                
-                # Scale target depth using MiDaS ratio
-                analytical_depth = ref_baseline_depth * depth_ratio
-                
-                print(f"   MiDaS - Target: {target_midas_depth:.1f}, Ref: {ref_midas_depth:.1f}")
-                print(f"   Depth ratio: {depth_ratio:.2f}, Ref baseline: {ref_baseline_depth:.2f}m")
-                print(f"   Estimated absolute depth: {analytical_depth:.2f}m")
-            else:
-                # Fallback to simple pinhole model
-                target_longest_dim_m = max(target_size_m_float)
-                target_bbox_longest_px = max(target_segment['bbox_data']['width'], target_segment['bbox_data']['height'])
-                analytical_depth = (target_longest_dim_m * focal_length_px) / target_bbox_longest_px if target_bbox_longest_px > 0 else 3.0
-                print(f"   MiDaS depth invalid, using pinhole model: {analytical_depth:.2f}m")
+                print(f"\n[DEBUG] No MiDaS map, using pinhole model: {analytical_depth:.2f}m")
                 
         except Exception as e:
             print(f"   Error in MiDaS depth estimation: {e}")
             import traceback
             traceback.print_exc()
+            print(f"   Fallback pinhole-based depth: {analytical_depth:.2f}m")
             
             # Fallback to pinhole camera model
             target_longest_dim_m = max(target_size_m_float)
             target_bbox_longest_px = max(target_segment['bbox_data']['width'], target_segment['bbox_data']['height'])
             analytical_depth = (target_longest_dim_m * focal_length_px) / target_bbox_longest_px if target_bbox_longest_px > 0 else 3.0
             print(f"   Fallback pinhole-based depth: {analytical_depth:.2f}m")
+
         
         # Since the model is relative, we'll use a pseudo-relative depth based on the analytical estimate
         # relative_depth = analytical_depth / ref_analytical_depth.
         # However, for simplicity and to prevent division by zero, we'll use the target's analytical
         # depth as the initial 'dist_to_ref' in the feature calculator.
-        
-        # Create the feature vector dictionary (simulating the pandas row)
-        pseudo_row = {
-            # Bbox
-            'target_bbox_center_x': target_segment['bbox_data']['center_x'] / img_width,
-            'target_bbox_center_y': target_segment['bbox_data']['center_y'] / img_height,
-            # Depth/Relative
-            'dist_to_ref': analytical_depth, 
-            'relative_depth': 1.0, # Placeholder, true relative depth will be predicted
-            # Camera/Pose (Assumed constants)
-            'field_of_view': ASSUMED_FOV_DEG,
-            'camera_horizon': ASSUMED_CAMERA_HORIZON_DEG,
-            'agent_rot_y': ASSUMED_AGENT_ROT_Y_DEG,
-            'agent_pos_x': ASSUMED_AGENT_POS_XYZ[0],
-            'agent_pos_y': ASSUMED_AGENT_POS_XYZ[1],
-            'agent_pos_z': ASSUMED_AGENT_POS_XYZ[2],
-            'agent_rot_x': ASSUMED_AGENT_ROT_XYZ[0],
-            'agent_rot_z': ASSUMED_AGENT_ROT_XYZ[2],
-            # Angle target (placeholder, unused in inference)
-            'target_rot_y': 0.0,
-            # Placeholders for unneeded columns in feature extractor (to prevent errors)
-            'target_depth_gt_consistency': 0.0, 'ref_depth_gt_consistency': 0.0,
-            'target_ground_truth_distance': 0.0, 'ref_ground_truth_distance': 0.0
-        }
-        
+    
         # The key change: The model was trained on TARGET vs REF features.
         # We need to compute features for the target AND reference object and their relationship.
         
@@ -900,78 +944,65 @@ def run_enhanced_inference_pipeline(
         
         # To simulate a Target-Ref pair, we create a pseudo-row that combines *both* objects' data.
         # This requires manually merging target and reference attributes into one dict.
-        
+        target_depth_for_features = analytical_depth
+        ref_depth_for_features = ref_analytical_depth
+
+        print(f"  [DEBUG] Depths for features:")
+        print(f"    Target depth: {target_depth_for_features:.3f}m")
+        print(f"    Reference depth: {ref_depth_for_features:.3f}m")
+        print(f"    Relative depth: {target_depth_for_features / ref_depth_for_features:.3f}")
+
         target_ref_row = {
-            # Target bounding box (with dimensions!)
+            # Target bounding box
             'target_bbox_center_x': target_segment['bbox_data']['center_x'] / img_width,
             'target_bbox_center_y': target_segment['bbox_data']['center_y'] / img_height,
-            'target_bbox_width': target_segment['bbox_data']['width'] / img_width,  # ADD
-            'target_bbox_height': target_segment['bbox_data']['height'] / img_height,  # ADD
+            'target_bbox_width': target_segment['bbox_data']['width'] / img_width,
+            'target_bbox_height': target_segment['bbox_data']['height'] / img_height,
             
-            # Reference bounding box (with dimensions!)
+            # Reference bounding box
             'ref_bbox_center_x': ref_segment['bbox_data']['center_x'] / img_width,
             'ref_bbox_center_y': ref_segment['bbox_data']['center_y'] / img_height,
-            'ref_bbox_width': ref_segment['bbox_data']['width'] / img_width,  # ADD
-            'ref_bbox_height': ref_segment['bbox_data']['height'] / img_height,  # ADD
+            'ref_bbox_width': ref_segment['bbox_data']['width'] / img_width,
+            'ref_bbox_height': ref_segment['bbox_data']['height'] / img_height,
             
-            # Estimated depth of target relative to reference
-            'dist_to_ref': analytical_depth, 
-            'relative_depth': analytical_depth / (max(ref_size_m) * focal_length_px / max(ref_segment['bbox_data']['width'], ref_segment['bbox_data']['height'])),
+            # Depth values - CRITICAL FOR UNPROJECTION
+            'target_depth_median': target_depth_for_features,  # ← ADD THIS
+            'dist_to_target': target_depth_for_features,       # Target's depth
+            'dist_to_ref': ref_depth_for_features,             # Reference's depth
+            'relative_depth': target_depth_for_features / ref_depth_for_features,
             
-            # Camera/Pose features (camera at origin, looking straight)
+            # Camera features (camera at origin)
             'field_of_view': ASSUMED_FOV_DEG,
-            'camera_horizon': 0.0,  # SIMPLIFIED: No horizon angle
-            'agent_rot_y': 0.0,     # SIMPLIFIED: No rotation
+            'camera_horizon': 0.0,
+            'agent_rot_y': 0.0,
             'agent_pos_x': 0.0,
             'agent_pos_y': 0.0,
             'agent_pos_z': 0.0,
             'agent_rot_x': 0.0,
             'agent_rot_z': 0.0,
             
-            # Placeholders for columns needed by feature function
-            'target_object_id': target_id,
-            'ref_object_id': ref_segment['id']
+            # Segmentation data for feature calculation
+            'target_segment_id': target_segment['id'],
+            'ref_segment_id': ref_segment['id'],
+            'segmentation_map': segmentation_map,
+            'normalized_metric_depth_map': depth_map_cache.get(metric_depth_map_key)
         }
+        
         metric_depth_map_key = image_path + '_metric'
         if depth_map_cache and metric_depth_map_key in depth_map_cache:
             depth_map = depth_map_cache[metric_depth_map_key]
             
-            # Target depth region
-            tx1, ty1 = int(target_segment['bbox_data']['x_min']), int(target_segment['bbox_data']['y_min'])
-            tx2 = int(tx1 + target_segment['bbox_data']['width'])
-            ty2 = int(ty1 + target_segment['bbox_data']['height'])
-            tx1, ty1 = max(0, tx1), max(0, ty1)
-            tx2, ty2 = min(img_width, tx2), min(img_height, ty2)
-            target_depth_region = depth_map[ty1:ty2, tx1:tx2] if ty2 > ty1 and tx2 > tx1 else None
-            
-            if target_depth_region is not None and target_depth_region.size > 0:
-                print(f"\n[DEBUG] Target {target_label} depth stats:")
-                print(f"  Mean: {np.mean(target_depth_region):.3f}")
-                print(f"  Std: {np.std(target_depth_region):.3f}")
-                print(f"  Min: {np.min(target_depth_region):.3f}")
-                print(f"  Max: {np.max(target_depth_region):.3f}")
-            else:
-                print(f"\n[WARNING] No depth region for {target_label}!")
-
-            # Reference depth region
-            rx1, ry1 = int(ref_segment['bbox_data']['x_min']), int(ref_segment['bbox_data']['y_min'])
-            rx2 = int(rx1 + ref_segment['bbox_data']['width'])
-            ry2 = int(ry1 + ref_segment['bbox_data']['height'])
-            rx1, ry1 = max(0, rx1), max(0, ry1)
-            rx2, ry2 = min(img_width, rx2), min(img_height, ry2)
-            ref_depth_region = depth_map[ry1:ry2, rx1:rx2] if ry2 > ry1 and rx2 > rx1 else None
-            
-            target_ref_row['target_depth_map_region'] = target_depth_region
-            target_ref_row['ref_depth_map_region'] = ref_depth_region
+            # Target depth region: NO LONGER NEEDED HERE. The mask logic will handle it.
+            target_ref_row['normalized_metric_depth_map'] = depth_map # Pass the metric map
         else:
-            target_ref_row['target_depth_map_region'] = None
-            target_ref_row['ref_depth_map_region'] = None
+            target_ref_row['normalized_metric_depth_map'] = None
 
         feature_dict = calculate_comprehensive_geometric_features(
             target_ref_row, img_width, img_height
         )
 
         print(f"  Feature depth_mean: {feature_dict.get('target_depth_mean', 'MISSING')}")
+        print(f"  Feature depth_median: {feature_dict.get('target_depth_median', 'MISSING')}") # Log the median (more stable)
         print(f"  Feature unproj_x: {feature_dict.get('unproj_x', 'MISSING')}")
 
         # Convert to numpy array in the correct order (matching training feature_names)
@@ -979,10 +1010,25 @@ def run_enhanced_inference_pipeline(
             feature_vector = np.array([feature_dict.get(name, 0.0) for name in feature_names])
         else:
             feature_vector = np.array(list(feature_dict.values()))
-        
+
+        # Check critical depth features
+        if feature_names:
+            depth_feature_indices = [i for i, name in enumerate(feature_names) if 'depth' in name.lower()]
+            print(f"  Depth feature indices: {depth_feature_indices[:5]}")
+            print(f"  Depth feature values: {[feature_vector[i] for i in depth_feature_indices[:5]]}")
+            
+            unproj_indices = [i for i, name in enumerate(feature_names) if 'unproj' in name.lower()]
+            print(f"  Unprojection feature indices: {unproj_indices}")
+            print(f"  Unprojection values: {[feature_vector[i] for i in unproj_indices]}")
+
         print(f"\n[DEBUG] Inference features (raw): {feature_vector[:10]}")
         features_scaled = feature_scaler.transform(feature_vector.reshape(1, -1))
         print(f"[DEBUG] Inference features (scaled): {features_scaled[0, :10]}")
+
+        print(f"\n[DIAGNOSTIC] Feature breakdown for {target_label}:")
+        print(f"  Feature names (first 20): {feature_names[:20] if feature_names else 'N/A'}")
+        print(f"  Raw features (first 20): {feature_vector[:20]}")
+        print(f"  Scaled features (first 20): {features_scaled[0, :20]}")
 
         # Handle the reference object case: set all predictions to be 0/1/analytical depth
         if target_id == ref_segment['id']:
