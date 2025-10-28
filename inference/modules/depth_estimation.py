@@ -155,11 +155,11 @@ def extract_depth_from_mask(
     std = np.std(depth_values)
 
     # Sanity check: if median is unreasonable, use mean of all non-outlier values
-    if median > 50 or median < 0.1:
-        # Clip to reasonable range (0.5m to 20m for indoor scenes)
-        clipped_values = np.clip(depth_values, 0.5, 20.0)
-        median = np.median(clipped_values)
-        print(f"  WARNING: Depth outlier detected, clipping to range [0.5, 20.0]m")
+    # if median > 50 or median < 0.1:
+    #     # Clip to reasonable range (0.5m to 20m for indoor scenes)
+    #     clipped_values = np.clip(depth_values, 0.5, 20.0)
+    #     median = np.median(clipped_values)
+    #     print(f"  WARNING: Depth outlier detected, clipping to range [0.5, 20.0]m")
 
     return {
         'mean': mean,
