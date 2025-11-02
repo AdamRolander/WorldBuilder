@@ -17,10 +17,12 @@ def print_coordinate_analysis(pose_results):
         model_coords = obj_data['position_m']
         blender_coords = convert_to_blender_coords(*model_coords)
         dims = obj_data.get('dimensions_m', [0.5, 0.5, 0.5])
+        rotation_y = obj_data.get('rotation_y_deg', 0.0)
         
         print(f"\n{label} (ID: {obj_data['id']}):")
         print(f"  Model coords (X,Y,Z):    {model_coords}")
         print(f"  Blender coords (X,Y,Z):  {blender_coords}")
+        print(f"  Rotation Y: {rotation_y:.1f}°")
         print(f"  Dimensions (L,W,H):      {dims}")
         print(f"  Is Reference: {obj_data.get('is_reference', False)}")
     
@@ -114,15 +116,16 @@ def generate_color_palette(n_objects: int, seed: int = 42) -> List[tuple]:
     return colors
 
 
-def create_box_mesh(dimensions: List[float], location: tuple, color: tuple, label: str) -> bproc.types.MeshObject:
+def create_box_mesh(dimensions: List[float], location: tuple, color: tuple, label: str, rotation_y_deg: float = 0.0) -> bproc.types.MeshObject:
     """
-    Create a rectangular prism (box) mesh at specified location.
+    Create a rectangular prism (box) mesh at specified location with rotation.
     
     Args:
         dimensions: [length, width, height] in meters
         location: (x, y, z) in Blender coordinates
         color: (R, G, B, A) color tuple
         label: Object label for naming
+        rotation_y_deg: Rotation around Y-axis in model coordinates (degrees)
         
     Returns:
         BlenderProc MeshObject
@@ -131,15 +134,19 @@ def create_box_mesh(dimensions: List[float], location: tuple, color: tuple, labe
     dimensions = [max(0.1, d) for d in dimensions]
     
     # Create a primitive cube and scale it to match dimensions
-    # Scale is applied as (x_scale, y_scale, z_scale)
-    box = bproc.object.create_primitive('CUBE', scale=[d/2 for d in dimensions])  # Divide by 2 because cube is 2x2x2
+    box = bproc.object.create_primitive('CUBE', scale=[d/2 for d in dimensions])
     box.set_location(location)
     box.set_name(f"{label}")
     
+    # Apply rotation
+    # Model's Y-rotation becomes Z-rotation in Blender (since we map Y→Z, Z→-Y)
+    # The Y-axis rotation in model space rotates around the vertical axis
+    rotation_z_rad = np.deg2rad(rotation_y_deg)
+    box.set_rotation_euler([0, 0, rotation_z_rad])
+    
     # Create and assign material with color
     mat = bproc.material.create(f"mat_{label}")
-    # Use only RGB values (first 3 elements), not RGBA
-    mat.set_principled_shader_value("Base Color", color[:3] + (1.0,))  # Ensure 4-element tuple (RGBA)
+    mat.set_principled_shader_value("Base Color", color[:3] + (1.0,))
     mat.set_principled_shader_value("Roughness", 0.5)
     mat.set_principled_shader_value("Metallic", 0.1)
     box.add_material(mat)
@@ -275,12 +282,16 @@ def visualize_scene(results: Union[str, List[Dict], Path],
         else:
             dimensions = [0.5, 0.5, 0.5]
         
-        # Create box (removed the detailed print statements to clean up output)
+        # Get rotation (default to 0 if not available)
+        rotation_y = obj_data.get('rotation_y_deg', 0.0)
+        
+        # Create box with rotation
         box = create_box_mesh(
             dimensions=dimensions,
             location=(blender_x, blender_y, blender_z),
             color=colors[idx],
-            label=f"{label}_{obj_id}"
+            label=f"{label}_{obj_id}",
+            rotation_y_deg=rotation_y
         )
         created_objects.append(box)
         
