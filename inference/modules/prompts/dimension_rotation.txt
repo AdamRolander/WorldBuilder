@@ -1,0 +1,81 @@
+"""You are an expert AI for 3D scene reconstruction. Analyze this room and estimate:
+1. Physical dimensions (length, width, height) in meters  
+2. Y-axis rotation (0-360 degrees)
+
+Objects detected:
+{object_list_str}
+
+ROTATION SYSTEM:
+- 0° = facing forward (toward camera)
+- 90° = facing left
+- 180° = facing backward (away from camera)
+- 270° = facing right
+
+CRITICAL: Match your justification to your number!
+
+STEP-BY-STEP REASONING:
+
+1. IDENTIFY POSITIONS:
+   - Left side: x < 0.3 (negative X)
+   - Center: 0.3 ≤ x ≤ 0.7
+   - Right side: x > 0.7 (positive X)
+
+2. APPLY LAYOUT RULES:
+
+   TVs/MONITORS (always face INTO the room toward seating):
+   - If TV is on RIGHT side (x > 0.7) → faces LEFT → rotation = 90°
+   - If TV is on LEFT side (x < 0.3) → faces RIGHT → rotation = 270°
+   - If TV is CENTER → faces FORWARD → rotation = 0°
+   
+   SEATING (faces toward TVs or room center):
+   - If couch is on LEFT (x < 0.3) AND TV is on RIGHT → couch faces RIGHT → rotation = 270°
+   - If couch is on RIGHT (x > 0.7) AND TV is on LEFT → couch faces LEFT → rotation = 90°
+   - If couch is CENTER → faces FORWARD → rotation = 0°
+   
+   TABLES (aligned with seating):
+   - Usually same orientation as nearby couch ± 30°
+   - Or perpendicular to couch if it's a side table
+   
+   PLANTS/LAMPS (decorative, usually face forward):
+   - Default: rotation = 0°
+
+3. ORIENTATION DEPENDENCIES (CRITICAL)
+	•	Support Objects (e.g., TV stands, cabinets under TVs, desks under monitors):
+→ Always match the orientation of the object they support (same rotation_y_degrees).
+	•	Wall-aligned Objects (e.g., bookshelves, cabinets, dressers):
+→ Usually parallel to the nearest wall. If the supported object faces the room, the furniture should too.
+	•	Group Alignment Rule:
+→ If two objects are visually or spatially connected (e.g., TV and stand share the same x–z footprint), treat them as a group — the smaller or supporting object inherits the orientation of the larger or functional one.
+
+4. EXAMPLE WALKTHROUGH:
+   
+   Example room layout:
+   - Couch at x=0.2 (LEFT side)
+   - TV at x=0.8 (RIGHT side)
+   - Table at x=0.5 (CENTER, between them)
+   
+   Reasoning:
+   - TV on right → faces left → 90°
+   - Couch on left → faces right (toward TV) → 270°
+   - Table in center → aligned with couch → 270° (or 0° if perpendicular)
+
+IMPORTANT: 
+- Your rotation_y_degrees number MUST match what you describe in justification
+- If you say "faces right", the number MUST be 270°
+- If you say "faces left", the number MUST be 90°
+- Double-check your numbers before outputting!
+
+Output JSON:
+[
+  {{
+    "id": [OBJECT_ID],
+    "label": "[OBJECT_LABEL]",
+    "dimensions_meters": [[LENGTH], [WIDTH], [HEIGHT]],
+    "rotation_y_degrees": [EXACT_NUMBER_0_TO_360],
+    "confidence": [0.0-1.0],
+    "justification": "[1. Object position (left/center/right), 2. What it should face, 3. Therefore rotation is [NUMBER]°]"
+  }}
+]
+
+Cross-check: Does your rotation_y_degrees number match your justification? 
+Double-check orientation consistency: If a support object (like a TV stand) is placed directly below or behind another object (like a TV), they must share the same rotation_y_degrees."""

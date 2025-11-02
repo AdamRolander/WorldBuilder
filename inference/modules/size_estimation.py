@@ -6,20 +6,25 @@ import os
 import json
 from PIL import Image
 from typing import List, Dict, Any
+from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
 
-def estimate_object_sizes(segments: List[Dict[str, Any]], image_path: str) -> Dict[int, List[float]]:
+def estimate_object_sizes(segments: List[Dict[str, Any]], image_path: str) -> Dict[int, Dict]:
     """
-    Call Gemini API to estimate real-world dimensions of objects.
+    Call Gemini API to estimate real-world dimensions and rotation of objects.
     
     Args:
         segments: List of segment dictionaries with id, label, bbox
         image_path: Path to input image
         
     Returns:
-        Dictionary mapping segment ID to [length, width, height] in meters
+        Dictionary mapping segment ID to dict with:
+            - dimensions_meters: [length, width, height]
+            - rotation_y_degrees: Y-axis rotation
+            - confidence: Confidence score
+            - justification: Reasoning
     """
     try:
         from google import genai
@@ -40,23 +45,20 @@ def estimate_object_sizes(segments: List[Dict[str, Any]], image_path: str) -> Di
         f"h={seg['bbox']['height_norm']:.3f})"
         for seg in segments
     ])
+
+    prompt_path = Path(__file__).parent / "prompts" / "dimension_rotation.txt"
     
-    prompt = f"""You are an expert AI for 3D world reconstruction. Estimate the real-world dimensions (length, width, height) of objects in the image.
+    try:
+        with open(prompt_path, 'r') as f:
+            prompt_template = f.read()
+    except FileNotFoundError:
+        print(f"ERROR: Prompt file not found at {prompt_path}")
+        print("Falling back to default prompt...")
+        prompt_template = """[Your fallback prompt here]
+        
+{object_list_str}"""
 
-Objects in the image:
-{object_list_str}
-
-Provide JSON output in this exact format:
-[
-  {{
-    "id": [OBJECT_ID],
-    "label": "[OBJECT_LABEL]",
-    "dimensions_meters": [[LENGTH], [WIDTH], [HEIGHT]],
-    "justification": "[BRIEF REASONING]"
-  }}
-]
-
-Dimensions must be in meters. Be conservative with estimates."""
+    prompt = prompt_template.replace("{object_list_str}", object_list_str)
     
     try:
         img = Image.open(image_path)
@@ -76,15 +78,31 @@ Dimensions must be in meters. Be conservative with estimates."""
         
         json_string = response.text[json_start:json_end]
         llm_output = json.loads(json_string)
+
+        print("\n=== RAW GEMINI OUTPUT ===")
+        print(json.dumps(llm_output, indent=2))
+        print("=========================\n")
         
         # Format output
-        estimated_sizes = {}
+        estimated_data = {}
         for item in llm_output:
             if 'id' in item and 'dimensions_meters' in item:
-                estimated_sizes[item['id']] = item['dimensions_meters']
-        
-        print(f"Successfully estimated sizes for {len(estimated_sizes)} objects")
-        return estimated_sizes
+                estimated_data[item['id']] = {
+                    'dimensions_meters': item['dimensions_meters'],
+                    'rotation_y_degrees': item.get('rotation_y_degrees', 0.0),
+                    'confidence': item.get('confidence', 0.5),
+                    'justification': item.get('justification', '')
+                }
+                
+                # Debug output
+                obj_id = item['id']
+                label = item.get('label', 'unknown')
+                rot = item.get('rotation_y_degrees', 0)
+                conf = item.get('confidence', 0)
+                print(f"  {label} (ID {obj_id}): {rot:.0f}° (confidence: {conf:.2f})")
+
+        print(f"Successfully estimated sizes and rotations for {len(estimated_data)} objects")
+        return estimated_data
         
     except Exception as e:
         print(f"Error during LLM size estimation: {e}")
