@@ -344,7 +344,7 @@ def visualize_scene(results: Union[str, List[Dict], Path],
         
         # Position camera to view the scene
         # Increase distance multiplier to avoid clipping
-        camera_distance = max(5.0, max_dimension * 3.0)  # Increased from 2.5 to 3.0
+        camera_distance = max(5.0, max_dimension)  # Increased from 2.5 to 3.0
 
         cam_x = scene_center[0]
         cam_y = scene_center[1] - camera_distance  # Back from scene

@@ -13,12 +13,8 @@ from depth_estimation import (
     load_midas_model, 
     estimate_depth_with_midas,
     normalize_depth_to_metric,
-    extract_depth_from_mask
-)
-from multi_reference_depth import (
-    calculate_calibration_constants,
-    get_robust_calibration_constant,
-    normalize_depth_with_constant
+    extract_depth_from_mask,
+    preprocess_bright_image
 )
 from size_estimation import estimate_object_sizes
 from geometry import unproject_to_3d, calculate_analytical_depth
@@ -86,6 +82,7 @@ def run_minimal_inference(image_path: str, output_dir: str = "."):
     
     # Step 3: Depth estimation with multi-reference calibration
     print("\nStep 3: Estimating depth with multi-reference calibration...")
+    preprocessed_image = preprocess_bright_image(image_path)
     midas_model, midas_transform = load_midas_model(device=DEVICE)
     depth_map_cache = {}
     
@@ -138,7 +135,8 @@ def run_minimal_inference(image_path: str, output_dir: str = "."):
         get_unproject_point,
         estimate_ground_plane_y,
         adjust_position_to_ground_plane,
-        extract_depth_from_bottom_region
+        extract_depth_from_bottom_region,
+        should_use_elevated_depth_adjustment
     )
 
     results = []
@@ -170,6 +168,25 @@ def run_minimal_inference(image_path: str, output_dir: str = "."):
         # Determine which point to unproject from
         use_bottom = should_use_bottom_center(label)
         pixel_x, pixel_y = get_unproject_point(bbox, use_bottom)
+
+        # # Special handling for elevated objects (lights, etc.)
+        # if should_use_elevated_depth_adjustment(label):
+        #     # Sample depth from the region BELOW the light instead
+        #     sample_y = bbox['y_min'] + bbox['height'] + 50  # 50 pixels below
+        #     sample_y = min(sample_y, img_height - 1)  # Clamp to image bounds
+            
+        #     # Create a small sample region
+        #     sample_mask = np.zeros_like(metric_depth_map, dtype=bool)
+        #     sample_x = int(pixel_x)
+        #     sample_y_int = int(sample_y)
+        #     # Sample a 10x10 region
+        #     sample_mask[max(0, sample_y_int-5):min(img_height, sample_y_int+5),
+        #                 max(0, sample_x-5):min(img_width, sample_x+5)] = True
+            
+        #     depth_below = np.median(metric_depth_map[sample_mask]) if sample_mask.any() else depth
+            
+        #     print(f"  Elevated object {label}: Using depth from below: {depth_below:.2f}m (was {depth:.2f}m)")
+        #     depth = depth_below
         
         # Unproject to 3D
         world_pos = unproject_to_3d(
@@ -220,13 +237,16 @@ def run_minimal_inference(image_path: str, output_dir: str = "."):
         }
         
         results.append(result)
-        
-        print(f"{result['label']} (ID: {result['id']})")
-        print(f"  Position: ({adjusted_pos[0]:.3f}, {adjusted_pos[1]:.3f}, {adjusted_pos[2]:.3f}) m")
-        print(f"  Rotation Y: {result['rotation_y_deg']:.1f}° (confidence: {result['rotation_confidence']:.2f})")
-        print(f"  Justification: {temp_result['justification']}")
-        print(f"  Depth: {result['depth_m']:.3f} m")
-        print(f"  Dimensions: {result['dimensions_m']} m\n")
+
+    # from pattern_recognition import apply_pattern_recognition
+    # results = apply_pattern_recognition(valid_segments, results)
+       
+    print(f"{result['label']} (ID: {result['id']})")
+    print(f"  Position: ({adjusted_pos[0]:.3f}, {adjusted_pos[1]:.3f}, {adjusted_pos[2]:.3f}) m")
+    print(f"  Rotation Y: {result['rotation_y_deg']:.1f}° (confidence: {result['rotation_confidence']:.2f})")
+    print(f"  Justification: {temp_result['justification']}")
+    print(f"  Depth: {result['depth_m']:.3f} m")
+    print(f"  Dimensions: {result['dimensions_m']} m\n")
     
     # Save results
     output_path = Path(__file__).parent / "coords_json" / f"{Path(image_path).stem}_3d_poses.json"
@@ -238,7 +258,7 @@ def run_minimal_inference(image_path: str, output_dir: str = "."):
 
 if __name__ == "__main__":
     # Update this path to your test image
-    IMAGE_PATH = "/Users/adamrolander/WorldBuilder/inference/modules/input/room_test.png"
+    IMAGE_PATH = "/Users/adamrolander/WorldBuilder/inference/modules/input/bathroom.png"
     
     if not os.path.exists(IMAGE_PATH):
         print(f"ERROR: Image not found at {IMAGE_PATH}")

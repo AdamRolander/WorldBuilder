@@ -6,6 +6,9 @@ Objects detected:
 {object_list_str}
 
 ROTATION SYSTEM:
+- Output ANY angle from 0-360° (not just 0, 90, 180, 270)
+- Chairs around tables often sit at non-cardinal angles (e.g., 135°, 225°)
+- Use increments of 15° for better precision (0, 15, 30, 45, 60, etc.)
 - 0° = facing forward (toward camera)
 - 90° = facing left
 - 180° = facing backward (away from camera)
@@ -64,6 +67,17 @@ IMPORTANT:
 - If you say "faces right", the number MUST be 270°
 - If you say "faces left", the number MUST be 90°
 - Double-check your numbers before outputting!
+
+5. KITCHEN-SPECIFIC CONTEXTS:
+
+   Kitchen Islands/Dining Tables:
+   - If bounding box aspect_ratio (width/height) > 1.5 → long axis runs HORIZONTALLY → 90° or 270°
+   - If aspect_ratio < 0.7 → long axis runs VERTICALLY → 0° or 180°
+   - Chairs around island typically face inward (perpendicular to island's long axis)
+   
+   Kitchen Cabinets/Appliances:
+   - Usually parallel to walls
+   - Face into the room center (away from walls)
 
 Output JSON:
 [

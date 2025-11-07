@@ -27,6 +27,34 @@ def load_midas_model(device: str = "cuda"):
     
     return midas, transform
 
+def preprocess_bright_image(image_path: str) -> str:
+    """
+    Adjust brightness of overly bright images for better depth estimation.
+    Returns path to adjusted image (or original if no adjustment needed).
+    """
+    import cv2
+    import tempfile
+    
+    img = cv2.imread(image_path)
+    if img is None:
+        return image_path
+    
+    # Check if image is overly bright
+    mean_brightness = np.mean(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY))
+    
+    if mean_brightness > 180:  # Very bright threshold
+        # Reduce brightness
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        hsv[:, :, 2] = np.clip(hsv[:, :, 2] * 0.7, 0, 255).astype(np.uint8)
+        adjusted = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+        
+        # Save to temp file
+        temp_path = tempfile.mktemp(suffix='.png')
+        cv2.imwrite(temp_path, adjusted)
+        print(f"  Adjusted bright image: {mean_brightness:.1f} → using temp file")
+        return temp_path
+    
+    return image_path
 
 def estimate_depth_with_midas(
     image_path: str,
