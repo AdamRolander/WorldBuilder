@@ -59,10 +59,10 @@ def segment_image(image_path: str, device: str = "cuda") -> Dict[str, Any]:
             - img_width: Image width
             - img_height: Image height
     """
-    # Structural elements to exclude
+    # Structural elements to exclude // go back to include bottle and curb crazy depth scores
     EXCLUDED_LABELS = {
         'wall', 'floor', 'ceiling', 'window', 'door', 'sky', 'ground',
-        'wall-other-merged', 'building'
+        'wall-other-merged', 'building', 'bottle'
     }
     
     # Load image

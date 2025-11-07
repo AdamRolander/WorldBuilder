@@ -32,6 +32,13 @@ def should_use_bottom_center(label: str) -> bool:
     label_lower = label.lower()
     return any(floor_obj in label_lower for floor_obj in FLOOR_OBJECTS)
 
+def should_use_elevated_depth_adjustment(label: str) -> bool:
+    """
+    Determine if object is elevated and should inherit depth from objects below.
+    """
+    label_lower = label.lower()
+    elevated_keywords = {'light', 'chandelier', 'ceiling', 'lamp-ceiling'}
+    return any(keyword in label_lower for keyword in elevated_keywords)
 
 def estimate_ground_plane_y(segments_with_poses: List[Dict], 
                            floor_object_labels: set = FLOOR_OBJECTS) -> float:
