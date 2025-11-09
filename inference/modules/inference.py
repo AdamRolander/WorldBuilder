@@ -8,7 +8,7 @@ import json
 import os
 from pathlib import Path
 
-from segmentation import segment_image
+from segmentation_V2 import segment_and_estimate_rotations
 from depth_estimation import (
     load_midas_model, 
     estimate_depth_with_midas,
@@ -49,17 +49,17 @@ def run_minimal_inference(image_path: str, output_dir: str = "."):
     print(f"Device: {DEVICE}")
     print(f"Image: {image_path}\n")
     
-    # Step 1: Segmentation
-    print("Step 1: Segmenting image...")
-    seg_result = segment_image(image_path, device=DEVICE)
+    # Step 1: Enhanced Segmentation with Rotation
+    print("Step 1: Segmenting image with rotation estimation...")
+    seg_result = segment_and_estimate_rotations(image_path, device=DEVICE)
     segments = seg_result['segments']
     img_width = seg_result['img_width']
     img_height = seg_result['img_height']
-    
+
     if len(segments) < 1:
         print("ERROR: No objects found in image")
         return
-    
+
     print(f"Found {len(segments)} objects")
 
     # # DEBUG: Visualize mask orientations
@@ -154,7 +154,7 @@ def run_minimal_inference(image_path: str, output_dir: str = "."):
             # For floor objects, try bottom region first
             depth = extract_depth_from_bottom_region(
                 metric_depth_map, 
-                segment['mask'].cpu().numpy(), 
+                segment['mask'],  # ✅ Already numpy array
                 bbox, 
                 bottom_fraction=0.4
             )
@@ -201,14 +201,17 @@ def run_minimal_inference(image_path: str, output_dir: str = "."):
         seg_data = estimated_sizes[seg_id]
         dimensions = seg_data['dimensions_meters']
 
+        # Use geometric rotation from segmentation instead of Gemini
+        geometric_rotation = segment.get('rotation_deg', 0.0)
+        rotation_confidence = segment.get('rotation_confidence', 0.0)
+
         temp_results.append({
             'id': int(seg_id),
             'label': label,
             'position_m': world_pos,
             'dimensions_m': dimensions,
-            'rotation_y_deg': seg_data['rotation_y_degrees'],
-            'rotation_confidence': seg_data['confidence'],
-            'justification': seg_data.get('justification', ''),
+            'rotation_y_deg': geometric_rotation,  # FROM GEOMETRY
+            'rotation_confidence': rotation_confidence,
             'depth_m': float(depth)
         })
     
@@ -244,7 +247,6 @@ def run_minimal_inference(image_path: str, output_dir: str = "."):
     print(f"{result['label']} (ID: {result['id']})")
     print(f"  Position: ({adjusted_pos[0]:.3f}, {adjusted_pos[1]:.3f}, {adjusted_pos[2]:.3f}) m")
     print(f"  Rotation Y: {result['rotation_y_deg']:.1f}° (confidence: {result['rotation_confidence']:.2f})")
-    print(f"  Justification: {temp_result['justification']}")
     print(f"  Depth: {result['depth_m']:.3f} m")
     print(f"  Dimensions: {result['dimensions_m']} m\n")
     
@@ -258,7 +260,7 @@ def run_minimal_inference(image_path: str, output_dir: str = "."):
 
 if __name__ == "__main__":
     # Update this path to your test image
-    IMAGE_PATH = "/Users/adamrolander/WorldBuilder/inference/modules/input/bathroom.png"
+    IMAGE_PATH = "/Users/adamrolander/WorldBuilder/inference/modules/input/kitchen.jpg"
     
     if not os.path.exists(IMAGE_PATH):
         print(f"ERROR: Image not found at {IMAGE_PATH}")
