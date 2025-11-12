@@ -4,3 +4,5 @@ blenderproc run ../visualize_reconstruction.py coords_json/room_test_3d_poses.js
 python ../vishd5.py
 
 blenderproc run ../visualize_reconstruction.py coords_json/kitchen_3d_poses.json --visualize
+
+blenderproc run ../visualize_reconstruction.py coords_json/bathroom_3d_poses.json --visualize
