@@ -89,7 +89,7 @@ def estimate_object_sizes(segments: List[Dict[str, Any]], image_path: str) -> Di
             if 'id' in item and 'dimensions_meters' in item:
                 estimated_data[item['id']] = {
                     'dimensions_meters': item['dimensions_meters'],
-                    'rotation_y_degrees': item.get('rotation_y_degrees', 0.0),
+                    'rests_on_id': item.get('rests_on_id', None),
                     'confidence': item.get('confidence', 0.5),
                     'justification': item.get('justification', '')
                 }

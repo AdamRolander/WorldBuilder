@@ -107,7 +107,7 @@ def run_inference(image_path: str, output_dir: str = "."):
     if len(valid_segments) < 1:
         print("ERROR: No valid segments with size estimates")
         return
-    
+       
     # Step 5: Multi-reference depth calibration
     print("\nStep 5: Calibrating depth with multiple reference objects...")
     
@@ -191,9 +191,37 @@ def run_inference(image_path: str, output_dir: str = "."):
             'dimensions_m': dimensions,
             'rotation_y_deg': rotation_y,
             'rotation_confidence': rotation_confidence,
-            'depth_m': float(depth)
+            'depth_m': float(depth),
+            'rests_on_id': seg_data.get('rests_on_id', None)
         })
-    
+
+    # Step 6.5: Apply scene-scaled dispersion
+    # print("\nStep 6.5: Applying dispersion to reduce clustering...")
+
+    # # Calculate scene depth range
+    # depths = [r['depth_m'] for r in temp_results]
+    # min_depth = min(depths)
+    # max_depth = max(depths)
+    # depth_range = max_depth - min_depth
+
+    # # Apply depth scaling to spread objects (5-10% increase)
+    # dispersion_factor = 1.15  # 8% increase in distances
+
+    # for temp_result in temp_results:
+    #     pos = temp_result['position_m']
+    #     # Scale X and Z from origin (camera is at origin)
+    #     pos[0] *= dispersion_factor
+    #     pos[2] *= dispersion_factor
+    #     temp_result['position_m'] = pos
+
+    # print(f"  Depth range: {min_depth:.2f}m - {max_depth:.2f}m (range: {depth_range:.2f}m)")
+    # print(f"  Applied dispersion factor: {dispersion_factor:.2f}x")
+
+    print("\nStep 6.5: Applying spatial dispersion...")
+    from spatial_dispersion import apply_dispersion
+
+    temp_results = apply_dispersion(temp_results, dispersion_strength=0.35)
+
     # Estimate ground plane from floor objects
     ground_y = estimate_ground_plane_y(temp_results)
     print(f"\nEstimated ground plane Y: {ground_y:.3f}m\n")
@@ -215,17 +243,54 @@ def run_inference(image_path: str, output_dir: str = "."):
             'depth_m': temp_result['depth_m'],
             'dimensions_m': temp_result['dimensions_m'],
             'rotation_y_deg': temp_result['rotation_y_deg'],
-            'rotation_confidence': temp_result['rotation_confidence']
+            'rotation_confidence': temp_result['rotation_confidence'],
+            'rests_on_id': temp_result.get('rests_on_id', None)
         }
         
         results.append(result)
-        
-        print(f"{result['label']} (ID: {result['id']})")
-        print(f"  Position: ({adjusted_pos[0]:.3f}, {adjusted_pos[1]:.3f}, {adjusted_pos[2]:.3f}) m")
-        print(f"  Rotation Y: {result['rotation_y_deg']:.1f}° (confidence: {result['rotation_confidence']:.2f})")
-        print(f"  Depth: {result['depth_m']:.3f} m")
-        print(f"  Dimensions: {result['dimensions_m']} m\n")
     
+    # Step 6.7: Apply LLM-detected support relationships
+    print("\nStep 6.7: Applying support relationships from LLM...")
+
+    results_by_id = {r['id']: r for r in results}
+    support_count = 0
+
+    for result in results:
+        rests_on_id = result.get('rests_on_id')
+        
+        # Not working
+        if rests_on_id is not None and rests_on_id in results_by_id:
+            supporter = results_by_id[rests_on_id]
+            
+            # Calculate new Y position
+            supporter_top_y = supporter['position_m'][1] + (supporter['dimensions_m'][2] / 2)
+            supported_height = result['dimensions_m'][2]
+            new_y = supporter_top_y + (supported_height / 2)
+            
+            old_y = result['position_m'][1]
+            result['position_m'][1] = new_y
+            
+            print(f"  ✓ Placing {result['label']} (ID {result['id']}) on {supporter['label']} (ID {supporter['id']})")
+            print(f"    Y: {old_y:.3f}m → {new_y:.3f}m")
+            support_count += 1
+
+    print(f"\nApplied {support_count} support relationships\n")
+
+    # NOW print final coordinates
+    print("\n" + "="*70)
+    print("FINAL COORDINATES")
+    print("="*70 + "\n")
+
+    for result in results:
+        pos = result['position_m']
+        print(f"{result['label']} (ID: {result['id']})")
+        print(f"  Position: ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f}) m")
+        print(f"  Rotation Y: {result['rotation_y_deg']:.1f}°")
+        print(f"  Dimensions: {result['dimensions_m']} m")
+        if result.get('rests_on_id'):
+            print(f"  Rests on: ID {result['rests_on_id']}")
+        print()
+
     # Save results
     output_path = Path(output_dir) / "coords_json" / f"{Path(image_path).stem}_3d_poses.json"
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -238,7 +303,7 @@ def run_inference(image_path: str, output_dir: str = "."):
 
 if __name__ == "__main__":
     # Update this path to your test image
-    IMAGE_PATH = "input/bathroom.png"
+    IMAGE_PATH = "input/room_test.png"
     
     if not os.path.exists(IMAGE_PATH):
         print(f"ERROR: Image not found at {IMAGE_PATH}")

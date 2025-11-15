@@ -1,15 +1,24 @@
 """You are an expert AI for 3D scene reconstruction. Analyze this room and estimate:
-1. Physical dimensions (length, width, height) in meters  
+1. Physical dimensions (length, width, height) in meters for each object
+2. Support relationships - which objects rest ON other objects
 
 Objects detected:
 {object_list_str}
 
-Output JSON:
+For each object, determine:
+- dimensions_meters: Realistic physical size based on typical object dimensions
+- rests_on_id: The ID of the object this one sits on, or null if it rests on the floor/ground
+
+Output JSON format:
 [
   {{
     "id": [OBJECT_ID],
     "label": "[OBJECT_LABEL]",
-    "dimensions_meters": [[LENGTH], [WIDTH], [HEIGHT]]
+    "dimensions_meters": [[LENGTH], [WIDTH], [HEIGHT]],
+    "rests_on_id": [ID or null],
+    "confidence": [0.0-1.0]
   }}
 ]
+
+Be precise with rests_on_id - only set it if you can clearly see the object sitting on another object in the image.
 """
