@@ -61,7 +61,7 @@ def segment_image_hybrid(image_path: str, device: str = "cuda") -> tuple:
         instance_result = processor.post_process_instance_segmentation(
             outputs, 
             target_sizes=[img.size[::-1]],
-            threshold=0.5
+            threshold=0.3
         )[0]
     
     segmentation_map_instance = instance_result["segmentation"]
@@ -120,19 +120,20 @@ def segment_image_hybrid(image_path: str, device: str = "cuda") -> tuple:
     segmentation_map_panoptic = panoptic_result["segmentation"]
     segments_info_panoptic = panoptic_result["segments_info"]
     
-    # Only keep "stuff" classes from panoptic
-    STUFF_CLASSES = {'cabinet', 'light', 'shelf', 'counter', 'countertop'}
-    
+    # From panoptic: keep anything that's NOT in excluded labels
     stuff_count = 0
+
+    # Track instance bboxes to avoid duplicates
+    instance_bboxes = [(seg['bbox']['center_x'], seg['bbox']['center_y'], 
+                    seg['bbox']['width'], seg['bbox']['height']) for seg in segments]
+
     for segment in segments_info_panoptic:
         segment_id = segment['id']
         label_id = segment['label_id']
         
         segment_label = model.config.id2label[label_id].lower()
         
-        if not any(stuff in segment_label for stuff in STUFF_CLASSES):
-            continue
-        
+        # Skip excluded labels (walls, floors, etc.)
         if any(excluded in segment_label for excluded in EXCLUDED_LABELS):
             continue
         
@@ -144,9 +145,26 @@ def segment_image_hybrid(image_path: str, device: str = "cuda") -> tuple:
             continue
         
         y_min, x_min = coords.min(axis=0)
-        y_max, x_max = coords.max(0)
+        y_max, x_max = coords.max(axis=0)
         width = x_max - x_min + 1
         height = y_max - y_min + 1
+        
+        # Skip if this bbox significantly overlaps with an instance result (likely duplicate)
+        center_x = x_min + width / 2
+        center_y = y_min + height / 2
+        is_duplicate = False
+        
+        for inst_cx, inst_cy, inst_w, inst_h in instance_bboxes:
+            # Check if centers are close and sizes are similar
+            dist = ((center_x - inst_cx)**2 + (center_y - inst_cy)**2)**0.5
+            size_diff = abs(width - inst_w) + abs(height - inst_h)
+            
+            if dist < 50 and size_diff < 100:  # Likely the same object
+                is_duplicate = True
+                break
+        
+        if is_duplicate:
+            continue
         
         bbox_data = create_bbox_data(x_min, y_min, width, height, img_width, img_height)
         
@@ -161,9 +179,8 @@ def segment_image_hybrid(image_path: str, device: str = "cuda") -> tuple:
         })
         next_id += 1
         stuff_count += 1
-    
-    print(f"  Found {stuff_count} structural elements")
-    print(f"Total: {len(segments)} segments")
+
+    print(f"  Found {stuff_count} additional objects from panoptic")
     
     return segments, img_width, img_height, img_np
 
