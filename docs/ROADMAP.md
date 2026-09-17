@@ -70,7 +70,7 @@ The dependencies below drive this order more than priority does.
 | CODE-3 | ☐ | Split `main.process_image` into a `Pipeline` class with stage hooks (progress callbacks for the webapp instead of polling the filesystem). |
 | CODE-4 | ◐ | Webapp renamed, detector picker and GLB download added; the "photo point cloud" toggle exists in the viewer only. |
 | CODE-5 | ☐ | Vendor three.js into `webapp/static/vendor/` so viewers work offline (the "fully local" claim currently stops at the browser). |
-| CODE-6 | ☐ | `scripts/replay_assembly.py`: re-run layout + assembly on an existing scene without re-running the models (needs model-space PLYs to be kept — write `*.model.ply` alongside the baked ones). Makes heuristic tuning a 5-second loop. |
+| CODE-6 | ◐ | `scripts/replay_layout.py` re-runs the layout stage on CPU in seconds (done). Still to do: replay *assembly* on an existing scene, which needs model-space PLYs kept next to the baked ones. |
 | CODE-7 | ☐ | Structured logging (JSON lines per stage) instead of prints; the timing CSV becomes a view over it. |
 | CODE-8 | ☐ | Docker image for the server side (CUDA 12.8 base, both envs) — the biggest setup-time reducer for external users. |
 
