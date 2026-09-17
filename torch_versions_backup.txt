@@ -1,0 +1,6 @@
+pytorch-lightning            2.6.0
+pytorch3d                    0.7.9              /home/adam-rolander/WorldBuilder/pytorch3d
+torch                        2.5.1+cu121
+torchaudio                   2.5.1+cu121
+torchmetrics                 1.8.2
+torchvision                  0.20.1+cu121

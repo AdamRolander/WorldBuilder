@@ -1,0 +1,24 @@
+body { 
+  margin: 0; 
+  padding: 0; 
+  background-color: #010001; 
+  font-family: 'Rethink Sans', sans-serif; 
+}
+
+::-webkit-scrollbar { 
+  width: 8px; 
+}
+
+::-webkit-scrollbar-track { 
+  background: #010001; 
+}
+
+::-webkit-scrollbar-thumb { 
+  background: #133336; 
+  border-radius: 4px; 
+}
+
+::-webkit-scrollbar-thumb:hover { 
+  background: #285F6B; 
+}
+
