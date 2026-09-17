@@ -87,11 +87,21 @@ back wall because two object meshes poked 0.4 units through it, grew the
 room to the objects, and textured only 8 % of the far wall. Objects are
 now nudged back inside strong walls (≤35 % of their own extent) instead.
 
-### 3.4 Pending
+### 3.4 Final-code reruns
 
-`after3/` reruns of lr2 + k1 with the final code (wall trust, part filter,
-intrinsics recovery) were queued at the end of the session; append their
-numbers here. Also still to do: a 5–6 photo sweep including a dark scene
+`after3` (wall trust + part filter + intrinsics recovery + containment), lr2 with `qwen`:
+30/30 objects, 245 s; floor from mask (98 %), yaw 0.2°; **back wall 58 % / right wall 16 % textured**
+(was 7 % / 0 % before the wall-trust fix); 5 objects nudged back inside detected walls;
+3 objects kept in their container (throw blanket ⊂ sofa, book ⊂ side table); 26 pair-pushes
+(was 37). One regression found and fixed afterwards: the floor plane was lowered to the
+lowest object's bottom, which zeroed the floor texture — the fitted floor is now fixed and
+sunk objects are raised (`after4` rerun below).
+
+### 3.5 Pending
+
+`after3/k1` and `after4/lr2` (floor fix) plus the live detector benchmark
+(`scripts/bench_detectors.py --live demo_day`) were queued at the end of the
+session; append their numbers here. Also still to do: a 5–6 photo sweep including a dark scene
 (`demo_day/lib2.webp`), an outdoor one (`demo_day/o2.webp`) and a
 portrait-orientation phone photo, with screenshots of each viewer.
 
