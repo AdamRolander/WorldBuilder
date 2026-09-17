@@ -265,7 +265,7 @@ colour) and on a real photo on CPU.
 ## 7. Repository hygiene
 
 * No license file. Blocks JOSS and any plugin listing. **Added MIT** —
-  confirm this is the license you want (see PUBLISHING.md §2 for the
+  confirm this is the license you want (see the LICENSE notes for the
   interaction with the SAM licenses).
 * No tests, no CI, no `pyproject.toml`. Added all three.
 * `regen_viewer.py` at the root → `scripts/regen_viewer.py`.
