@@ -1,0 +1,26 @@
+schema_version = "1.0.0"
+
+id = "worldbuilder"
+version = "0.1.0"
+name = "WorldBuilder"
+tagline = "Turn a photo of a room into a 3D scene via a local WorldBuilder server"
+maintainer = "Adam Rolander <arolander@ucsd.edu>"
+type = "add-on"
+
+website = "https://github.com/AdamRolander/WorldBuilder"
+tags = ["Import-Export", "3D View"]
+
+blender_version_min = "4.2.0"
+
+# MIT is GPL-compatible, which extensions.blender.org requires. The add-on
+# contains no model code; it talks HTTP to a WorldBuilder server you run.
+license = ["SPDX:MIT"]
+copyright = ["2026 Adam Rolander"]
+
+# Required by the Extensions platform: declare every permission up front.
+[permissions]
+network = "Send the photo to your own WorldBuilder server and download the resulting GLB scene"
+files = "Read the selected photo and write the downloaded GLB into Blender's temp directory"
+
+# No bundled wheels: the add-on only uses Blender's Python stdlib + bpy.
+# (urllib for HTTP, so no `requests` wheel is needed.)

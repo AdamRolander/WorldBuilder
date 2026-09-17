@@ -1,0 +1,27 @@
+name: ci
+
+on:
+  push:
+    branches: [main, audit-and-roadmap]
+  pull_request:
+
+jobs:
+  cpu-tests:
+    # The pipeline itself needs a 32 GB GPU; CI covers the CPU-only logic
+    # (geometry, layout, placement, parsing) plus lint. GPU validation is
+    # a documented manual step (docs/VALIDATION.md).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install CPU deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch==2.4.1 --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[dev]"
+      - name: Lint
+        run: ruff check main.py src tests scripts webapp/server.py vlm_server/server.py
+      - name: Tests
+        run: pytest
