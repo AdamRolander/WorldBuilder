@@ -80,7 +80,8 @@ def main():
     mesh.export(str(out / "room.ply"), file_type="ply")
     rl.save_layout(layout, out / "layout.json", extra={"plane_texture_stats": stats})
 
-    # Unwrapped plane textures for eyeballing.
+    # Unwrapped plane textures for eyeballing (flipped so they read like the
+    # photo: world +X is camera-left, and grid row 0 is the plane's low edge).
     mn = np.asarray(layout.bounds_min); mx = np.asarray(layout.bounds_max)
     ex, ey, ez = np.eye(3); sx, sy, sz = mx - mn
     planes = {"floor": (mn, ex, ez, sx, sz, ey), "ceiling": (np.array([mn[0], mx[1], mn[2]]), ex, ez, sx, sz, -ey),
@@ -90,7 +91,7 @@ def main():
         _, _, C, _ = rl.textured_plane(o, au, av, su, sv, n, layout.R_total, K, image, depth,
                                        (200, 200, 200), cells=a.cells)
         nv, nu = rl.textured_plane.last_grid_shape
-        Image.fromarray(C.reshape(nv, nu, 3)[::-1]).resize((nu * 3, nv * 3), Image.NEAREST).save(out / f"tex_{name}.png")
+        Image.fromarray(C.reshape(nv, nu, 3)[::-1, ::-1]).resize((nu * 3, nv * 3), Image.NEAREST).save(out / f"tex_{name}.png")
     print(f"✓ wrote {out}/room.ply, layout.json, tex_*.png")
     print(json.dumps({k: v["visible_fraction"] for k, v in stats.items()}))
 
