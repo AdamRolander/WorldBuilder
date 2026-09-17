@@ -326,6 +326,7 @@ python scripts/regen_viewer.py outputs/scene_a outputs/scene_b   # rebuild viewe
 python -m src.scene_export outputs/scene_a                       # just the GLB
 python -m src.debug_masks --image photo.jpg --output-dir outputs/scene_a   # overlay masks on the photo
 python scripts/bench_detectors.py --offline outputs outputs_og2  # local-VLM recall vs Gemini on past runs
+python scripts/replay_layout.py demo_day/lr2.webp --masks outputs/lr2_q/masks   # layout stage only, CPU, seconds
 python scripts/bench_detectors.py --live demo_day --save bench.json        # same, live against the VLM server
 ```
 
@@ -475,6 +476,8 @@ integrations/
 scripts/
   regen_viewer.py           rebuild viewer.html + scene.glb for existing output dirs
   bench_detectors.py        local-VLM recall benchmark vs Gemini
+  replay_layout.py          layout stage only (CPU MoGe) for fast tuning
+  plot_scene.py             plan-view diagnostic PNG of a finished scene
 tests/                      CPU-only pytest suite
 docs/                       ARCHITECTURE, AUDIT, ROADMAP, VALIDATION, PUBLISHING, INTEGRATIONS, ROOMBUILDER
 paper/                      JOSS paper draft
