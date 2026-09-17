@@ -1,0 +1,24 @@
+# WorldBuilder's own dependencies, for the `worldbuilder-main` conda env.
+#
+# This does NOT cover the heavy stacks — torch, sam3, sam3d_objects, pytorch3d,
+# kaolin, gsplat, spconv are installed separately per README §2, because they
+# need specific index URLs, editable clones, and source builds that pip can't
+# express here.
+#
+# Versions are what the pipeline is known to run against.
+
+numpy==1.26.4          # 2.x breaks open3d and kaolin — do not upgrade
+pillow==10.3.0
+requests==2.32.5
+python-dotenv==1.2.1
+
+# stage 1 — Gemini detector
+google-genai==1.57.0
+
+# stage 3/4 — mesh handling and scene assembly
+open3d==0.19.0
+trimesh==4.10.1
+
+# webapp
+Flask==3.0.3
+flask-cors==6.0.2
