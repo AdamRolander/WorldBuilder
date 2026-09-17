@@ -68,7 +68,7 @@ The dependencies below drive this order more than priority does.
 | CODE-1 | ☑ | Test suite (36 CPU tests), ruff, CI workflow, pyproject, LICENSE, CITATION. |
 | CODE-2 | ☐ | Type-check with `pyright`/`mypy` on `src/` (mostly annotated already). |
 | CODE-3 | ☐ | Split `main.process_image` into a `Pipeline` class with stage hooks (progress callbacks for the webapp instead of polling the filesystem). |
-| CODE-4 | ☐ | Rename the React component/logo from "Hindsight" leftovers; add a detector picker and the "photo point cloud" toggle to the webapp UI. |
+| CODE-4 | ◐ | Webapp renamed, detector picker and GLB download added; the "photo point cloud" toggle exists in the viewer only. |
 | CODE-5 | ☐ | Vendor three.js into `webapp/static/vendor/` so viewers work offline (the "fully local" claim currently stops at the browser). |
 | CODE-6 | ☐ | `scripts/replay_assembly.py`: re-run layout + assembly on an existing scene without re-running the models (needs model-space PLYs to be kept — write `*.model.ply` alongside the baked ones). Makes heuristic tuning a 5-second loop. |
 | CODE-7 | ☐ | Structured logging (JSON lines per stage) instead of prints; the timing CSV becomes a view over it. |
@@ -80,7 +80,7 @@ The dependencies below drive this order more than priority does.
 | --- | --- | --- |
 | PUB-1 | ☑ | `paper/paper.md` + `paper.bib` drafts. Verify SAM 3 / SAM 3D citations against their official reports; add an ORCID. |
 | PUB-2 | ☐ | Tag `v0.2.0` after merging this branch; enable Zenodo GitHub integration; add the DOI badge. |
-| PUB-3 | ☐ | `docs/ARCHITECTURE.md`: data flow, per-stage JSON schemas, frame conventions (the content already exists in module docstrings). |
+| PUB-3 | ☑ | `docs/ARCHITECTURE.md`: data flow, per-stage JSON schemas, frame conventions. |
 | PUB-4 | ☐ | Evaluation set: 30 room photos with per-photo object lists (consented), a results table (recall, time, failures) in the docs. |
 | PUB-5 | ☐ | Changelog + monthly tagged releases for ≥ 6 months (JOSS history requirement). |
 | PUB-6 | ☐ | One documented research use (own preprint / course project / external lab). |

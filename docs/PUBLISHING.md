@@ -19,7 +19,7 @@ From the [submission guidelines](https://joss.readthedocs.io/en/latest/submittin
 | Public development history > 6 months, iterative | repo dates to Jan 2026 but has 6 commits. **Gap.** From now on: small commits, tagged releases, a changelog. Earliest sensible submission ≈ March 2027 unless history is imported. |
 | Evidence of use in research (citations, other groups, a workflow) | **Gap, and the hardest one.** JOSS explicitly rejects "software not yet used in research". See §3. |
 | Automated tests | done — 34 CPU tests + CI (`.github/workflows/ci.yml`). GPU validation is documented, not automated. |
-| Documentation: install, usage, API, contributing | README covers install/usage; `CONTRIBUTING.md` added; an API/architecture page is thin (**PUB-3**). |
+| Documentation: install, usage, API, contributing | README covers install/usage; `CONTRIBUTING.md`, `docs/ARCHITECTURE.md` added. |
 | `paper.md` (≈ 250–1 000 words: summary, statement of need, state of the field, key references) + `paper.bib` | draft in `paper/` (**PUB-1**) |
 | Authorship agreed; CoI disclosed | single author; fine |
 | Not out of scope: not a notebook, not a "minor utility", not "half-baked", not mainly a web tool | The web app is a thin front end over a library; keep the CLI/library primary in the paper. |
@@ -82,7 +82,7 @@ Plan on submitting no earlier than **Q1–Q2 2027**, with (1) or (2) in hand.
 - [x] LICENSE, CITATION.cff, CONTRIBUTING.md, pyproject, tests, CI
 - [x] `paper/paper.md` and `paper/paper.bib` first drafts
 - [ ] Create a Zenodo record on the first tagged release (`v0.2.0`) for a DOI
-- [ ] `docs/ARCHITECTURE.md` with a data-flow diagram and the per-stage JSON schemas
+- [x] `docs/ARCHITECTURE.md` with a data-flow diagram and the per-stage JSON schemas
 - [ ] A 30-photo evaluation set with per-photo object lists (can be
       crowd-sourced from friends' rooms with consent) + a results table
 - [ ] Regular commits for ≥ 6 months; tag `v0.3`, `v0.4`, ...

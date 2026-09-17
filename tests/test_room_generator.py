@@ -98,3 +98,21 @@ def test_clamp_to_room_only_enforces_detected_walls_and_caps_push():
     assert np.isclose(fab["max"][2], 5.2 - 0.35 * 0.2)                # capped at 35 % of its extent
     # x sides are "extent": nothing happens even though the sofa is at x_min-... boundary
     assert sofa["translation"][0] == 0.0
+
+
+def test_pillows_inside_sofa_box_are_left_alone():
+    sofa, sab = _box(1, "sofa", (0.0, 0.0, 1.2), (2.0, 0.9, 1.9))
+    pillow, pab = _box(2, "pillow", (0.3, 0.45, 1.6), (0.7, 0.85, 1.8))     # on the seat, under the back top
+    pillow2, p2b = _box(3, "pillow", (1.2, 0.45, 1.6), (1.6, 0.85, 1.8))
+    results = [sofa, pillow, pillow2]
+    aabbs = {1: sab, 2: pab, 3: p2b}
+    sup = rg.find_supports(results, aabbs, scene_h=2.5)
+    assert 2 not in sup and 3 not in sup                       # support test cannot see them ...
+    con = rg.find_contained(results, aabbs, sup)
+    assert con == {2: 1, 3: 1}                                 # ... containment can
+    bounds = rg.compute_scene_bounds(aabbs)
+    rg.snap_ground_objects(results, aabbs, bounds, floor_y=0.0, supports=sup, contained=con)
+    assert pillow["translation"][1] == 0.0 and pillow["contained_in"] == 1   # not dropped to the floor
+    pushes = rg.resolve_xz_collisions(results, aabbs, supports=sup, contained=con)
+    assert pushes == 0
+    assert pillow["translation"] == [0.0, 0.0, 0.0] and pillow2["translation"] == [0.0, 0.0, 0.0]

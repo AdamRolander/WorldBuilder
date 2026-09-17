@@ -476,7 +476,7 @@ scripts/
   regen_viewer.py           rebuild viewer.html + scene.glb for existing output dirs
   bench_detectors.py        local-VLM recall benchmark vs Gemini
 tests/                      CPU-only pytest suite
-docs/                       AUDIT, ROADMAP, VALIDATION, PUBLISHING, INTEGRATIONS, ROOMBUILDER
+docs/                       ARCHITECTURE, AUDIT, ROADMAP, VALIDATION, PUBLISHING, INTEGRATIONS, ROOMBUILDER
 paper/                      JOSS paper draft
 
 checkpoints/                SAM 3 weights            (gitignored)
@@ -530,6 +530,7 @@ the `mv` step in setup §4 is easy to miss.
 
 | document | what it is for |
 | --- | --- |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | data flow, file formats, frames/units, extension points |
 | [docs/AUDIT.md](docs/AUDIT.md) | the September 2026 code audit: findings, fixes, evidence |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | every planned item with ids, blockers and a suggested order |
 | [docs/VALIDATION.md](docs/VALIDATION.md) | GPU validation procedure and before/after measurements |

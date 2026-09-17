@@ -292,6 +292,49 @@ def find_supports(results: List[Dict], aabbs: Dict[int, Dict], scene_h: float,
     return supports
 
 
+def find_contained(results: List[Dict], aabbs: Dict[int, Dict], supports: Optional[Dict[int, int]] = None,
+                   min_footprint: float = 0.6, max_volume_ratio: float = 0.25) -> Dict[int, int]:
+    """Map small object id -> id of the larger object whose box contains it.
+
+    Pillows on a sofa, books on a shelf, a mug on a desk under a hutch: their
+    AABBs lie inside a bigger object's AABB, whose top is *above* them, so
+    the support test (bottom near the supporter's top) cannot see them.
+    Treating them as contained means: leave their height alone, never push
+    them out of the container, move them with it. Requires ≥``min_footprint``
+    of A's footprint inside B, A's vertical range inside B's, and A's box
+    volume ≤ ``max_volume_ratio`` of B's.
+    """
+    supports = supports or {}
+    out: Dict[int, int] = {}
+    ids = [r['id'] for r in results if r['id'] in aabbs]
+    labels = {r['id']: r['label'] for r in results}
+
+    def _vol(b):
+        return max(1e-9, (b['max'][0] - b['min'][0]) * (b['max'][1] - b['min'][1]) * (b['max'][2] - b['min'][2]))
+
+    for a in ids:
+        if a in supports or is_hanging(labels[a]):
+            continue
+        A = aabbs[a]
+        ah = A['max'][1] - A['min'][1]
+        best, best_vol = None, float('inf')
+        for b in ids:
+            if b == a:
+                continue
+            B = aabbs[b]
+            if _vol(A) > max_volume_ratio * _vol(B):
+                continue
+            if _footprint_containment(A, B, margin=0.0) < min_footprint:
+                continue
+            if A['min'][1] < B['min'][1] - 0.25 * ah or A['max'][1] > B['max'][1] + 0.25 * ah:
+                continue
+            if _vol(B) < best_vol:
+                best, best_vol = b, _vol(B)
+        if best is not None:
+            out[a] = best
+    return out
+
+
 def robust_floor_y(results: List[Dict], aabbs: Dict[int, Dict]) -> float:
     """Floor height without the layout stage: median bottom of floor-standing
     objects (≥2 of them), else the lowest bottom overall."""
@@ -304,7 +347,8 @@ def robust_floor_y(results: List[Dict], aabbs: Dict[int, Dict]) -> float:
 
 def snap_ground_objects(results: List[Dict], aabbs: Dict[int, Dict], bounds: Dict,
                         threshold_frac: float = 0.15, floor_y: Optional[float] = None,
-                        supports: Optional[Dict[int, int]] = None) -> int:
+                        supports: Optional[Dict[int, int]] = None,
+                        contained: Optional[Dict[int, int]] = None) -> int:
     """Place objects on the floor or on the object supporting them.
 
     * supported objects snap their bottom to the supporter's top (processed
@@ -328,10 +372,14 @@ def snap_ground_objects(results: List[Dict], aabbs: Dict[int, Dict], bounds: Dic
         aabbs[rid]['max'][1] += dy
 
     snapped = 0
+    contained = contained or {}
     order = sorted((r for r in results if r['id'] in aabbs), key=lambda r: aabbs[r['id']]['min'][1])
     for r in order:
         rid = r['id']
         ab = aabbs[rid]
+        if rid in contained:
+            r.update(snapped=False, supported_by=None, contained_in=contained[rid])
+            continue
         if rid in supports and supports[rid] in aabbs:
             target = aabbs[supports[rid]]['max'][1]
             _shift(rid, target - ab['min'][1])
@@ -358,7 +406,8 @@ def snap_ground_objects(results: List[Dict], aabbs: Dict[int, Dict], bounds: Dic
 
 def resolve_xz_collisions(results: List[Dict], aabbs: Dict[int, Dict], iterations: int = 8,
                           padding: float = 0.02, supports: Optional[Dict[int, int]] = None,
-                          min_overlap_frac: float = 0.7, max_push_frac: float = 0.5) -> int:
+                          min_overlap_frac: float = 0.7, max_push_frac: float = 0.5,
+                          contained: Optional[Dict[int, int]] = None) -> int:
     """Separate genuinely interpenetrating objects in the XZ plane.
 
     A pair is only resolved when the boxes overlap in Y *and* the XZ overlap
@@ -373,6 +422,9 @@ def resolve_xz_collisions(results: List[Dict], aabbs: Dict[int, Dict], iteration
     if not results or not aabbs:
         return 0
     supports = supports or {}
+    contained = contained or {}
+    riders = dict(supports)
+    riders.update(contained)            # both ride along with their host
     by_id = {r['id']: r for r in results}
     moved_total = 0
 
@@ -384,8 +436,10 @@ def resolve_xz_collisions(results: List[Dict], aabbs: Dict[int, Dict], iteration
         ids = [i for i in aabbs if i in by_id]
         for i, id_a in enumerate(ids):
             for id_b in ids[i + 1:]:
-                if supports.get(id_a) == id_b or supports.get(id_b) == id_a:
+                if riders.get(id_a) == id_b or riders.get(id_b) == id_a:
                     continue
+                if id_a in contained or id_b in contained:
+                    continue            # things inside a container are the container's business
                 a, b = aabbs[id_a], aabbs[id_b]
                 ox, oz, oy = _overlap(a, b, 0), _overlap(a, b, 2), _overlap(a, b, 1)
                 if ox <= 0 or oz <= 0 or oy <= 0:
@@ -412,7 +466,7 @@ def resolve_xz_collisions(results: List[Dict], aabbs: Dict[int, Dict], iteration
                     box['min'][axis] += d
                     box['max'][axis] += d
                     # anything resting on this object rides along
-                    for kid, sup in supports.items():
+                    for kid, sup in riders.items():
                         if sup == rid and kid in aabbs and kid in by_id:
                             by_id[kid]['translation'][axis] += d
                             aabbs[kid]['min'][axis] += d
@@ -577,13 +631,20 @@ def assemble_scene(results: List[Dict], floor_y: Optional[float] = None,
         names = {r['id']: r['label'] for r in results}
         log("  support relations: " + ", ".join(f"{names[a]}→{names[b]}" for a, b in supports.items()))
 
-    snapped = snap_ground_objects(results, aabbs, bounds, floor_y=floor_y, supports=supports)
+    contained = find_contained(results, aabbs, supports)
+    diag['contained'] = {int(k): int(v) for k, v in contained.items()}
+    if contained:
+        names = {r['id']: r['label'] for r in results}
+        log("  contained in: " + ", ".join(f"{names[a]}⊂{names[b]}" for a, b in contained.items()))
+
+    snapped = snap_ground_objects(results, aabbs, bounds, floor_y=floor_y, supports=supports,
+                                  contained=contained)
     forced = sum(1 for r in results if r.get('snap_forced'))
     diag['snapped'] = snapped; diag['snap_forced'] = forced
     log(f"  snapped {snapped}/{len(results)} ({forced} via floor-category rule, "
-        f"{len(supports)} onto supports)")
+        f"{len(supports)} onto supports, {len(contained)} left in their container)")
 
-    pushes = resolve_xz_collisions(results, aabbs, supports=supports)
+    pushes = resolve_xz_collisions(results, aabbs, supports=supports, contained=contained)
     diag['collision_pushes'] = pushes
     log(f"  collision resolution: {pushes} pair-pushes")
 
@@ -591,6 +652,6 @@ def assemble_scene(results: List[Dict], floor_y: Optional[float] = None,
     # their supporter moved and rounding did not open gaps.
     aabbs = compute_per_object_aabb(results)
     bounds = compute_scene_bounds(aabbs)
-    snap_ground_objects(results, aabbs, bounds, floor_y=floor_y, supports=supports)
+    snap_ground_objects(results, aabbs, bounds, floor_y=floor_y, supports=supports, contained=contained)
     diag['bounds'] = compute_scene_bounds(compute_per_object_aabb(results))
     return diag
