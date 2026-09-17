@@ -116,8 +116,18 @@ runs queued at the very end of the session (see §3.6).
 
 Old prompt/server, Qwen3-VL-8B, 42 photos, 19 with a Gemini reference: **mean recall 0.53**,
 median 6–9 s per photo, but 10 photos degenerated into 100+ entry loops at ~65 s each, and the
-three outdoor photos (forest, playground, maze) returned nothing. This is the number PIPE-1 starts
-from; rerun with the new server and append the result here.
+three outdoor photos (forest, playground, maze) returned nothing. This is the number PIPE-1 starts from.
+
+**New prompt/server** (same 42 photos, same model): **mean recall 0.52** (unchanged), but
+**zero looping photos** (was 10), a flat ~23 s per photo (was 7 s normally / 65 s when looping),
+and the three outdoor photos now return objects (forest 10, playground 14, maze 1). Fourteen photos
+hit the 25-entry cap, which likely costs recall on cluttered scenes — raising the cap or a
+"what did you miss?" second pass is the next PIPE-1 experiment. The longer prompt plus `bbox_2d`
+output is what makes simple photos slower.
+
+`after5` lr2 with the new server: 19 types (was 16), **box fallback fired twice and recovered a
+mask each time** (PIPE-3 evidence), 35 instances, 35/35 reconstructed in 283 s; layout identical
+to `after4` (floor 20 %, back wall 61 %, right wall 17 % textured).
 
 ### 3.7 Pending
 
