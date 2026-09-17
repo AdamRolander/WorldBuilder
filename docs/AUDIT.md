@@ -21,7 +21,7 @@ are tracked in [ROADMAP.md](ROADMAP.md).
   assumptions the wrapper code makes about them.
 * Ran the unmodified pipeline on three photos (baseline) and the modified
   pipeline on the same photos (see [VALIDATION.md](VALIDATION.md)).
-* Added a CPU-only test suite (`tests/`, 34 tests) that pins the geometry
+* Added a CPU-only test suite (`tests/`, 39 tests) that pins the geometry
   and every heuristic that used to live only in prose.
 
 Detection-to-segmentation loss across the historical outputs, before any

@@ -159,7 +159,7 @@ Verify:
 python -c "import torch, sam3, sam3d_objects, pytorch3d, kaolin; \
 print(torch.__version__, torch.cuda.is_available())"
 # → 2.8.0+cu128 True
-pytest            # 37 CPU-only tests, ~5 s
+pytest            # CPU-only test suite, ~5 s
 ```
 
 Known-good versions in this env: `numpy 1.26.4` (do **not** upgrade to 2.x —

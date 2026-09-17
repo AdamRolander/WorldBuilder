@@ -18,7 +18,7 @@ From the [submission guidelines](https://joss.readthedocs.io/en/latest/submittin
 | Substantial scholarly effort (rule of thumb: ≥ 3 months, ≥ 1 000 lines, not a thin wrapper) | code is ≈ 4 000 lines of original glue, heuristics and layout logic on top of SAM 3 / SAM 3D / MoGe. Reviewers will ask what is *ours*; the answer is the hand-off logic, the layout stage, the scene assembly and the tooling — say so explicitly. |
 | Public development history > 6 months, iterative | repo dates to Jan 2026 but has 6 commits. **Gap.** From now on: small commits, tagged releases, a changelog. Earliest sensible submission ≈ March 2027 unless history is imported. |
 | Evidence of use in research (citations, other groups, a workflow) | **Gap, and the hardest one.** JOSS explicitly rejects "software not yet used in research". See §3. |
-| Automated tests | done — 34 CPU tests + CI (`.github/workflows/ci.yml`). GPU validation is documented, not automated. |
+| Automated tests | done — 39 CPU tests + CI (`.github/workflows/ci.yml`). GPU validation is documented, not automated. |
 | Documentation: install, usage, API, contributing | README covers install/usage; `CONTRIBUTING.md`, `docs/ARCHITECTURE.md` added. |
 | `paper.md` (≈ 250–1 000 words: summary, statement of need, state of the field, key references) + `paper.bib` | draft in `paper/` (**PUB-1**) |
 | Authorship agreed; CoI disclosed | single author; fine |

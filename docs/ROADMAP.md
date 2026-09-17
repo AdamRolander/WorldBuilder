@@ -65,7 +65,7 @@ The dependencies below drive this order more than priority does.
 
 | id | status | item |
 | --- | --- | --- |
-| CODE-1 | ☑ | Test suite (36 CPU tests), ruff, CI workflow, pyproject, LICENSE, CITATION. |
+| CODE-1 | ☑ | Test suite (39 CPU tests), ruff, CI workflow, pyproject, LICENSE, CITATION. |
 | CODE-2 | ☐ | Type-check with `pyright`/`mypy` on `src/` (mostly annotated already). |
 | CODE-3 | ☐ | Split `main.process_image` into a `Pipeline` class with stage hooks (progress callbacks for the webapp instead of polling the filesystem). |
 | CODE-4 | ◐ | Webapp renamed, detector picker and GLB download added; the "photo point cloud" toggle exists in the viewer only. |
