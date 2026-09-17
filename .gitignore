@@ -263,3 +263,8 @@ ngrok
 # Claude Code local settings
 .claude/settings.local.json
 .claude/*.tmp.*
+.claude/
+
+# --- Private notes (publishing strategy, business docs) and local validation sets ---
+private/
+9-17-validation/

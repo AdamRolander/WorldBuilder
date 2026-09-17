@@ -479,8 +479,7 @@ scripts/
   replay_layout.py          layout stage only (CPU MoGe) for fast tuning
   plot_scene.py             plan-view diagnostic PNG of a finished scene
 tests/                      CPU-only pytest suite
-docs/                       ARCHITECTURE, AUDIT, ROADMAP, VALIDATION, PUBLISHING, INTEGRATIONS, ROOMBUILDER
-paper/                      JOSS paper draft
+docs/                       ARCHITECTURE, AUDIT, ROADMAP, VALIDATION, INTEGRATIONS
 
 checkpoints/                SAM 3 weights            (gitignored)
 sam3_repo/                  upstream clone           (gitignored)
@@ -537,10 +536,7 @@ the `mv` step in setup §4 is easy to miss.
 | [docs/AUDIT.md](docs/AUDIT.md) | the September 2026 code audit: findings, fixes, evidence |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | every planned item with ids, blockers and a suggested order |
 | [docs/VALIDATION.md](docs/VALIDATION.md) | GPU validation procedure and before/after measurements |
-| [docs/PUBLISHING.md](docs/PUBLISHING.md) | JOSS requirements, gap analysis, licensing nuances, fallbacks |
 | [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md) | Blender extension and Unreal plugin: setup, publishing rules, status |
-| [docs/ROOMBUILDER.md](docs/ROOMBUILDER.md) | the dorm/room-planning app: market, scope, data, repo strategy |
-| [paper/paper.md](paper/paper.md) | JOSS paper draft |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | how to work on the repo |
 
 ## Licence

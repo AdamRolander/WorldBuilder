@@ -26,4 +26,4 @@ This license covers WorldBuilder's own code (main.py, src/, webapp/,
 vlm_server/, scripts/, tests/, integrations/). It does not cover the model
 weights or the upstream repositories the pipeline depends on, which have
 their own terms: SAM 3 and SAM 3D Objects (Meta "SAM License"), PyTorch3D
-(BSD), MoGe (MIT), Qwen3-VL (Apache-2.0). See docs/PUBLISHING.md §2.
+(BSD), MoGe (MIT), Qwen3-VL (Apache-2.0). 

@@ -6,9 +6,8 @@ to them (`PIPE-3`, `PUB-1`, …). Status as of **2026-09-17**.
 
 Related documents: [AUDIT.md](AUDIT.md) (what was wrong and what was fixed),
 [VALIDATION.md](VALIDATION.md) (how to verify a change on the GPU, with
-before/after numbers), [PUBLISHING.md](PUBLISHING.md) (JOSS),
-[INTEGRATIONS.md](INTEGRATIONS.md) (Blender/Unreal),
-[ROOMBUILDER.md](ROOMBUILDER.md) (the sister app).
+before/after numbers), [INTEGRATIONS.md](INTEGRATIONS.md) (Blender/Unreal); publishing and
+RoomBuilder planning notes are kept privately.
 
 Legend: ☐ todo · ◐ in progress · ☑ done · ⛔ blocked (by what)
 
@@ -56,7 +55,7 @@ The dependencies below drive this order more than priority does.
 | PIPE-10 | ☐ | **Inpainting for hidden room texture.** Replace nearest-sample fill with a proper inpainter (LaMa is small and permissive; SD-inpaint if quality matters) on the unwrapped plane textures. | Needs a texture atlas per plane (currently vertex colours). |
 | PIPE-11 | ☐ | **Object texture baking.** SAM 3D can bake a UV texture (`with_texture_baking=True`); we export vertex colours. Baked textures are far better in Blender/Unreal. Measure time cost. | Cheap to try. |
 | PIPE-12 | ☐ | **Mesh decimation/LOD.** SAM 3D meshes are dense (a 30-object scene is ~100 MB). Quadric decimation to a target triangle budget at export, optional. | `trimesh`/`open3d` have it; one flag. |
-| PIPE-13 | ☐ | **Permissive-model variant.** Evaluate TRELLIS / Hunyuan3D 2.x / SPAR3D as a SAM 3D replacement for a SAM-licence-free stack (matters for a commercial RoomBuilder backend). | Research; see PUBLISHING §2. |
+| PIPE-13 | ☐ | **Permissive-model variant.** Evaluate TRELLIS / Hunyuan3D 2.x / SPAR3D as a SAM 3D replacement for a SAM-licence-free stack (matters for a commercial RoomBuilder backend). | Research; see LICENSE notes. |
 | PIPE-14 | ☐ | **Outdoor/open scenes.** Layout stage assumes a room; add a "no ceiling / ground plane only" mode when the ceiling is not found and the point map spans > ~15 m. | Small. |
 | PIPE-15 | ☐ | **Batch throughput.** Keep all three models resident with SAM 3D quantised (fp8/int8) or on a 48 GB card; removes the park/wake cost (~10 s/scene). | Hardware-dependent. |
 | PIPE-16 | ☐ | **Pose refinement across objects.** Use the point map to re-fit each object's depth (median of masked point-map depth vs. mesh depth) — SAM 3D's per-object depth is the main source of "floating" objects. | Promising; medium effort. |
@@ -74,11 +73,11 @@ The dependencies below drive this order more than priority does.
 | CODE-7 | ☐ | Structured logging (JSON lines per stage) instead of prints; the timing CSV becomes a view over it. |
 | CODE-8 | ☐ | Docker image for the server side (CUDA 12.8 base, both envs) — the biggest setup-time reducer for external users. |
 
-## 3. Publishing — `PUB-*` (details in PUBLISHING.md)
+## 3. Publishing — `PUB-*`
 
 | id | status | item |
 | --- | --- | --- |
-| PUB-1 | ☑ | `paper/paper.md` + `paper.bib` drafts. Verify SAM 3 / SAM 3D citations against their official reports; add an ORCID. |
+| PUB-1 | ☑ | Paper drafts (kept privately until submission). Verify SAM 3 / SAM 3D citations against their official reports; add an ORCID. |
 | PUB-2 | ☐ | Tag `v0.2.0` after merging this branch; enable Zenodo GitHub integration; add the DOI badge. |
 | PUB-3 | ☑ | `docs/ARCHITECTURE.md`: data flow, per-stage JSON schemas, frame conventions. |
 | PUB-4 | ☐ | Evaluation set: 30 room photos with per-photo object lists (consented), a results table (recall, time, failures) in the docs. |
@@ -99,7 +98,7 @@ The dependencies below drive this order more than priority does.
 | DCC-6 | ☐ | Vertex-colour material + decimation option shipped with the UE plugin. |
 | DCC-7 | ☐ | Streaming import (objects appear as they finish). Needs a per-object job endpoint. |
 
-## 5. RoomBuilder — `RB-*` (details in ROOMBUILDER.md and ../RoomBuilder)
+## 5. RoomBuilder — `RB-*` (sister repo)
 
 | id | status | item |
 | --- | --- | --- |
