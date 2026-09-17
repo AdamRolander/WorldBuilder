@@ -4,8 +4,8 @@ Both integrations follow one rule: **the DCC add-on is a thin HTTP client;
 the models stay in the WorldBuilder server.** Reasons:
 
 * SAM 3 / SAM 3D weights are gated and under Meta's SAM License — they cannot
-  be redistributed inside an extension or a Fab listing (see
-  [PUBLISHING.md §2](PUBLISHING.md)).
+  be redistributed inside an extension or a Fab listing (see the
+  licence notes in `LICENSE`).
 * The pipeline needs a 32 GB GPU and two conda environments; no add-on
   sandbox will host that.
 * One server can serve Blender, Unreal, the web app and a future

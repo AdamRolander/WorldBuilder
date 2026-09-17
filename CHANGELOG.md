@@ -21,7 +21,7 @@ versions follow SemVer once `v0.2.0` is tagged.
 - Blender extension and Unreal plugin scaffolds (`integrations/`).
 - CPU test suite (39 tests), ruff config, CI workflow, `pyproject.toml`, LICENSE (MIT),
   CITATION.cff, CONTRIBUTING.md, docs (architecture, audit, roadmap, validation,
-  publishing, integrations, RoomBuilder brief), JOSS paper draft.
+  integrations).
 - Scripts: `bench_detectors.py`, `plot_scene.py`, `regen_viewer.py` (moved).
 
 ### Changed
