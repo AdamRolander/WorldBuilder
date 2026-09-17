@@ -425,6 +425,50 @@ def resolve_xz_collisions(results: List[Dict], aabbs: Dict[int, Dict], iteration
 
 
 # ---------------------------------------------------------------------------
+# Keep objects inside detected walls
+# ---------------------------------------------------------------------------
+
+def clamp_to_room(results: List[Dict], aabbs: Dict[int, Dict], bounds_min, bounds_max,
+                  wall_sources: Dict[str, str], max_push_frac: float = 0.35) -> int:
+    """Nudge objects that poke through a *detected* wall back inside.
+
+    SAM 3D's per-object depth is the noisiest part of its pose; a sofa that
+    ends up 30 cm inside the back wall is more likely misplaced than the
+    wall (which had thousands of point-map votes). Only sides whose
+    ``wall_sources`` entry starts with "wall" are enforced, and an object
+    is moved at most ``max_push_frac`` of its own extent — beyond that we
+    leave it (and its overshoot) alone rather than teleport it.
+    Mutates translations and AABBs. Returns the number of objects moved.
+    """
+    by_id = {r['id']: r for r in results}
+    moved = 0
+    for rid, ab in aabbs.items():
+        r = by_id.get(rid)
+        if r is None:
+            continue
+        for side, src in wall_sources.items():
+            if not str(src).startswith("wall"):
+                continue
+            axis = 0 if side.startswith("x") else 2
+            ext = ab['max'][axis] - ab['min'][axis]
+            if side.endswith("min"):
+                over = bounds_min[axis] - ab['min'][axis]
+            else:
+                over = ab['max'][axis] - bounds_max[axis]
+            if over <= 1e-6:
+                continue
+            d = min(over, max_push_frac * max(ext, 1e-6))
+            if side.endswith("max"):
+                d = -d
+            r['translation'][axis] += d
+            ab['min'][axis] += d
+            ab['max'][axis] += d
+            r['wall_clamped'] = True
+            moved += 1
+    return moved
+
+
+# ---------------------------------------------------------------------------
 # Optional: stretch pillars/beams to full height (opt-in)
 # ---------------------------------------------------------------------------
 

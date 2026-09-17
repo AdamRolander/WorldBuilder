@@ -304,10 +304,27 @@ class SAM3DReconstructor:
             room = None
             if layout is not None and scene_pm is not None:
                 try:
-                    # Grow the room to the (possibly re-snapped) objects.
-                    layout.bounds_min = np.minimum(layout.bounds_min, np.array(bounds['min']) - 0.02).tolist()
-                    layout.bounds_max = np.maximum(layout.bounds_max, np.array(bounds['max']) + 0.02).tolist()
-                    layout.bounds_min[1] = min(layout.floor_y, bounds['min'][1])
+                    # Objects poking through *detected* walls are nudged back
+                    # in; the room only grows toward sides with no wall evidence.
+                    from src.room_generator import clamp_to_room
+                    aabbs = compute_per_object_aabb(results)
+                    n_clamped = clamp_to_room(results, aabbs, layout.bounds_min, layout.bounds_max,
+                                              layout.wall_sources)
+                    if n_clamped:
+                        print(f"  nudged {n_clamped} object(s) back inside detected walls")
+                        bounds = compute_scene_bounds(aabbs)
+                    bmin, bmax = list(layout.bounds_min), list(layout.bounds_max)
+                    for side, src in layout.wall_sources.items():
+                        axis = 0 if side.startswith("x") else 2
+                        if str(src).startswith("wall"):
+                            continue
+                        if side.endswith("min"):
+                            bmin[axis] = min(bmin[axis], bounds['min'][axis] - 0.02)
+                        else:
+                            bmax[axis] = max(bmax[axis], bounds['max'][axis] + 0.02)
+                    bmin[1] = min(layout.floor_y, bounds['min'][1])
+                    bmax[1] = max(layout.ceiling_y, bounds['max'][1] + 0.02)
+                    layout.bounds_min, layout.bounds_max = bmin, bmax
                     P_cv = scene_pm["pointmap"].detach().float().cpu().numpy() @ rl.OPENCV_TO_WORLD.T
                     depth = P_cv[..., 2].astype(np.float64)
                     room, stats = rl.build_textured_room(layout, scene_pm["intrinsics"], image, depth)

@@ -84,3 +84,17 @@ def test_hanging_objects_are_never_snapped_or_supported():
     rg.snap_ground_objects(results, aabbs, bounds, floor_y=0.0, supports={})
     assert lamp["snapped"] is False and lamp["translation"] == [0.0, 0.0, 0.0]
     assert rg.is_hanging("ceiling fan") and rg.is_hanging("curtains") and not rg.is_hanging("floor lamp")
+
+
+def test_clamp_to_room_only_enforces_detected_walls_and_caps_push():
+    sofa, sab = _box(1, "sofa", (0.0, 0, 2.2), (2.0, 0.8, 3.1))      # pokes 0.3 through z_max=2.8
+    far, fab = _box(2, "lamp", (0.0, 0, 5.0), (0.2, 1.0, 5.2))        # 2.2 beyond: capped push
+    results = [sofa, far]
+    aabbs = {1: sab, 2: fab}
+    n = rg.clamp_to_room(results, aabbs, [-1, 0, 0], [3, 2.5, 2.8],
+                         {"z_max": "wall(5000)", "x_min": "extent", "x_max": "extent", "z_min": "extent"})
+    assert n == 2
+    assert np.isclose(sab["max"][2], 2.8) and np.isclose(sofa["translation"][2], -0.3)
+    assert np.isclose(fab["max"][2], 5.2 - 0.35 * 0.2)                # capped at 35 % of its extent
+    # x sides are "extent": nothing happens even though the sofa is at x_min-... boundary
+    assert sofa["translation"][0] == 0.0
