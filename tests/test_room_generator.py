@@ -116,3 +116,11 @@ def test_pillows_inside_sofa_box_are_left_alone():
     pushes = rg.resolve_xz_collisions(results, aabbs, supports=sup, contained=con)
     assert pushes == 0
     assert pillow["translation"] == [0.0, 0.0, 0.0] and pillow2["translation"] == [0.0, 0.0, 0.0]
+
+
+def test_clamp_raises_objects_sunk_below_a_fitted_floor():
+    chair, cab = _box(1, "chair", (0, -0.12, 0), (0.5, 0.8, 0.5))          # 12 cm under the floor
+    results = [chair]
+    aabbs = {1: cab}
+    n = rg.clamp_to_room(results, aabbs, [-1, 0.0, -1], [3, 2.5, 3], {"y_min": "floor"})
+    assert n == 1 and np.isclose(cab["min"][1], 0.0) and np.isclose(chair["translation"][1], 0.12)

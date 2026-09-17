@@ -308,8 +308,12 @@ class SAM3DReconstructor:
                     # in; the room only grows toward sides with no wall evidence.
                     from src.room_generator import clamp_to_room
                     aabbs = compute_per_object_aabb(results)
-                    n_clamped = clamp_to_room(results, aabbs, layout.bounds_min, layout.bounds_max,
-                                              layout.wall_sources)
+                    enforce = dict(layout.wall_sources)
+                    floor_fitted = not str(layout.floor.source).startswith("fallback")
+                    if floor_fitted:
+                        enforce["y_min"] = "floor"
+                        layout.bounds_min[1] = layout.floor_y
+                    n_clamped = clamp_to_room(results, aabbs, layout.bounds_min, layout.bounds_max, enforce)
                     if n_clamped:
                         print(f"  nudged {n_clamped} object(s) back inside detected walls")
                         bounds = compute_scene_bounds(aabbs)
@@ -322,7 +326,8 @@ class SAM3DReconstructor:
                             bmin[axis] = min(bmin[axis], bounds['min'][axis] - 0.02)
                         else:
                             bmax[axis] = max(bmax[axis], bounds['max'][axis] + 0.02)
-                    bmin[1] = min(layout.floor_y, bounds['min'][1])
+                    # A fitted floor is evidence; never lower it to a sunk object.
+                    bmin[1] = layout.floor_y if floor_fitted else min(layout.floor_y, bounds['min'][1])
                     bmax[1] = max(layout.ceiling_y, bounds['max'][1] + 0.02)
                     layout.bounds_min, layout.bounds_max = bmin, bmax
                     P_cv = scene_pm["pointmap"].detach().float().cpu().numpy() @ rl.OPENCV_TO_WORLD.T

@@ -492,6 +492,8 @@ def clamp_to_room(results: List[Dict], aabbs: Dict[int, Dict], bounds_min, bound
     ``wall_sources`` entry starts with "wall" are enforced, and an object
     is moved at most ``max_push_frac`` of its own extent — beyond that we
     leave it (and its overshoot) alone rather than teleport it.
+    Pass ``{"y_min": "floor"}`` in ``wall_sources`` to enforce a fitted floor
+    the same way (objects below it are raised, capped).
     Mutates translations and AABBs. Returns the number of objects moved.
     """
     by_id = {r['id']: r for r in results}
@@ -501,9 +503,11 @@ def clamp_to_room(results: List[Dict], aabbs: Dict[int, Dict], bounds_min, bound
         if r is None:
             continue
         for side, src in wall_sources.items():
-            if not str(src).startswith("wall"):
+            # "y_min": "floor" is passed when the floor plane was fitted, so
+            # objects sunk below the real floor are raised the same way.
+            if not (str(src).startswith("wall") or str(src).startswith("floor")):
                 continue
-            axis = 0 if side.startswith("x") else 2
+            axis = 0 if side.startswith("x") else (1 if side.startswith("y") else 2)
             ext = ab['max'][axis] - ab['min'][axis]
             if side.endswith("min"):
                 over = bounds_min[axis] - ab['min'][axis]
