@@ -97,11 +97,31 @@ now nudged back inside strong walls (≤35 % of their own extent) instead.
 lowest object's bottom, which zeroed the floor texture — the fitted floor is now fixed and
 sunk objects are raised (`after4` rerun below).
 
-### 3.5 Pending
+`after3` k1 (kitchen) with `qwen`: 22 types → 18 after the part filter dropped `drawer`, `handle`
+→ 48 instances (was 71/75: the part labels had been spawning dozens of tiny masks) → 48/48 reconstructed
+in **388 s (was 524–535 s)**; floor from mask (100 %), yaw 3.2°, ceiling measured 3.09 m; 6 objects
+nudged inside the detected right wall; 23 pair-pushes (was 48).
 
-`after3/k1` and `after4/lr2` (floor fix) plus the live detector benchmark
-(`scripts/bench_detectors.py --live demo_day`) were queued at the end of the
-session; append their numbers here. Also still to do: a 5–6 photo sweep including a dark scene
+`after4` lr2 with `qwen` (floor fix): 30/30 in 245 s; **floor 20 %, back wall 61 %, right wall 17 %
+textured**; 3 contained, 12 on supports, 6 nudged; `plan_view.png` shows pillows on the sofa (not
+behind it), the rug under the seating group and the far wall coincident with the point cloud.
+
+**Caveat discovered afterwards:** the local VLM server process used by every run above had been
+started before `vlm_server/server.py` was rewritten, so stage 1 ran the *old* prompt without
+repetition control. The new post-processor absorbed the damage (dedupe, part filter), but the new
+prompt, `bbox_2d` fallback and loop protection are validated only by the `after5`/`bench_live2`
+runs queued at the very end of the session (see §3.6).
+
+### 3.6 Local-VLM detection benchmark (`scripts/bench_detectors.py --live demo_day`)
+
+Old prompt/server, Qwen3-VL-8B, 42 photos, 19 with a Gemini reference: **mean recall 0.53**,
+median 6–9 s per photo, but 10 photos degenerated into 100+ entry loops at ~65 s each, and the
+three outdoor photos (forest, playground, maze) returned nothing. This is the number PIPE-1 starts
+from; rerun with the new server and append the result here.
+
+### 3.7 Pending
+
+Still to do: a 5–6 photo sweep including a dark scene
 (`demo_day/lib2.webp`), an outdoor one (`demo_day/o2.webp`) and a
 portrait-orientation phone photo, with screenshots of each viewer.
 
