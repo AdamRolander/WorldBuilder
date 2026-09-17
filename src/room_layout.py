@@ -397,7 +397,9 @@ def wall_positions(points_aligned: np.ndarray, normals_aligned: np.ndarray, vali
     band = (y > floor_y + 0.05 * (ceiling_y - floor_y)) & (y < ceiling_y - 0.02 * (ceiling_y - floor_y))
     cand = valid & horiz & band
     if wall_mask is not None and wall_mask.any():
-        cand &= _resize_mask(wall_mask, (H, W))
+        # The mask adds evidence; it must not restrict it (SAM 3's "wall"
+        # mask often covers only the most obvious wall).
+        cand |= valid & band & _resize_mask(wall_mask, (H, W))
     out: Dict[str, Tuple[float, int]] = {}
     if cand.sum() < min_support:
         return out
@@ -643,13 +645,19 @@ def estimate_layout(points_world: np.ndarray, valid: np.ndarray,
         bmin[[0, 2]] = np.minimum(bmin[[0, 2]], obj_min[[0, 2]] - pad)
         bmax[[0, 2]] = np.maximum(bmax[[0, 2]], obj_max[[0, 2]] + pad)
     sources = {"x_min": "extent", "x_max": "extent", "z_min": "extent", "z_max": "extent"}
+    n_valid = int(valid.sum())
     for side, (coord, sup) in walls.items():
         axis = 0 if side.startswith("x") else 2
+        strong = sup >= 0.01 * n_valid          # ≥1 % of the frame votes for this plane
         if side.endswith("min"):
-            if coord <= bmin[axis] + pad * 3 and (not have_objects or coord <= obj_min[axis] + pad):
+            # Objects with a bad depth poke through walls; a strong wall wins
+            # over object bounds (the assembly stage nudges objects back in).
+            ok = coord <= span[0, axis] + pad * 3 and (strong or not have_objects or coord <= obj_min[axis] + pad)
+            if ok:
                 bmin[axis] = coord; sources[side] = f"wall({sup})"
         else:
-            if coord >= bmax[axis] - pad * 3 and (not have_objects or coord >= obj_max[axis] - pad):
+            ok = coord >= span[1, axis] - pad * 3 and (strong or not have_objects or coord >= obj_max[axis] - pad)
+            if ok:
                 bmax[axis] = coord; sources[side] = f"wall({sup})"
     # The camera is inside the room: make sure the box contains the origin
     # with a little slack behind it, unless a wall was actually observed there.
