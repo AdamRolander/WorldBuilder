@@ -129,7 +129,17 @@ output is what makes simple photos slower.
 mask each time** (PIPE-3 evidence), 35 instances, 35/35 reconstructed in 283 s; layout identical
 to `after4` (floor 20 %, back wall 61 %, right wall 17 % textured).
 
-### 3.7 Pending
+### 3.7 First multi-image batch (`9-17-validation/`, 6 photos, local VLM)
+
+Adam's first run: `bathroom3` completed (36/36 objects, floor from mask, back and right walls
+detected, 41 % of the far wall textured) and every later photo failed with CUDA OOM in the VLM
+server. Root cause: SAM 3D was never parked (AUDIT §3.4); fixed the same evening. Batch mode skips
+finished scenes, so rerunning the same command resumes from the second photo.
+Visual notes from the bathroom: object recall good; textured room "interesting, needs refinement",
+ghosted room preferred (now the default); the viewer's 45° corner start position read as a tilted
+scene next to the face-on photo (now starts from the photo's viewpoint).
+
+### 3.8 Pending
 
 Still to do: a 5–6 photo sweep including a dark scene
 (`demo_day/lib2.webp`), an outdoor one (`demo_day/o2.webp`) and a

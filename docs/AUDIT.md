@@ -172,13 +172,24 @@ via the env's interpreter directly (cron, an IDE, `nohup`) crashed with
 `KeyError: 'CONDA_PREFIX'`. `reconstruction_3d.py` now derives it from
 `sys.executable` when missing.
 
-### 3.4 Failures vanished  (**fixed**)
+### 3.4 SAM 3D never left the GPU  (**fixed 2026-09-17, evening**)
+
+`_to_device` walked `dir(self.inference)` and skipped underscore names, but
+the upstream `Inference` wrapper keeps everything under `_pipeline`. So the
+"park to CPU" step moved nothing: ~13.7 GB of SAM 3D stayed resident, and on
+the second photo of any batch the local VLM (17 GB) could not come back —
+the VLM server OOM'd, returned a 500, and every remaining image failed. This
+is the "works for one image, then errors" behaviour remembered from demo
+day. The walker now descends into the pipeline's `__dict__`; measured on the
+5090: 15.0 GiB used with SAM 3D on the GPU → 4.7 GiB after parking.
+
+### 3.5 Failures vanished  (**fixed**)
 
 A failed object was `continue`d past; the results file and the timing CSV
 could not tell "not detected" from "reconstruction crashed". Failures are
 recorded with `status` and shown greyed out in the viewer.
 
-### 3.5 Dead code  (**removed**)
+### 3.6 Dead code  (**removed**)
 
 `save_colored_mesh` (Poisson from Gaussians; never called), a 40-line
 commented-out `_save_scene_with_room`, commented-out
