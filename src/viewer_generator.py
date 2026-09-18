@@ -46,8 +46,8 @@ _TEMPLATE = r"""<!DOCTYPE html>
   <h3>Scene (<span id="count">0</span> objects)</h3>
   <label>Room:
     <select id="room-mode">
+      <option value="ghost" selected>ghosted</option>
       <option value="textured">textured</option>
-      <option value="ghost">ghosted</option>
       <option value="hidden">hidden</option>
     </select>
   </label>
@@ -119,7 +119,7 @@ function loadPLY(url, key, isObject, done) {
       material = new THREE.MeshBasicMaterial({ vertexColors: hasColors, side: THREE.FrontSide });
     } else {
       material = new THREE.MeshBasicMaterial({ vertexColors: hasColors, color: hasColors ? 0xffffff : 0xd4c9b5,
-                                               side: THREE.DoubleSide, transparent: true, opacity: 1.0 });
+                                               side: THREE.DoubleSide, transparent: true, opacity: 0.35 });
     }
     const m = new THREE.Mesh(geom, material);
     if (!isObject) { m.renderOrder = -1; roomMesh = m; }
@@ -142,7 +142,10 @@ function onLoad() {
   const s = new THREE.Vector3(); bbox.getSize(s);
   const d = Math.max(s.x, s.y, s.z) * 1.2;
   controls.target.copy(c);
-  camera.position.copy(c).add(new THREE.Vector3(d, d*0.8, d));
+  // Start where the photo was taken: the scene frame has the camera at the
+  // origin looking down +Z (a 45° corner view read as "tilted" next to the
+  // reference photo). Step back a little so the whole room is in frame.
+  camera.position.set(0, 0, Math.min(0, bbox.min.z) - 0.15 * d);
   controls.update();
   document.getElementById('loading').style.display = 'none';
   document.getElementById('info').style.display = 'block';

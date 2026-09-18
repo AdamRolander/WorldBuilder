@@ -85,36 +85,52 @@ class SAM3DReconstructor:
 
     # -- VRAM management ----------------------------------------------------
     def _to_device(self, device: str):
-        """Move every torch module hanging off the inference pipeline."""
+        """Move every torch module hanging off the inference pipeline.
+
+        ``Inference`` keeps everything under the *private* attribute
+        ``_pipeline`` (an ``InferencePipelinePointMap`` whose ``models``
+        ModuleDict, ``depth_model`` and ``pose_decoder`` hold the weights).
+        The demo-era version skipped underscore attributes, so SAM 3D never
+        actually left the GPU: ~13 GB stayed resident between images and the
+        local VLM OOM'd on the second photo of every batch (the "works for one
+        image, then 500s" symptom). Walk the pipeline's ``__dict__`` directly.
+        """
         import gc
 
         import torch
+        moved = 0
         seen = set()
 
         def _move(obj, depth=0):
-            if depth > 2 or id(obj) in seen:
+            nonlocal moved
+            if depth > 3 or id(obj) in seen:
                 return
             seen.add(id(obj))
             if isinstance(obj, torch.nn.Module):
                 obj.to(device)
+                moved += 1
                 return
-            for name in dir(obj):
-                if name.startswith('_'):
-                    continue
-                try:
-                    child = getattr(obj, name)
-                except Exception:
-                    continue
-                if isinstance(child, torch.nn.Module):
-                    child.to(device)
-                elif hasattr(child, '__dict__') and not callable(child):
-                    _move(child, depth + 1)
+            if isinstance(obj, dict):
+                for v in obj.values():
+                    _move(v, depth + 1)
+                return
+            if isinstance(obj, (list, tuple)):
+                for v in obj:
+                    _move(v, depth + 1)
+                return
+            d = getattr(obj, '__dict__', None)
+            if d is None or callable(obj):
+                return
+            for v in list(d.values()):
+                _move(v, depth + 1)
 
-        _move(self.inference)
+        _move(getattr(self.inference, '_pipeline', self.inference))
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
+            free, total = torch.cuda.mem_get_info()
+            print(f"  SAM 3D → {device} ({moved} modules); GPU free {free / 1024**3:.1f} / {total / 1024**3:.1f} GiB")
 
     # -- scene point map ----------------------------------------------------
     def compute_scene_pointmap(self, image_rgb: np.ndarray) -> Dict:
