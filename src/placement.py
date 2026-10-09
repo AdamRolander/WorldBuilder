@@ -664,9 +664,24 @@ def keep_inside_walls(ev: SceneEvidence, objs: List[PlacedObject], room: Dict,
     than a 20 % slide does it fall back to a capped sideways push.
     """
     moved = 0
+    # A plane that a quarter of the scene's objects stand beyond is not the
+    # room's wall (it is a cabinet front, a partition, a glass door). Such a
+    # side is disputed: nothing is moved for it and the caller lets the room
+    # grow there instead.
+    span = float(max(room["max"][0] - room["min"][0], room["max"][2] - room["min"][2]))
+    disputed = room.setdefault("disputed", [])
+    for side, src in room.get("sources", {}).items():
+        if not str(src).startswith("wall"):
+            continue
+        axis = 0 if side.startswith("x") else 2
+        wall = room["min"][axis] if side.endswith("min") else room["max"][axis]
+        n_out = sum(1 for o in objs
+                    if ((wall - o.lo[axis]) if side.endswith("min") else (o.hi[axis] - wall)) > 0.02 * span)
+        if n_out > max(3, 0.25 * len(objs)) and side not in disputed:
+            disputed.append(side)
     for o in objs:
         for side, src in room.get("sources", {}).items():
-            if not str(src).startswith("wall"):
+            if not str(src).startswith("wall") or side in disputed:
                 continue
             axis = 0 if side.startswith("x") else 2
             lo, hi = o.lo, o.hi
@@ -677,6 +692,7 @@ def keep_inside_walls(ev: SceneEvidence, objs: List[PlacedObject], room: Dict,
                 continue
             bottom = float(lo[1])
             snap = o.snapshot()
+            before = fit_iou(ev, o)
             options = []
             k = wall / extreme if extreme * wall > 0 else 0.0
             if min_slide <= k < 1.0:
@@ -690,6 +706,13 @@ def keep_inside_walls(ev: SceneEvidence, objs: List[PlacedObject], room: Dict,
             o.translate([d if axis == 0 else 0, 0, d if axis == 2 else 0])
             options.append((fit_iou(ev, o), o.snapshot()))
             best = max(options, key=lambda t: -1.0 if t[0] is None else t[0])
+            if before is not None and best[0] is not None and best[0] < before - 0.10:
+                # Coming inside would cost the object its match with the photo:
+                # more likely the "wall" is a cabinet front or a partition and
+                # the object really is beyond it. Leave it where the photo has it.
+                o.restore(snap)
+                o.r['beyond_wall'] = side
+                continue
             o.restore(best[1])
             o.r['wall_clamped'] = True
             moved += 1
@@ -916,8 +939,11 @@ def place_objects(results: List[Dict], model_verts: Dict[int, np.ndarray], ev: S
     # 5b. inside observed walls; 5c. what the photo shows is not behind something else
     if room:
         diag['wall_clamped'] = keep_inside_walls(ev, objs, room)
+        diag['disputed_walls'] = list(room.get("disputed", []))
         if diag['wall_clamped']:
             log(f"  brought {diag['wall_clamped']} object(s) back inside observed walls")
+        if diag['disputed_walls']:
+            log(f"  not a wall after all (many objects beyond it): {', '.join(diag['disputed_walls'])}")
     diag['moved_in_front'] = enforce_visibility(ev, objs)
     if diag['moved_in_front']:
         log("  moved in front of what hid them: " + ", ".join(
