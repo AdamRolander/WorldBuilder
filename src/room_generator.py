@@ -130,7 +130,7 @@ _VERT_CACHE: Dict[str, np.ndarray] = {}
 
 def model_vertices(result: Dict) -> Optional[np.ndarray]:
     """Model-space vertices of the object's PLY (cached per path)."""
-    p = result.get('ply_path')
+    p = result.get('model_path') or result.get('ply_path')
     if not p:
         return None
     if p in _VERT_CACHE:

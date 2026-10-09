@@ -55,15 +55,31 @@ def _write_json(path: Path, data) -> None:
 
 def process_image(image_path: str, output_dir: str = "outputs", detector: Optional[str] = None,
                   quality: str = "high", build_room: bool = True,
-                  structural: bool = True) -> Path:
-    """Run the complete pipeline on one image. Returns the output directory."""
+                  structural: bool = True, resume: bool = False) -> Path:
+    """Run the complete pipeline on one image. Returns the output directory.
+
+    With ``resume`` a stage whose output already exists in ``output_dir`` is
+    loaded instead of rerun (detection JSON; segmentation JSON + masks), so a
+    scene can be re-reconstructed from the same masks."""
     print("=" * 80)
     print(f"Processing: {image_path}")
     print("=" * 80)
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     timings: Dict[str, float] = {}
+    vram_peak_gb: Dict[str, float] = {}
     kind = detector_kind(detector)
+
+    def _mark_vram(stage: str):
+        """Peak VRAM this process allocated during a stage (the local VLM
+        lives in another process and is not included)."""
+        try:
+            import torch
+            if torch.cuda.is_available():
+                vram_peak_gb[stage] = round(torch.cuda.max_memory_allocated() / 1024 ** 3, 2)
+                torch.cuda.reset_peak_memory_stats()
+        except Exception:
+            pass
 
     # ---- 1. detect ---------------------------------------------------------
     t0 = time.time()
@@ -71,11 +87,16 @@ def process_image(image_path: str, output_dir: str = "outputs", detector: Option
     from PIL import Image
     with Image.open(image_path) as im:
         image_size = im.size
-    raw_objects = build_detector(kind).detect_objects(image_path)
-    from src.detection_postprocess import clean_detections
-    objects = clean_detections(raw_objects, image_size=image_size)
-    _write_json(output_path / "detected_objects.json", objects)
-    _write_json(output_path / "detected_objects_raw.json", raw_objects)
+    det_file = output_path / "detected_objects.json"
+    if resume and det_file.exists():
+        objects = json.loads(det_file.read_text())
+        print(f"  ↺ reusing {det_file} ({len(objects)} types)")
+    else:
+        raw_objects = build_detector(kind).detect_objects(image_path)
+        from src.detection_postprocess import clean_detections
+        objects = clean_detections(raw_objects, image_size=image_size)
+        _write_json(det_file, objects)
+        _write_json(output_path / "detected_objects_raw.json", raw_objects)
     timings["detect"] = time.time() - t0
     if not objects:
         raise RuntimeError("No reconstructable objects were detected in the image.")
@@ -83,19 +104,29 @@ def process_image(image_path: str, output_dir: str = "outputs", detector: Option
     # ---- 2. segment --------------------------------------------------------
     t0 = time.time()
     print("\n[2/4] Segmenting objects with SAM 3...")
-    from src.segmentation import SAM3Segmenter
-    segmenter = SAM3Segmenter()
-    segmenter._to_device("cuda")
+    seg_file = output_path / "segmentation_results.json"
     structural_masks = None
-    try:
-        segments = segmenter.segment_objects(image_path, objects, output_dir=str(output_path / "masks"))
+    if resume and seg_file.exists():
+        segments = json.loads(seg_file.read_text())
+        for s in segments:      # masks travel with the scene directory
+            s["mask_path"] = str(output_path / "masks" / Path(s["mask_path"]).name)
         if structural:
-            structural_masks = segment_structural(segmenter, image_path, output_path / "masks")
-    finally:
-        segmenter._to_device("cpu")
-    _write_json(output_path / "segmentation_results.json",
-                [{k: v for k, v in s.items() if k != "mask_array"} for s in segments])
+            from src.scene_assembly import load_structural_masks
+            structural_masks = load_structural_masks(output_path / "masks") or None
+        print(f"  ↺ reusing {seg_file} ({len(segments)} instances)")
+    else:
+        from src.segmentation import SAM3Segmenter
+        segmenter = SAM3Segmenter()
+        segmenter._to_device("cuda")
+        try:
+            segments = segmenter.segment_objects(image_path, objects, output_dir=str(output_path / "masks"))
+            if structural:
+                structural_masks = segment_structural(segmenter, image_path, output_path / "masks")
+        finally:
+            segmenter._to_device("cpu")
+        _write_json(seg_file, [{k: v for k, v in s.items() if k != "mask_array"} for s in segments])
     timings["segment"] = time.time() - t0
+    _mark_vram("segment")
     if not segments:
         raise RuntimeError("SAM 3 produced no masks for the detected objects.")
 
@@ -114,35 +145,18 @@ def process_image(image_path: str, output_dir: str = "outputs", detector: Option
     assets_3d = [r for r in all_results if r.get("status") == "ok"]
     failed = [r for r in all_results if r.get("status") != "ok"]
     timings["reconstruct_and_assemble"] = time.time() - t0
-    _write_json(output_path / "reconstruction_results.json", {
-        "objects": assets_3d,
-        "failed": failed,
-        "metadata": {
-            "source_image": str(image_path),
-            "image_size": list(image_size),
-            "detector": kind,
-            "total_objects": len(assets_3d),
-            "timings_sec": {k: round(v, 2) for k, v in timings.items()},
-            "created": datetime.now().isoformat(timespec="seconds"),
-        },
-    })
-
-    # ---- viewer + exports --------------------------------------------------
+    _mark_vram("reconstruct")
     print("\n[4/4] Writing viewer and exports...")
-    try:
-        from src.viewer_generator import generate_viewer
-        viewer_path = generate_viewer(output_path, assets_3d, room_file="3d_models/room.ply",
-                                      layout_file="3d_models/layout.json")
-        print(f"✓ Viewer: {viewer_path}  (serve with: python -m http.server -d {output_path})")
-    except Exception as e:
-        print(f"⚠️  Viewer generation failed: {e}")
-    try:
-        from src.scene_export import export_scene_glb
-        glb = export_scene_glb(output_path, assets_3d)
-        if glb:
-            print(f"✓ GLB scene: {glb}")
-    except Exception as e:
-        print(f"⚠️  GLB export failed: {e}")
+    from src.scene_assembly import finalize_scene
+    finalize_scene(output_path, assets_3d, failed, {
+        "source_image": str(image_path),
+        "image_size": list(image_size),
+        "detector": kind,
+        "total_objects": len(assets_3d),
+        "timings_sec": {k: round(v, 2) for k, v in timings.items()},
+        "vram_peak_gb": vram_peak_gb,
+        "created": datetime.now().isoformat(timespec="seconds"),
+    })
 
     print("\n" + "=" * 80)
     print("✓ Pipeline complete!")
@@ -150,6 +164,8 @@ def process_image(image_path: str, output_dir: str = "outputs", detector: Option
     print(f"  Instances segmented:   {len(segments)}")
     print(f"  Objects reconstructed: {len(assets_3d)}" + (f"  ({len(failed)} failed)" if failed else ""))
     print("  Timings: " + ", ".join(f"{k}={v:.0f}s" for k, v in timings.items()))
+    if vram_peak_gb:
+        print("  Peak VRAM: " + ", ".join(f"{k}={v:.1f} GB" for k, v in vram_peak_gb.items()))
     print(f"  Output directory: {output_path}")
     print("=" * 80)
 
@@ -322,10 +338,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--no-structural", action="store_true",
                         help="Skip SAM 3 floor/wall/ceiling masks (layout falls back to geometry)")
     parser.add_argument("--force", action="store_true", help="Reprocess even if already done")
+    parser.add_argument("--resume", action="store_true",
+                        help="Reuse detection/segmentation outputs already in the scene directory")
     args = parser.parse_args(argv)
 
     kwargs = dict(detector=args.detector, quality=args.quality,
-                  build_room=not args.no_room, structural=not args.no_structural)
+                  build_room=not args.no_room, structural=not args.no_structural, resume=args.resume)
     if args.image:
         start = time.time()
         image_path = Path(args.image)
