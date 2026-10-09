@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use WorldBuilder in research, please cite it as below."
+title: "WorldBuilder: single-photo room reconstruction into navigable 3D scenes"
+type: software
+authors:
+  - family-names: Rolander
+    given-names: Adam
+    email: arolander@ucsd.edu
+    affiliation: "University of California, San Diego"
+version: 0.2.0
+date-released: 2026-09-17
+repository-code: "https://github.com/AdamRolander/WorldBuilder"
+license: MIT
+keywords:
+  - single-image 3D reconstruction
+  - scene understanding
+  - Segment Anything
+  - virtual reality

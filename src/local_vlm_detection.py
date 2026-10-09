@@ -6,7 +6,8 @@ the pipeline with WORLDBUILDER_DETECTOR=qwen.
 """
 import os
 from pathlib import Path
-from typing import List, Dict
+from typing import Dict, List
+
 import requests
 
 
@@ -28,7 +29,7 @@ class LocalVLMObjectDetector:
                 f"    conda activate worldbuilder-vlm\n"
                 f"    python vlm_server/server.py\n"
                 f"  Underlying error: {e}"
-            )
+            ) from e
         if not info.get("ok"):
             raise RuntimeError(f"VLM server reports model not loaded: {info}")
         print(f"\n✓ VLM server: {info.get('model')}")

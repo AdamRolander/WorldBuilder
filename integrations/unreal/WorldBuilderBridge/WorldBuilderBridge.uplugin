@@ -1,0 +1,32 @@
+{
+  "FileVersion": 3,
+  "Version": 1,
+  "VersionName": "0.1.0",
+  "FriendlyName": "WorldBuilder Bridge",
+  "Description": "Turn a photo of a room into a 3D level: uploads to a local WorldBuilder server and imports the resulting GLB scene with Interchange.",
+  "Category": "Editor",
+  "CreatedBy": "Adam Rolander",
+  "CreatedByURL": "https://github.com/AdamRolander/WorldBuilder",
+  "DocsURL": "https://github.com/AdamRolander/WorldBuilder/blob/main/docs/INTEGRATIONS.md",
+  "MarketplaceURL": "",
+  "SupportURL": "https://github.com/AdamRolander/WorldBuilder/issues",
+  "EngineVersion": "5.4.0",
+  "CanContainContent": true,
+  "IsBetaVersion": true,
+  "IsExperimentalVersion": false,
+  "Installed": false,
+  "Modules": [
+    {
+      "Name": "WorldBuilderBridge",
+      "Type": "Editor",
+      "LoadingPhase": "Default",
+      "PlatformAllowList": ["Win64", "Linux", "Mac"]
+    }
+  ],
+  "Plugins": [
+    { "Name": "PythonScriptPlugin", "Enabled": true },
+    { "Name": "EditorScriptingUtilities", "Enabled": true },
+    { "Name": "Interchange", "Enabled": true },
+    { "Name": "InterchangeEditor", "Enabled": true }
+  ]
+}

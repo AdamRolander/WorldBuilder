@@ -11,7 +11,7 @@ const IconImage = ({ size = 24, className = "" }) => ( <svg xmlns="http://www.w3
 // VR goggles icon — only addition to the icon set.
 const IconVR = ({ size = 24, className = "" }) => ( <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className={className}><path d="M3 7h18a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1h-5l-2-3h-4l-2 3H3a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1z"/><circle cx="8" cy="12" r="1.5"/><circle cx="16" cy="12" r="1.5"/></svg> );
 
-const HindsightDashboard = () => {
+const WorldBuilderDashboard = () => {
   // uploadState: 'idle' | 'processing' | 'complete' | 'failed'
   const [uploadState, setUploadState] = useState('idle');
   const [activeTab, setActiveTab]     = useState('upload');
@@ -24,6 +24,8 @@ const HindsightDashboard = () => {
   // Demo mode: skip the real pipeline, play the animation + load a
   // pre-baked scene. Set via the picker below or via ?demo=<id>.
   const [demoMode, setDemoMode]       = useState(false);
+  // Which stage-1 backend to use for the next upload ('' = server default).
+  const [detector, setDetector]       = useState('');
 
   const fileInputRef = useRef(null);
   const viewerRef    = useRef(null);
@@ -92,6 +94,7 @@ const HindsightDashboard = () => {
     try {
       const fd = new FormData();
       fd.append('image', file);
+      if (detector) fd.append('detector', detector);
       const r = await fetch('/api/upload', { method: 'POST', body: fd });
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
@@ -103,7 +106,7 @@ const HindsightDashboard = () => {
       setErrorMsg(e.message);
       setUploadState('failed');
     }
-  }, []);
+  }, [detector]);
 
   // --- Demo mode: fake the upload flow with a pre-baked scene ----------
   // Verifies the scene exists, then plays the same 5-step animation as a
@@ -207,11 +210,11 @@ const HindsightDashboard = () => {
         <div className="p-8">
           <img
             src="/assets/logo.png"
-            alt="Hindsight Logo"
+            alt="WorldBuilder"
             className="h-10 w-auto mb-3 object-contain"
             onError={(e) => { e.currentTarget.style.display = 'none'; }}
           />
-          <p className="text-xs text-brand-primary font-bold tracking-widest uppercase">Worldbuilder Engine v1.0</p>
+          <p className="text-xs text-brand-primary font-bold tracking-widest uppercase">photo → 3D scene · v0.2</p>
         </div>
 
         <nav className="flex-1 px-4 space-y-2 mt-4">
@@ -231,17 +234,26 @@ const HindsightDashboard = () => {
             <span>3D Workspace</span>
           </button>
 
-          <button className="w-full flex items-center space-x-3 px-4 py-3.5 rounded-xl hover:bg-brand-secondary/30 text-brand-primary hover:text-brand-white transition-all font-bold border-l-4 border-transparent">
-            <IconServer size={20} />
-            <span>Local Nodes</span>
-          </button>
+          <div className="px-4 pt-4">
+            <p className="text-xs text-brand-primary/70 font-bold uppercase tracking-widest mb-2">Detector</p>
+            <select
+              value={detector}
+              onChange={(e) => setDetector(e.target.value)}
+              className="w-full bg-brand-black/40 border border-brand-secondary rounded-lg px-3 py-2 text-sm text-brand-white font-bold"
+            >
+              <option value="">server default</option>
+              <option value="qwen">local VLM (fully offline)</option>
+              <option value="gemini">Gemini (cloud)</option>
+            </select>
+          </div>
         </nav>
 
         <div className="p-6 bg-brand-black/20 border-t border-brand-secondary/30">
-          <button className="w-full flex items-center justify-center space-x-3 px-4 py-3 rounded-xl bg-brand-secondary/50 hover:bg-brand-secondary text-brand-white transition-colors border border-brand-primary/30 font-bold">
+          <a href="https://github.com/AdamRolander/WorldBuilder/blob/main/docs/INTEGRATIONS.md" target="_blank" rel="noopener"
+             className="w-full flex items-center justify-center space-x-3 px-4 py-3 rounded-xl bg-brand-secondary/50 hover:bg-brand-secondary text-brand-white transition-colors border border-brand-primary/30 font-bold">
             <IconSettings size={18} />
-            <span>UE5 Settings</span>
-          </button>
+            <span>Blender / Unreal setup</span>
+          </a>
         </div>
       </div>
 
@@ -251,7 +263,7 @@ const HindsightDashboard = () => {
 
         {/* HEADER */}
         <header className="h-24 border-b border-brand-dark flex items-center justify-between px-10 bg-brand-black/60 backdrop-blur-xl relative z-10">
-          <h2 className="text-3xl font-extrabold tracking-tight text-brand-white drop-shadow-md uppercase">HINDSIGHT</h2>
+          <h2 className="text-3xl font-extrabold tracking-tight text-brand-white drop-shadow-md uppercase">WORLDBUILDER</h2>
           <div className="flex items-center space-x-6">
             {/* VLM status — now actually reflects the server */}
             <div className={`flex items-center space-x-3 text-sm px-4 py-2 rounded-full border shadow-inner font-bold ${
@@ -282,6 +294,8 @@ const HindsightDashboard = () => {
 
             <button
               disabled={uploadState !== 'complete'}
+              onClick={() => { if (job?.scene_id) window.location.href = `/api/scenes/${job.scene_id}/glb`; }}
+              title="Download the whole scene as one GLB (Blender, Unreal, three.js)"
               className={`flex items-center space-x-2 px-6 py-2.5 rounded-xl font-bold tracking-wide transition-all duration-300 ${
                 uploadState === 'complete'
                   ? 'bg-brand-primary hover:bg-brand-secondary text-brand-white shadow-[0_0_20px_rgba(54,125,138,0.4)] cursor-pointer'
@@ -289,7 +303,7 @@ const HindsightDashboard = () => {
               }`}
             >
               <IconDownload size={18} />
-              <span>Export to Unreal</span>
+              <span>Download GLB</span>
             </button>
           </div>
         </header>
@@ -370,7 +384,7 @@ const HindsightDashboard = () => {
               <div className="w-full max-w-lg mx-auto bg-brand-dark/80 p-8 rounded-2xl border border-brand-secondary shadow-2xl relative overflow-hidden">
                 <div className="absolute top-0 left-0 w-2 bg-brand-primary h-full"></div>
                 <div className="space-y-6 pl-6 font-bold">
-                  {['VLM Scene Analysis...', 'SAM 3 Panoptic Segmentation...', '3D Asset Diffusion...', 'Pose & Quaternion Estimation...', 'Heuristic Refinement...'].map((step, idx) => (
+                  {['Object detection (VLM)...', 'SAM 3 segmentation...', 'SAM 3D reconstruction...', 'Room layout & placement...', 'Viewer & exports...'].map((step, idx) => (
                     <div key={step} className={`flex items-center space-x-4 transition-opacity duration-500 ${progressStep > idx ? 'opacity-100' : 'opacity-40'}`}>
                       {progressStep > idx + 1 ? <IconPlay size={20} className="fill-brand-primary text-brand-primary" /> : (progressStep === idx + 1 ? <div className="w-5 h-5 rounded-full border-4 border-brand-primary animate-pulse"></div> : <div className="w-5 h-5 rounded-full border-4 border-brand-secondary"></div>)}
                       <span className="text-lg text-brand-white">{step}</span>
@@ -435,4 +449,4 @@ const HindsightDashboard = () => {
 };
 
 const root = ReactDOM.createRoot(document.getElementById('root'));
-root.render(<HindsightDashboard />);
+root.render(<WorldBuilderDashboard />);
