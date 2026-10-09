@@ -1,357 +1,349 @@
-from dotenv import load_dotenv; load_dotenv()
-import os
-import json
-from pathlib import Path
-from src.object_detection import GeminiObjectDetector
-from src.segmentation import SAM3Segmenter
-from src.reconstruction_3d import SAM3DReconstructor
-import time
+"""WorldBuilder CLI: one photo in, a navigable 3D scene out.
+
+    python main.py --image photo.jpg                 # single image
+    python main.py --input-dir photos --output out   # batch
+    python main.py --image photo.jpg --detector qwen # override .env
+
+Stages (each a module in src/):
+    1. detect      Gemini or a local VLM lists object types      -> detected_objects.json
+    2. segment     SAM 3 masks every instance (+ floor/wall/ceiling) -> segmentation_results.json, masks/
+    3. reconstruct SAM 3D lifts each mask to a posed mesh          -> reconstruction_results.json, 3d_models/
+    4. assemble    layout + placement + room + viewer              -> 3d_models/room.ply, layout.json, viewer.html
+
+Only one of the three large models is on the GPU at a time; see README
+"The VRAM dance".
+"""
+from __future__ import annotations
+
+import argparse
 import csv
+import json
+import os
+import shutil
+import time
 from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional
 
-def process_image(image_path: str, output_dir: str = "outputs") -> Path:
-    """Run complete pipeline on single image. Returns the output directory."""
-    
-    print("="*80)
-    print(f"Processing: {image_path}")
-    print("="*80)
-    
-    output_path = Path(output_dir)
-    output_path.mkdir(exist_ok=True)
-    
-    # Step 1: Detect objects (Gemini API or local VLM, picked via env var)
-    detector_kind = os.environ.get("WORLDBUILDER_DETECTOR", "gemini").lower()
-    if detector_kind in ("qwen", "vlm", "local"):
+import numpy as np
+from dotenv import load_dotenv
+
+load_dotenv()
+
+LOCAL_DETECTOR_ALIASES = ("qwen", "vlm", "local")
+STRUCTURAL_PROMPTS = ("floor", "wall", "ceiling")
+
+
+def detector_kind(override: Optional[str] = None) -> str:
+    kind = (override or os.environ.get("WORLDBUILDER_DETECTOR", "gemini")).lower()
+    return "local" if kind in LOCAL_DETECTOR_ALIASES else "gemini"
+
+
+def build_detector(kind: str):
+    """Import lazily so a Gemini-free install never imports google-genai."""
+    if kind == "local":
         from src.local_vlm_detection import LocalVLMObjectDetector
-        print("\n[1/3] Detecting objects with local VLM...")
-        detector = LocalVLMObjectDetector()
-    else:
-        print("\n[1/3] Detecting objects with Gemini...")
-        detector = GeminiObjectDetector()
-    objects = detector.detect_objects(image_path)
+        return LocalVLMObjectDetector()
+    from src.object_detection import GeminiObjectDetector
+    return GeminiObjectDetector()
 
-    from src.detection_postprocess import filter_excluded
-    objects = filter_excluded(objects)
 
-    objects_file = output_path / "detected_objects.json"
-    with open(objects_file, "w") as f:
-        json.dump(objects, f, indent=2)
-    print(f"✓ Saved to {objects_file}")
-    
-    # Step 2: Segment objects. Wake SAM 3 (it may be parked on CPU from
-    # the previous image), run, then park back to CPU to free VRAM for
-    # SAM 3D — the same dance the VLM server does for Qwen.
-    print("\n[2/3] Segmenting objects with SAM 3...")
+def _write_json(path: Path, data) -> None:
+    path.write_text(json.dumps(data, indent=2))
+    print(f"✓ Saved to {path}")
+
+
+def process_image(image_path: str, output_dir: str = "outputs", detector: Optional[str] = None,
+                  quality: str = "high", build_room: bool = True,
+                  structural: bool = True) -> Path:
+    """Run the complete pipeline on one image. Returns the output directory."""
+    print("=" * 80)
+    print(f"Processing: {image_path}")
+    print("=" * 80)
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    timings: Dict[str, float] = {}
+    kind = detector_kind(detector)
+
+    # ---- 1. detect ---------------------------------------------------------
+    t0 = time.time()
+    print(f"\n[1/4] Detecting objects with {'local VLM' if kind == 'local' else 'Gemini'}...")
+    from PIL import Image
+    with Image.open(image_path) as im:
+        image_size = im.size
+    raw_objects = build_detector(kind).detect_objects(image_path)
+    from src.detection_postprocess import clean_detections
+    objects = clean_detections(raw_objects, image_size=image_size)
+    _write_json(output_path / "detected_objects.json", objects)
+    _write_json(output_path / "detected_objects_raw.json", raw_objects)
+    timings["detect"] = time.time() - t0
+    if not objects:
+        raise RuntimeError("No reconstructable objects were detected in the image.")
+
+    # ---- 2. segment --------------------------------------------------------
+    t0 = time.time()
+    print("\n[2/4] Segmenting objects with SAM 3...")
+    from src.segmentation import SAM3Segmenter
     segmenter = SAM3Segmenter()
-    segmenter._to_device('cuda')
+    segmenter._to_device("cuda")
+    structural_masks = None
     try:
-        segments = segmenter.segment_objects(
-            image_path,
-            objects,
-            output_dir=str(output_path / "masks")
-        )
+        segments = segmenter.segment_objects(image_path, objects, output_dir=str(output_path / "masks"))
+        if structural:
+            structural_masks = segment_structural(segmenter, image_path, output_path / "masks")
     finally:
-        segmenter._to_device('cpu')
+        segmenter._to_device("cpu")
+    _write_json(output_path / "segmentation_results.json",
+                [{k: v for k, v in s.items() if k != "mask_array"} for s in segments])
+    timings["segment"] = time.time() - t0
+    if not segments:
+        raise RuntimeError("SAM 3 produced no masks for the detected objects.")
 
-    segments_file = output_path / "segmentation_results.json"
-    with open(segments_file, "w") as f:
-        json.dump([{k: v for k, v in s.items() if k != 'mask_array'}
-                   for s in segments], f, indent=2)
-    print(f"✓ Saved to {segments_file}")
-
-    # Step 3: Generate 3D assets. Same wake/park pattern.
-    print("\n[3/3] Generating 3D assets with SAM 3D Objects...")
+    # ---- 3. reconstruct + 4. assemble -------------------------------------
+    t0 = time.time()
+    print("\n[3/4] Generating 3D assets with SAM 3D Objects...")
+    from src.reconstruction_3d import SAM3DReconstructor
     reconstructor = SAM3DReconstructor()
-    reconstructor._to_device('cuda')
+    reconstructor._to_device("cuda")
     try:
-        assets_3d = reconstructor.reconstruct_objects(
-            image_path,
-            segments,
-            output_dir=str(output_path / "3d_models"),
-            quality='high'
-        )
+        all_results = reconstructor.reconstruct_objects(
+            image_path, segments, output_dir=str(output_path / "3d_models"),
+            quality=quality, structural_masks=structural_masks, build_room=build_room)
     finally:
-        reconstructor._to_device('cpu')
-    
-    assets_file = output_path / "reconstruction_results.json"
-    with open(assets_file, "w") as f:
-        json.dump({
-            'objects': assets_3d,
-            'metadata': {
-                'source_image': str(image_path),
-                'total_objects': len(assets_3d)
-            }
-        }, f, indent=2)
-    print(f"✓ Saved to {assets_file}")
-    
-    print("\n" + "="*80)
-    print("✓ Pipeline complete!")
-    print(f"  Objects detected: {len(objects)}")
-    print(f"  Objects segmented: {len(segments)}")
-    print(f"  Objects reconstructed: {len(assets_3d)}")
-    print(f"  Output directory: {output_path}")
-    print("="*80)
+        reconstructor._to_device("cpu")
+    assets_3d = [r for r in all_results if r.get("status") == "ok"]
+    failed = [r for r in all_results if r.get("status") != "ok"]
+    timings["reconstruct_and_assemble"] = time.time() - t0
+    _write_json(output_path / "reconstruction_results.json", {
+        "objects": assets_3d,
+        "failed": failed,
+        "metadata": {
+            "source_image": str(image_path),
+            "image_size": list(image_size),
+            "detector": kind,
+            "total_objects": len(assets_3d),
+            "timings_sec": {k: round(v, 2) for k, v in timings.items()},
+            "created": datetime.now().isoformat(timespec="seconds"),
+        },
+    })
 
+    # ---- viewer + exports --------------------------------------------------
+    print("\n[4/4] Writing viewer and exports...")
     try:
         from src.viewer_generator import generate_viewer
-        viewer_path = generate_viewer(output_path, assets_3d,
-                                      room_file="3d_models/room.ply")
+        viewer_path = generate_viewer(output_path, assets_3d, room_file="3d_models/room.ply",
+                                      layout_file="3d_models/layout.json")
         print(f"✓ Viewer: {viewer_path}  (serve with: python -m http.server -d {output_path})")
     except Exception as e:
         print(f"⚠️  Viewer generation failed: {e}")
+    try:
+        from src.scene_export import export_scene_glb
+        glb = export_scene_glb(output_path, assets_3d)
+        if glb:
+            print(f"✓ GLB scene: {glb}")
+    except Exception as e:
+        print(f"⚠️  GLB export failed: {e}")
 
-    # Free per-job tensors. Models are kept in VRAM (they're singletons),
-    # but scratch buffers, masks, point clouds, etc. need to go between
-    # webapp runs or the second image OOMs.
-    import gc, torch
-    del objects, segments, assets_3d
+    print("\n" + "=" * 80)
+    print("✓ Pipeline complete!")
+    print(f"  Objects detected:      {len(objects)}")
+    print(f"  Instances segmented:   {len(segments)}")
+    print(f"  Objects reconstructed: {len(assets_3d)}" + (f"  ({len(failed)} failed)" if failed else ""))
+    print("  Timings: " + ", ".join(f"{k}={v:.0f}s" for k, v in timings.items()))
+    print(f"  Output directory: {output_path}")
+    print("=" * 80)
+
+    # Free per-job tensors; the models themselves stay resident (singletons).
+    import gc
+
+    import torch
+    del segments, all_results
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-        torch.cuda.synchronize()
-
     return output_path
 
 
-def get_output_folder_name(image_path: Path) -> str:
-    """Folder name = <image_stem>_<g|q> so Gemini and Qwen runs of the same
-    image live side by side and --force only clobbers the matching detector.
-    """
-    detector = os.environ.get("WORLDBUILDER_DETECTOR", "gemini").lower()
-    suffix = "q" if detector in ("qwen", "vlm", "local") else "g"
-    return f"{image_path.stem}_{suffix}"
+def segment_structural(segmenter, image_path: str, mask_dir: Path) -> Dict[str, np.ndarray]:
+    """Floor / wall / ceiling masks for the layout stage. Cheap: the image is
+    already encoded; each prompt is one decoder pass. Saved for debugging."""
+    from PIL import Image
+    out: Dict[str, np.ndarray] = {}
+    image = Image.open(image_path).convert("RGB")
+    segmenter.processor.confidence_threshold = 0.25
+    import torch
+    with torch.inference_mode():
+        state = segmenter.processor.set_image(image)
+    for prompt in STRUCTURAL_PROMPTS:
+        try:
+            masks, scores, _ = segmenter.query_text(state, prompt)
+        except Exception as e:
+            print(f"  structural '{prompt}': error {str(e)[:80]}")
+            continue
+        if len(scores) == 0:
+            print(f"  structural '{prompt}': none")
+            continue
+        union = np.any(masks, axis=0)
+        out[prompt] = union
+        Image.fromarray(union.astype(np.uint8) * 255).save(mask_dir / f"structural_{prompt}.png")
+        print(f"  structural '{prompt}': {len(scores)} mask(s), {100 * union.mean():.0f}% of frame")
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Batch helpers
+# ---------------------------------------------------------------------------
+
+def get_output_folder_name(image_path: Path, detector: Optional[str] = None) -> str:
+    """<stem>_<g|q>: Gemini and local runs of one photo live side by side."""
+    return f"{image_path.stem}_{'q' if detector_kind(detector) == 'local' else 'g'}"
+
+
+REQUIRED_OUTPUTS = ("detected_objects.json", "segmentation_results.json", "reconstruction_results.json")
 
 
 def is_already_processed(output_dir: Path) -> bool:
-    """Check if an image has already been fully processed."""
-    required_files = [
-        "detected_objects.json",
-        "segmentation_results.json",
-        "reconstruction_results.json"
-    ]
-    return all((output_dir / f).exists() for f in required_files)
+    return all((output_dir / f).exists() for f in REQUIRED_OUTPUTS)
 
 
 def get_image_info(image_path: Path) -> dict:
-    """Get image metadata."""
     from PIL import Image
-    img = Image.open(image_path)
-    return {
-        'width': img.width,
-        'height': img.height,
-        'megapixels': round((img.width * img.height) / 1_000_000, 2),
-        'format': img.format,
-        'file_size_mb': round(image_path.stat().st_size / (1024 * 1024), 2)
-    }
+    try:
+        with Image.open(image_path) as img:
+            return {"width": img.width, "height": img.height,
+                    "megapixels": round(img.width * img.height / 1e6, 2), "format": img.format,
+                    "file_size_mb": round(image_path.stat().st_size / (1024 * 1024), 2)}
+    except Exception:
+        return {"width": 0, "height": 0, "megapixels": 0, "format": "unknown", "file_size_mb": 0}
 
 
 def get_result_counts(output_dir: Path) -> dict:
-    """Read result counts from output files."""
-    counts = {
-        'objects_detected': 0,
-        'objects_segmented': 0,
-        'objects_reconstructed': 0
-    }
-    
+    counts = {"objects_detected": 0, "objects_segmented": 0, "objects_reconstructed": 0, "objects_failed": 0}
+    for key, fname in (("objects_detected", "detected_objects.json"),
+                       ("objects_segmented", "segmentation_results.json")):
+        try:
+            counts[key] = len(json.loads((output_dir / fname).read_text()))
+        except (OSError, ValueError):
+            pass
     try:
-        with open(output_dir / "detected_objects.json") as f:
-            counts['objects_detected'] = len(json.load(f))
-    except:
+        data = json.loads((output_dir / "reconstruction_results.json").read_text())
+        counts["objects_reconstructed"] = len(data.get("objects", []))
+        counts["objects_failed"] = len(data.get("failed", []))
+    except (OSError, ValueError):
         pass
-    
-    try:
-        with open(output_dir / "segmentation_results.json") as f:
-            counts['objects_segmented'] = len(json.load(f))
-    except:
-        pass
-    
-    try:
-        with open(output_dir / "reconstruction_results.json") as f:
-            data = json.load(f)
-            counts['objects_reconstructed'] = len(data.get('objects', []))
-    except:
-        pass
-    
     return counts
 
 
-def save_timing_report(timing_data: list, output_path: Path):
-    """Save timing results to CSV."""
+TIMING_FIELDS = ["image_name", "status", "total_time_sec", "width", "height", "megapixels", "format",
+                 "file_size_mb", "objects_detected", "objects_segmented", "objects_reconstructed",
+                 "objects_failed", "time_per_object_sec", "timestamp"]
+
+
+def save_timing_report(timing_data: List[dict], output_path: Path) -> Optional[Path]:
     if not timing_data:
-        return
-    
+        return None
     csv_path = output_path / f"timing_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-    
-    fieldnames = [
-        'image_name', 'status', 'total_time_sec',
-        'width', 'height', 'megapixels', 'format', 'file_size_mb',
-        'objects_detected', 'objects_segmented', 'objects_reconstructed',
-        'time_per_object_sec', 'timestamp'
-    ]
-    
-    with open(csv_path, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=TIMING_FIELDS, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(timing_data)
-    
     print(f"\n📊 Timing report saved: {csv_path}")
-    
-    # Also print summary stats
-    successful = [t for t in timing_data if t['status'] == 'success']
-    if successful:
-        times = [t['total_time_sec'] for t in successful]
-        print(f"\n   Summary ({len(successful)} successful runs):")
-        print(f"   ├─ Min:     {min(times):.1f}s")
-        print(f"   ├─ Max:     {max(times):.1f}s")
-        print(f"   ├─ Mean:    {sum(times)/len(times):.1f}s")
-        print(f"   └─ Total:   {sum(times):.1f}s")
+    ok = [t["total_time_sec"] for t in timing_data if t["status"] == "success"]
+    if ok:
+        print(f"   {len(ok)} successful: min {min(ok):.1f}s, max {max(ok):.1f}s, "
+              f"mean {sum(ok) / len(ok):.1f}s, total {sum(ok):.1f}s")
+    return csv_path
 
-def process_all_images(input_dir: str = "test_images", output_base: str = "outputs"):
-    """Process all images in input directory with timing."""
-    input_path = Path(input_dir)
-    output_base_path = Path(output_base)
-    output_base_path.mkdir(exist_ok=True)
-    
+
+def process_all_images(input_dir: str = "test_images", output_base: str = "outputs",
+                       force: bool = False, **kwargs) -> List[dict]:
+    input_path, output_base_path = Path(input_dir), Path(output_base)
+    output_base_path.mkdir(parents=True, exist_ok=True)
     if not input_path.exists():
         print(f"❌ Input directory not found: {input_path}")
-        return
-    
-    # Find all supported images
-    supported_extensions = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff', '.tif'}
-    images = [
-        f for f in input_path.iterdir()
-        if f.is_file() and f.suffix.lower() in supported_extensions
-    ]
-    
+        return []
+    exts = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif"}
+    images = sorted(f for f in input_path.iterdir() if f.is_file() and f.suffix.lower() in exts)
     if not images:
         print(f"❌ No images found in {input_path}")
-        return
-    
-    images.sort()
-    print(f"Found {len(images)} images in {input_path}")
-    print("="*80)
-    
-    processed = 0
-    skipped = 0
-    failed = 0
-    timing_data = []
-    
+        return []
+    print(f"Found {len(images)} images in {input_path}\n" + "=" * 80)
+
+    processed = skipped = failed = 0
+    timing_data: List[dict] = []
     batch_start = time.time()
-    
     for i, image_path in enumerate(images, 1):
-        folder_name = get_output_folder_name(image_path)
-        output_dir = output_base_path / folder_name
-        
+        output_dir = output_base_path / get_output_folder_name(image_path, kwargs.get("detector"))
         print(f"\n[{i}/{len(images)}] {image_path.name}")
-        
-        if is_already_processed(output_dir):
-            print(f"  ⏭️  Already processed, skipping")
-            skipped += 1
-            continue
-        
-        # Get image info before processing
+        if output_dir.exists() and is_already_processed(output_dir):
+            if force:
+                shutil.rmtree(output_dir)
+                print(f"  🗑️  Removed existing: {output_dir}")
+            else:
+                print("  ⏭️  Already processed, skipping")
+                skipped += 1
+                continue
+        info = get_image_info(image_path)
+        start = time.time()
+        row = {"image_name": image_path.name, **info, "timestamp": datetime.now().isoformat()}
         try:
-            img_info = get_image_info(image_path)
-        except:
-            img_info = {'width': 0, 'height': 0, 'megapixels': 0, 'format': 'unknown', 'file_size_mb': 0}
-        
-        start_time = time.time()
-        
-        try:
-            process_image(str(image_path), str(output_dir))
-            elapsed = time.time() - start_time
-            processed += 1
-            
-            # Get result counts
+            process_image(str(image_path), str(output_dir), **kwargs)
+            elapsed = time.time() - start
             counts = get_result_counts(output_dir)
-            
-            # Calculate time per object
-            total_objects = counts['objects_reconstructed'] or 1
-            time_per_object = elapsed / total_objects
-            
-            timing_data.append({
-                'image_name': image_path.name,
-                'status': 'success',
-                'total_time_sec': round(elapsed, 2),
-                **img_info,
-                **counts,
-                'time_per_object_sec': round(time_per_object, 2),
-                'timestamp': datetime.now().isoformat()
-            })
-            
-            print(f"\n  ⏱️  Completed in {elapsed:.1f}s ({time_per_object:.1f}s per object)")
-            
+            row.update(status="success", total_time_sec=round(elapsed, 2), **counts,
+                       time_per_object_sec=round(elapsed / (counts["objects_reconstructed"] or 1), 2))
+            processed += 1
+            print(f"\n  ⏱️  Completed in {elapsed:.1f}s ({row['time_per_object_sec']:.1f}s per object)")
         except Exception as e:
-            elapsed = time.time() - start_time
+            elapsed = time.time() - start
+            row.update(status=f"failed: {str(e)[:50]}", total_time_sec=round(elapsed, 2),
+                       objects_detected=0, objects_segmented=0, objects_reconstructed=0,
+                       objects_failed=0, time_per_object_sec=0)
             failed += 1
-            
-            timing_data.append({
-                'image_name': image_path.name,
-                'status': f'failed: {str(e)[:50]}',
-                'total_time_sec': round(elapsed, 2),
-                **img_info,
-                'objects_detected': 0,
-                'objects_segmented': 0,
-                'objects_reconstructed': 0,
-                'time_per_object_sec': 0,
-                'timestamp': datetime.now().isoformat()
-            })
-            
             print(f"  ❌ Failed after {elapsed:.1f}s: {e}")
-    
-    batch_elapsed = time.time() - batch_start
-    
-    print("\n" + "="*80)
-    print("BATCH COMPLETE")
-    print(f"  Processed: {processed}")
-    print(f"  Skipped:   {skipped}")
-    print(f"  Failed:    {failed}")
-    print(f"  Total time: {batch_elapsed:.1f}s ({batch_elapsed/60:.1f}m)")
-    print("="*80)
-    
-    # Save timing report
+        timing_data.append(row)
+
+    total = time.time() - batch_start
+    print("\n" + "=" * 80 + f"\nBATCH COMPLETE\n  Processed: {processed}\n  Skipped:   {skipped}\n"
+          f"  Failed:    {failed}\n  Total time: {total:.1f}s ({total / 60:.1f}m)\n" + "=" * 80)
     save_timing_report(timing_data, output_base_path)
+    return timing_data
 
 
-if __name__ == "__main__":
-    import argparse
-    
-    parser = argparse.ArgumentParser(description="WorldBuilder SAM3D Pipeline")
-    parser.add_argument("--image", help="Path to single input image")
-    parser.add_argument("--input-dir", default="test_images", help="Directory of images to process")
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description="WorldBuilder: photo → 3D scene")
+    parser.add_argument("--image", help="Path to a single input image")
+    parser.add_argument("--input-dir", default="test_images", help="Directory of images (batch mode)")
     parser.add_argument("--output", default="outputs", help="Output directory")
+    parser.add_argument("--detector", choices=["gemini", "qwen", "local"],
+                        help="Override WORLDBUILDER_DETECTOR from .env")
+    parser.add_argument("--quality", choices=["medium", "high"], default="high")
+    parser.add_argument("--no-room", action="store_true", help="Skip floor/wall/ceiling generation")
+    parser.add_argument("--no-structural", action="store_true",
+                        help="Skip SAM 3 floor/wall/ceiling masks (layout falls back to geometry)")
     parser.add_argument("--force", action="store_true", help="Reprocess even if already done")
-    
-    args = parser.parse_args()
-    
+    args = parser.parse_args(argv)
+
+    kwargs = dict(detector=args.detector, quality=args.quality,
+                  build_room=not args.no_room, structural=not args.no_structural)
     if args.image:
-        # Single image mode — write into a per-image subfolder so runs don't
-        # overwrite each other and batch/single outputs live side by side.
-        import shutil
         start = time.time()
         image_path = Path(args.image)
-        output_dir = Path(args.output) / get_output_folder_name(image_path)
-
+        if not image_path.exists():
+            parser.error(f"image not found: {image_path}")
+        output_dir = Path(args.output) / get_output_folder_name(image_path, args.detector)
         if output_dir.exists() and args.force:
             shutil.rmtree(output_dir)
             print(f"🗑️  Removed existing: {output_dir}")
         elif output_dir.exists() and is_already_processed(output_dir):
             print(f"⏭️  {output_dir} already processed — use --force to redo")
-            raise SystemExit(0)
-
-        process_image(str(image_path), str(output_dir))
+            return 0
+        process_image(str(image_path), str(output_dir), **kwargs)
         print(f"\n⏱️  Total time: {time.time() - start:.1f}s")
-    else:
-        # Batch mode
-        if args.force:
-            import shutil
-            # Wipe any already-processed subfolders so this run is clean
-            base = Path(args.output)
-            if base.exists():
-                for sub in base.iterdir():
-                    if sub.is_dir() and is_already_processed(sub):
-                        shutil.rmtree(sub)
-                        print(f"🗑️  Removed: {sub}")
-            is_already_processed = lambda x: False
+        return 0
+    process_all_images(args.input_dir, args.output, force=args.force, **kwargs)
+    return 0
 
-        process_all_images(args.input_dir, args.output)
+
+if __name__ == "__main__":
+    raise SystemExit(main())

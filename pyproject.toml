@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "worldbuilder"
+version = "0.2.0"
+description = "Turn a single photo of a room into a navigable, editable 3D scene (VLM + SAM 3 + SAM 3D Objects + MoGe layout)."
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.10"
+authors = [{name = "Adam Rolander", email = "arolander@ucsd.edu"}]
+keywords = ["3d-reconstruction", "single-image", "segment-anything", "scene-understanding", "vr", "blender", "unreal"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Topic :: Multimedia :: Graphics :: 3D Modeling",
+  "Topic :: Scientific/Engineering :: Image Recognition",
+]
+# The heavy GPU stacks (torch, sam3, sam3d_objects, pytorch3d, kaolin, ...)
+# are installed per README §2; only WorldBuilder's own thin layer is listed.
+dependencies = [
+  "numpy>=1.26,<2",
+  "pillow>=10",
+  "scipy>=1.10",
+  "trimesh>=4",
+  "requests>=2.31",
+  "python-dotenv>=1",
+]
+
+[project.optional-dependencies]
+gemini = ["google-genai>=1.0"]
+webapp = ["Flask>=3", "flask-cors>=4"]
+dev = ["pytest>=8", "ruff>=0.5"]
+
+[project.urls]
+Homepage = "https://github.com/AdamRolander/WorldBuilder"
+Issues = "https://github.com/AdamRolander/WorldBuilder/issues"
+
+[project.scripts]
+worldbuilder = "main:main"
+
+[tool.setuptools]
+packages = ["src", "webapp", "vlm_server", "integrations"]
+py-modules = ["main"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::FutureWarning"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+extend-exclude = ["sam3_repo", "sam3d_objects_repo", "pytorch3d", "outputs*", "webapp/static"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B"]
+ignore = ["E501", "E702", "E741"]

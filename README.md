@@ -2,19 +2,31 @@
 
 Turn a single photo of a room into a navigable 3D scene.
 
-An image goes in; a VLM lists the objects it sees, SAM 3 segments each one by
-text prompt, SAM 3D Objects lifts every mask into a posed, textured 3D asset,
-and a procedural room box + floor snapping assembles them into a scene you can
-open in a browser or a VR headset.
+An image goes in; a VLM lists the object types it sees, SAM 3 segments every
+instance by text prompt, SAM 3D Objects lifts each mask into a posed,
+textured mesh, and the scene point map (MoGe, computed once) gives the
+floor, gravity direction, walls and ceiling — textured from the photo — into
+which the objects are placed with support-aware snapping. You get per-object
+meshes, a single GLB, and a self-contained WebXR viewer; Blender and Unreal
+bridges pull the same scene over HTTP.
 
 ```
-image ──▶ [1] object detection ──▶ [2] segmentation ──▶ [3] 3D reconstruction ──▶ [4] scene assembly
-           Gemini 2.5 Flash          SAM 3                SAM 3D Objects            room box, floor snap,
-           or local Qwen3-VL         (text-prompted)      (mask → mesh + pose)      collision resolve, viewer.html
+image ─▶ [1] detect ─────▶ [2] segment ─────▶ [3] reconstruct ─────▶ [4] layout + assemble ─▶ viewer.html
+          Gemini 2.5 Flash    SAM 3 (text +      SAM 3D Objects         floor/gravity/walls/     scene.glb
+          or local Qwen3-VL   box prompts;       (mask → mesh + pose;   ceiling from the shared   room.ply
+                              floor/wall/        one shared MoGe        point map; support graph;
+                              ceiling masks)     point map)             snap; collisions
 ```
 
 Two ways to run it: a CLI (`main.py`) for batch/single images, and a web app
-(`webapp/`) that takes an upload and streams progress while the pipeline runs.
+(`webapp/`) that takes an upload, streams progress, and serves scenes to the
+viewer and to DCC plugins.
+
+> **State of the project (Sept 2026).** The `audit-and-roadmap` branch is a
+> substantial clean-up and extension of the demo-day pipeline. Start with
+> [docs/AUDIT.md](docs/AUDIT.md) (what changed and why),
+> [docs/ROADMAP.md](docs/ROADMAP.md) (what's next, with ticket ids) and
+> [docs/VALIDATION.md](docs/VALIDATION.md) (how to verify on the GPU).
 
 ---
 
@@ -25,9 +37,12 @@ Two ways to run it: a CLI (`main.py`) for batch/single images, and a web app
 - [Running it](#running-it)
 - [Detector routing: Gemini vs. local Qwen3-VL](#detector-routing-gemini-vs-local-qwen3-vl)
 - [Outputs](#outputs)
+- [Blender / Unreal](#blender--unreal)
 - [Remote access via ngrok](#remote-access-via-ngrok-for-a-vr-headset-off-lan)
+- [Development](#development)
 - [Repo layout](#repo-layout)
 - [Troubleshooting](#troubleshooting)
+- [Documentation index](#documentation-index)
 
 ---
 
@@ -42,7 +57,8 @@ Two ways to run it: a CLI (`main.py`) for batch/single images, and a web app
 - Conda or mamba.
 - A Hugging Face account, because **both** SAM checkpoint repos are gated and
   need manual access approval (can take a day — request these first).
-- A Gemini API key, if you want the cloud detector.
+- A Gemini API key, if you want the cloud detector. Not needed for the
+  fully local path.
 
 ### The VRAM dance
 
@@ -74,9 +90,9 @@ hf auth login
 
 ### 1. Clone WorldBuilder and its vendored dependencies
 
-The three upstream repos are **not** committed to this repo (they're large and
-have their own git history) — clone them into the project root by these exact
-names, since the code imports them by path:
+The three upstream repos are **not** committed to this repo (they're large,
+have their own git history and their own licences) — clone them into the
+project root by these exact names, since the code imports them by path:
 
 ```bash
 git clone git@github.com:AdamRolander/WorldBuilder.git
@@ -100,14 +116,14 @@ the first thing to try.
 
 ### 2. Environment A — `worldbuilder-main` (pipeline + webapp)
 
-This runs everything except the local VLM: SAM 3, SAM 3D Objects, the room
-generator, the viewer, and the web app.
+This runs everything except the local VLM: SAM 3, SAM 3D Objects, the layout
+and assembly stages, the viewer, and the web app.
 
 > **Heads-up on the deviation from upstream.** SAM 3D Objects'
 > `environments/default.yml` pins torch 2.5.1 + CUDA 12.1. That does **not**
 > work on an RTX 5090 (sm_120 requires CUDA 12.8), so this env runs
 > **torch 2.8.0+cu128** with `pytorch3d` built from source against it.
-> `torch_versions_backup.txt` records the old cu121 pin set for reference.
+> `docs/torch_versions_cu121_backup.txt` records the old cu121 pin set.
 > If your GPU is Ada or older, the upstream cu121 path is likely smoother —
 > follow `sam3d_objects_repo/doc/setup.md` verbatim instead of the versions
 > below.
@@ -132,8 +148,9 @@ pip install -e './sam3d_objects_repo[inference]'
 # pytorch3d from source (no cu128 wheels exist)
 pip install -e ./pytorch3d
 
-# WorldBuilder's own thin layer
+# WorldBuilder's own thin layer (+ dev tools)
 pip install -r requirements.txt
+pip install -e ".[dev]"
 ```
 
 Verify:
@@ -142,6 +159,7 @@ Verify:
 python -c "import torch, sam3, sam3d_objects, pytorch3d, kaolin; \
 print(torch.__version__, torch.cuda.is_available())"
 # → 2.8.0+cu128 True
+pytest            # CPU-only test suite, ~5 s
 ```
 
 Known-good versions in this env: `numpy 1.26.4` (do **not** upgrade to 2.x —
@@ -174,9 +192,6 @@ mkdir -p checkpoints
 hf download facebook/sam3 sam3.pt --local-dir checkpoints
 ```
 
-`src/segmentation.py` looks for `checkpoints/sam3.pt` by default; pass
-`SAM3Segmenter(checkpoint_path=...)` to override.
-
 **SAM 3D Objects** → `sam3d_objects_repo/checkpoints/hf/` (~12 GB):
 
 ```bash
@@ -190,34 +205,40 @@ cd ..
 ```
 
 The result must contain `sam3d_objects_repo/checkpoints/hf/pipeline.yaml` —
-that's the path `src/reconstruction_3d.py` loads.
+that's the path `src/reconstruction_3d.py` loads. MoGe (`Ruicheng/moge-vitl`)
+is fetched automatically by SAM 3D on first run.
 
 ### 5. Configure `.env`
 
 Create `.env` in the project root (it's gitignored — never commit your key):
 
 ```bash
-GEMINI_API_KEY=your-key-from-https://aistudio.google.com/apikey
-WORLDBUILDER_DETECTOR=gemini        # or "qwen" for the local VLM
+GEMINI_API_KEY=your-key-from-https://aistudio.google.com/apikey   # only for the cloud detector
+WORLDBUILDER_DETECTOR=qwen          # "qwen" = fully local, "gemini" = cloud
 TORCH_HOME=/path/to/torch/cache     # optional
 TORCH_HUB_OFFLINE=1                 # optional: avoid hub checks on every run
 ```
 
-| variable                | default                 | meaning                                              |
-| ----------------------- | ----------------------- | ---------------------------------------------------- |
-| `GEMINI_API_KEY`        | —                       | Required when the detector is `gemini`.               |
-| `WORLDBUILDER_DETECTOR` | `gemini`                | `gemini` \| `qwen` (aliases: `vlm`, `local`).         |
-| `WORLDBUILDER_VLM_URL`  | `http://127.0.0.1:8765` | Where the local VLM server lives.                     |
+| variable                       | default                 | meaning                                              |
+| ------------------------------ | ----------------------- | ---------------------------------------------------- |
+| `GEMINI_API_KEY`               | —                       | Required when the detector is `gemini`.               |
+| `WORLDBUILDER_DETECTOR`        | `gemini`                | `gemini` \| `qwen` (aliases: `vlm`, `local`).         |
+| `WORLDBUILDER_VLM_URL`         | `http://127.0.0.1:8765` | Where the local VLM server lives.                     |
+| `WORLDBUILDER_GEMINI_MODEL`    | `gemini-2.5-flash`      | Cloud model id.                                       |
+| `WORLDBUILDER_SHARED_POINTMAP` | `1`                     | `0` recomputes MoGe per object (old behaviour).       |
+| `WORLDBUILDER_STRETCH_STRUCTURAL` | unset                | `1` stretches pillars/beams to ceiling height (opt-in). |
+| `WORLDBUILDER_OUTPUTS`         | `outputs/`              | Where the webapp reads/writes scenes.                 |
 
 ### 6. Smoke test
 
 ```bash
 conda activate worldbuilder-main
-python main.py --image test_images/living_room.jpg
+python main.py --image living_room.jpg --detector gemini     # or start the VLM server and use --detector qwen
 ```
 
 First run takes a few minutes (model loads dominate). Success looks like a
-new `outputs/living_room_g/` containing `viewer.html`.
+new `outputs/living_room_g/` containing `viewer.html`, `scene.glb` and
+`3d_models/layout.json`.
 
 ---
 
@@ -230,15 +251,18 @@ conda activate worldbuilder-main
 
 python main.py                                   # batch: every image in test_images/
 python main.py --image path/to/photo.jpg         # single image
+python main.py --image photo.jpg --detector qwen # override .env for this run
 python main.py --input-dir my_photos --output my_outputs
 python main.py --force                           # reprocess instead of skipping done scenes
+python main.py --image photo.jpg --no-room       # objects only, no floor/walls/ceiling
+python main.py --image photo.jpg --no-structural # skip SAM 3 floor/wall/ceiling masks (geometry-only layout)
 ```
 
 Output goes to `outputs/<image_stem>_<g|q>/`, where the suffix records which
 detector produced it — so a Gemini run and a Qwen run of the same photo sit
 side by side and `--force` only clobbers the matching one. Batch mode skips
 scenes that already have all three result JSONs and writes a
-`timing_report_*.csv` with per-image timings.
+`timing_report_*.csv` with per-image timings and failure counts.
 
 View a finished scene:
 
@@ -253,7 +277,8 @@ Terminal 1 — the local VLM server (skip if using Gemini):
 
 ```bash
 conda activate worldbuilder-vlm
-python vlm_server/server.py            # binds 127.0.0.1:8765
+python vlm_server/server.py                          # Qwen3-VL-8B, binds 127.0.0.1:8765
+python vlm_server/server.py --model Qwen/Qwen2.5-VL-7B-Instruct   # any HF image-text model
 ```
 
 Terminal 2 — the web app:
@@ -279,88 +304,62 @@ served.
 
 API surface (`webapp/server.py`):
 
-| endpoint                 | purpose                                          |
-| ------------------------ | ------------------------------------------------ |
-| `GET  /api/health`       | liveness                                          |
-| `GET  /api/vlm-status`   | proxies the VLM server's `/health`                |
-| `GET  /api/demos`        | pre-baked scenes in `outputs/` with a `viewer.html` |
-| `POST /api/upload`       | accepts `image`, queues a job → `{job_id, scene_id}` |
-| `GET  /api/jobs/<id>`    | `{status, stage 1–5, scene_id, error}`            |
-| `GET  /outputs/<path>`   | static access to generated scenes                 |
+| endpoint                       | purpose                                                        |
+| ------------------------------ | -------------------------------------------------------------- |
+| `GET  /api/health`             | liveness                                                        |
+| `GET  /api/vlm-status`         | proxies the VLM server's `/health`                              |
+| `GET  /api/demos`              | pre-baked scenes in `outputs/` with a `viewer.html`             |
+| `POST /api/upload`             | form fields `image` (+ optional `detector`) → `{job_id, scene_id}` |
+| `GET  /api/jobs/<id>`          | `{status, stage 1–5, scene_id, error}`                          |
+| `GET  /api/scenes/<id>`        | manifest: objects, layout, failures, file URLs                  |
+| `GET  /api/scenes/<id>/glb`    | the whole scene as one GLB (built on demand)                    |
+| `GET  /outputs/<path>`         | static access to generated scenes                               |
 
 Passing a known `scene_id` as a `job_id` returns `complete` immediately —
-that's the demo fallback seam for showing a pre-baked scene.
-
-**Pre-baking demo scenes.** Any `outputs/` directory containing a
-`viewer.html` shows up automatically as a demo chip in the webapp (via
-`/api/demos`). So `python main.py --image test_images/your_scene.jpg` is all
-it takes to add one. To jump straight to it — useful as a break-glass during
-a live demo — use the URL param:
-
-```
-http://localhost:5174/?demo=your_scene_g
-```
+that's the demo fallback seam for showing a pre-baked scene
+(`http://localhost:5174/?demo=your_scene_g`).
 
 ### Utilities
 
 ```bash
-python regen_viewer.py outputs/scene_a outputs/scene_b   # rebuild viewer.html after viewer edits
-python -m src.debug_masks                                # overlay masks on source image to check alignment
+python scripts/regen_viewer.py outputs/scene_a outputs/scene_b   # rebuild viewer.html + scene.glb after viewer edits
+python -m src.scene_export outputs/scene_a                       # just the GLB
+python -m src.debug_masks --image photo.jpg --output-dir outputs/scene_a   # overlay masks on the photo
+python scripts/bench_detectors.py --offline outputs outputs_og2  # local-VLM recall vs Gemini on past runs
+python scripts/replay_layout.py demo_day/lr2.webp --masks outputs/lr2_q/masks   # layout stage only, CPU, seconds
+python scripts/bench_detectors.py --live demo_day --save bench.json        # same, live against the VLM server
 ```
 
 ---
 
 ## Detector routing: Gemini vs. local Qwen3-VL
 
-Stage 1 asks a vision model to list the objects worth reconstructing. Two
-interchangeable backends implement the same one-method interface
-(`detect_objects(image_path) -> List[Dict]`), so swapping is a single env var:
+Stage 1 asks a vision model to list the object types worth reconstructing.
+Two interchangeable backends implement the same one-method interface
+(`detect_objects(image_path) -> List[Dict]`), so swapping is a single env var
+or `--detector`:
 
 ```bash
 WORLDBUILDER_DETECTOR=gemini   # src/object_detection.py     — Gemini 2.5 Flash (default)
-WORLDBUILDER_DETECTOR=qwen     # src/local_vlm_detection.py  — local Qwen3-VL-8B
-```
-
-`main.py` reads it at the top of `process_image()`; the webapp reads it in
-`/api/upload` to pick the scene-name suffix. Set it in `.env`, or override
-per-run:
-
-```bash
-WORLDBUILDER_DETECTOR=qwen python main.py --image photo.jpg
+WORLDBUILDER_DETECTOR=qwen     # src/local_vlm_detection.py  — local Qwen3-VL-8B via vlm_server/
 ```
 
 |                | `gemini`                                 | `qwen`                                       |
 | -------------- | ---------------------------------------- | -------------------------------------------- |
-| Model          | `gemini-2.5-flash` via `google-genai`    | `Qwen/Qwen3-VL-8B-Instruct` via transformers  |
+| Model          | `gemini-2.5-flash` via `google-genai`, JSON mode | `Qwen/Qwen3-VL-8B-Instruct` via transformers (`--model` to swap) |
 | Runs where     | Google's API                             | `vlm_server/server.py`, localhost:8765        |
 | Needs          | `GEMINI_API_KEY`, network                | ~17 GB VRAM while active, second conda env    |
 | Latency        | ~2–5 s                                   | ~15–40 s incl. GPU wake                       |
-| Failure mode   | 429/503 → 5 retries, exponential backoff | malformed JSON → 3 retries, then salvage parse|
+| Failure mode   | 429/503 → 5 retries, exponential backoff | malformed JSON → 3 attempts (greedy, then sampled), salvage parse |
 | Privacy        | image leaves the machine                 | fully offline                                 |
 
-Both prompts ask for the same JSON schema (`id`, `label`, `description`,
-`expected_instances`) and both are deliberately steered toward plain everyday
-labels — "sofa", not "modular seating unit" — because the label becomes SAM
-3's text prompt in stage 2, and SAM 3 segments common nouns far more reliably
-than jargon. If you tune one prompt, tune the other to match, or the two
-backends drift apart. They live in `src/object_detection.py` and
-`vlm_server/server.py`.
-
-Whichever backend runs, `src/detection_postprocess.py` then drops people from
-the list (reconstructed humans come out as uncanny static blobs).
-
-**Gemini specifics.** Transient `503`/`429`/`UNAVAILABLE`/`RESOURCE_EXHAUSTED`
-errors get 5 attempts with 1/2/4/8/16 s backoff; anything else raises
-immediately. Responses wrapped in markdown fences are unwrapped before
-parsing.
-
-**Qwen specifics.** The server holds the model in CPU RAM and moves it to the
-GPU only for the duration of a `/detect` call, then the client immediately
-calls `/unload` to hand VRAM back to SAM 3D — including when detection raised
-mid-flight. Generation retries up to 3 times (greedy first, then
-`temperature=0.3`), and the parser salvages truncated output by trimming back
-to the last complete object. To swap models, edit `MODEL_NAME` at the top of
-`vlm_server/server.py`; `Qwen/Qwen2.5-VL-7B-Instruct` is a drop-in fallback.
+**Both backends read the same prompt** from `src/prompts.py`; edit it there.
+It asks for short everyday labels (they become SAM 3's text prompts), a
+short description, `expected_instances`, and an optional `bbox_2d` per type
+(Qwen3-VL's boxes are used as a SAM 3 fallback prompt when text fails).
+`src/detection_postprocess.py` then normalises labels, drops people,
+architecture and object *parts*, collapses duplicates, and caps the list —
+the safety net for a local model that loops.
 
 ---
 
@@ -370,22 +369,37 @@ Each scene directory holds:
 
 ```
 outputs/<scene>/
-├── detected_objects.json          # stage 1: what the VLM saw
-├── segmentation_results.json      # stage 2: per-instance masks, scores, boxes
-├── masks/                         # stage 2: mask PNGs
-├── reconstruction_results.json    # stage 3: per-object mesh paths, pose, scale
+├── detected_objects.json          # stage 1 after clean-up (detected_objects_raw.json = as returned)
+├── segmentation_results.json      # stage 2: per-instance masks, scores, boxes, prompt used
+├── masks/                         # stage 2: mask PNGs (+ structural_floor/wall/ceiling.png)
+├── reconstruction_results.json    # stage 3/4: objects (pose, ply, supported_by), failed, metadata + timings
 ├── 3d_models/
-│   ├── <label>_<n>.ply            # one mesh per object instance
-│   ├── room.ply                   # procedural floor/walls box
-│   └── scene.ply                  # everything composed into one mesh
-└── viewer.html                    # self-contained Three.js viewer
+│   ├── <id>_<label>.ply           # one world-space mesh per object instance (vertex colours)
+│   ├── room.ply                   # floor/walls/ceiling textured from the photo (box fallback)
+│   ├── layout.json                # floor plane, gravity rotation, yaw, ceiling, wall evidence, scale estimate
+│   ├── scene_pointmap.npz         # MoGe scene points (aligned frame) for debugging / viewers
+│   └── scene_combined.ply         # everything composed into one mesh
+├── scene.glb                      # the scene as one glTF binary (named nodes) for Blender/Unreal/web
+├── scene_points.json              # small point-cloud sidecar the viewer can toggle on
+└── viewer.html                    # self-contained Three.js / WebXR viewer
 ```
 
-`viewer.html` pulls Three.js from unpkg at runtime, so viewing needs network
-access (not the GPU). Scene assembly — floor snapping, XZ collision
-resolution, the room box — lives in `src/room_generator.py`;
-`FLOOR_SUPPORTED_KEYWORDS` there is the whitelist of categories forced onto
-the floor plane when SAM 3D's depth estimate comes back wrong.
+Coordinates are **scale-invariant** (consistent within a scene, not across
+scenes). `layout.json → estimated_metric_scale` is a prior-based factor to
+metres (camera at ~1.5 m); proper metric scale is roadmap item `PIPE-6`.
+`viewer.html` loads Three.js from a CDN, so viewing needs network access
+(not the GPU).
+
+---
+
+## Blender / Unreal
+
+`integrations/blender_worldbuilder/` is a Blender 4.2+ extension (also
+installs as a legacy add-on) and `integrations/unreal/WorldBuilderBridge/`
+an Unreal 5.4+ editor plugin. Both are thin HTTP clients: pick a photo, the
+running web app does the work, the scene comes back as a GLB and is imported
+with named objects. Setup, publishing requirements (extensions.blender.org,
+Fab) and status are in [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md).
 
 ---
 
@@ -417,53 +431,87 @@ The `ngrok` binary is gitignored — grab it from
 
 ---
 
+## Development
+
+```bash
+pytest                      # CPU-only: geometry vs pytorch3d, synthetic-room layout, placement, parsing
+ruff check .                # lint (config in pyproject.toml)
+```
+
+The geometry and heuristics are unit-tested without any model weights;
+anything that touches SAM 3 / SAM 3D is verified manually per
+[docs/VALIDATION.md](docs/VALIDATION.md) with before/after numbers.
+See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+---
+
 ## Repo layout
 
 ```
 main.py                     CLI entrypoint + batch runner + timing reports
-regen_viewer.py             rebuild viewer.html for existing output dirs
 requirements.txt            WorldBuilder's own deps (not the SAM stacks)
+pyproject.toml              package metadata, pytest/ruff config
 
 src/
-  object_detection.py       stage 1a: Gemini detector
+  prompts.py                the one detection prompt both backends use
+  object_detection.py       stage 1a: Gemini detector (JSON mode)
   local_vlm_detection.py    stage 1b: HTTP client for the local VLM server
-  detection_postprocess.py  stage 1c: drop people, renumber ids
-  segmentation.py           stage 2:  SAM 3 text-prompted segmentation
-  reconstruction_3d.py      stage 3:  SAM 3D Objects → meshes, pose, scale
-  room_generator.py         stage 4:  floor snap, collision resolve, room box
-  viewer_generator.py       stage 4:  emit self-contained Three.js viewer
+  detection_postprocess.py  stage 1c: normalise, dedupe, drop people/architecture/parts
+  segmentation.py           stage 2:  SAM 3 text + box prompts, NMS, mask hygiene
+  reconstruction_3d.py      stage 3:  SAM 3D Objects with a shared point map; drives stage 4
+  room_layout.py            stage 4a: floor, gravity, yaw, walls, ceiling, textured room from the point map
+  room_generator.py         stage 4b: upright, support graph, snapping, collisions (numpy)
+  geometry.py               pose math shared by stage 4 (checked against pytorch3d)
+  scene_export.py           GLB scene export
+  viewer_generator.py       emit the Three.js / WebXR viewer
   debug_masks.py            dev tool: overlay masks on the source image
 
-vlm_server/server.py        Qwen3-VL detection server (separate conda env)
+vlm_server/server.py        local VLM detection server (separate conda env)
 webapp/
-  server.py                 Flask API + job queue
+  server.py                 Flask API + job queue + scene/GLB endpoints
   static/                   React (UMD + Babel standalone, no build step)
+integrations/
+  blender_worldbuilder/     Blender extension (manifest + add-on)
+  unreal/WorldBuilderBridge Unreal editor plugin (uplugin, C++ stub, Python bridge)
+scripts/
+  regen_viewer.py           rebuild viewer.html + scene.glb for existing output dirs
+  bench_detectors.py        local-VLM recall benchmark vs Gemini
+  replay_layout.py          layout stage only (CPU MoGe) for fast tuning
+  plot_scene.py             plan-view diagnostic PNG of a finished scene
+tests/                      CPU-only pytest suite
+docs/                       ARCHITECTURE, AUDIT, ROADMAP, VALIDATION, INTEGRATIONS
 
 checkpoints/                SAM 3 weights            (gitignored)
 sam3_repo/                  upstream clone           (gitignored)
 sam3d_objects_repo/         upstream clone + weights (gitignored)
 pytorch3d/                  upstream clone           (gitignored)
 outputs/                    generated scenes         (gitignored)
-test_images/                input photos             (gitignored)
 ```
 
 ---
 
 ## Troubleshooting
 
-**`CUDA out of memory` mid-pipeline.** Usually a model failed to park on CPU.
-Restart the webapp/CLI process; if it's reproducible, check the
-`Moving model: cuda → cpu` lines in the log to see which stage didn't release.
-`GPU free after move: …` in the VLM server log tells you whether Qwen actually
-let go.
+**`CUDA out of memory` mid-pipeline.** Usually a model failed to park on CPU,
+or another process holds the GPU (`nvidia-smi`). Restart the webapp/CLI
+process; if it's reproducible, check the `Moving model: cuda → cpu` lines in
+the log to see which stage didn't release.
 
 **`VLM server unreachable at http://127.0.0.1:8765`.** The server isn't
 running, or is still loading the model (~1 min). `curl
 localhost:8765/health` — `{"ok": true}` means it's ready.
 
 **`GEMINI_API_KEY not found`.** `.env` is missing, or you started the process
-from a directory other than the project root. `load_dotenv()` resolves `.env`
-relative to the working directory.
+from a directory other than the project root (`load_dotenv()` resolves `.env`
+relative to the working directory) — or you meant `--detector qwen`.
+
+**`KeyError: 'CONDA_PREFIX'` from `notebook/inference.py`.** Fixed on this
+branch (the path is derived from the interpreter), but if you run the
+upstream notebook directly you need an activated conda shell.
+
+**"Textured room failed … using box room".** The layout stage fell back;
+`3d_models/layout.json` and the console say why (usually no floor visible
+or no valid intrinsics). The scene is still complete.
 
 **SAM 3 checkpoint 404 / gated repo error.** Access wasn't approved yet, or
 `hf auth login` hasn't run in this shell.
@@ -473,8 +521,27 @@ on a machine without a visible GPU. Rebuild `pip install -e ./pytorch3d` on the
 GPU box.
 
 **`pipeline.yaml` not found.** The SAM 3D download landed in the wrong place —
-the `mv` step in setup §4 is easy to miss. You want
-`sam3d_objects_repo/checkpoints/hf/pipeline.yaml`.
+the `mv` step in setup §4 is easy to miss.
 
 **numpy 2.x errors after installing something new.** Something upgraded numpy.
 `pip install 'numpy==1.26.4'` and reinstall whatever pulled it.
+
+---
+
+## Documentation index
+
+| document | what it is for |
+| --- | --- |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | data flow, file formats, frames/units, extension points |
+| [docs/AUDIT.md](docs/AUDIT.md) | the September 2026 code audit: findings, fixes, evidence |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | every planned item with ids, blockers and a suggested order |
+| [docs/VALIDATION.md](docs/VALIDATION.md) | GPU validation procedure and before/after measurements |
+| [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md) | Blender extension and Unreal plugin: setup, publishing rules, status |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | how to work on the repo |
+
+## Licence
+
+WorldBuilder's code is MIT (see `LICENSE`). Model weights and the upstream
+SAM repositories are obtained separately under their own terms (Meta's SAM
+License for SAM 3 / SAM 3D Objects; MIT for MoGe; BSD for PyTorch3D;
+Apache-2.0 for Qwen3-VL) and are never redistributed by this project.

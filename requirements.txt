@@ -9,15 +9,16 @@
 
 numpy==1.26.4          # 2.x breaks open3d and kaolin — do not upgrade
 pillow==10.3.0
+scipy>=1.10            # mask clean-up, layout texturing
 requests==2.32.5
 python-dotenv==1.2.1
 
 # stage 1 — Gemini detector
 google-genai==1.57.0
 
-# stage 3/4 — mesh handling and scene assembly
-open3d==0.19.0
+# stage 3/4 — mesh handling, scene assembly, GLB export
 trimesh==4.10.1
+# open3d is pulled in by sam3d_objects (its plane estimation); not used directly.
 
 # webapp
 Flask==3.0.3
