@@ -281,12 +281,12 @@ tuning (§5.3). Gallery pages: `outputs/10-08-validation/index.html`,
 
 | scene | objects | silhouette IoU | objects < 0.3 | settled | pose-searched | instances shared | built-in boxes | metres per unit (was prior) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| bathroom3 | 34 → 35 | 0.51 → **0.63** | 6 → 1 | 0 | 15 | 2 | 8 | 1.48 (2.11) |
-| cl5 | 24 → 25 | 0.49 → **0.51** | 6 → 7 | 1 | 10 | 3 | 6 | 2.95 (4.12) |
-| k1 | 35 → 36 | 0.50 → **0.53** | 6 → 4 | 3 | 15 | 2 | 10 | 1.35 (2.05) |
+| bathroom3 | 34 → 34 | 0.51 → **0.64** | 6 → 1 | 0 | 14 | 2 | 6 | 1.48 (2.11) |
+| cl5 | 24 → 23 | 0.49 → **0.51** | 6 → 6 | 1 | 7 | 3 | 1 | 2.95 (4.12) |
+| k1 | 35 → 35 | 0.50 → **0.54** | 6 → 3 | 3 | 14 | 2 | 7 | 1.35 (2.05) |
 | lib2 | 38 → 40 | 0.58 → **0.62** | 2 → 3 | 3 | 10 | 7 | 3 | 2.55 (4.30) |
-| lr2 | 32 → 33 | 0.48 → **0.54** | 8 → 6 | 2 | 15 | 1 | 1 | 3.06 (4.30) |
-| ucsd-basement-prototype-lab | 17 → 17 | 0.58 → **0.62** | 2 → 1 | 2 | 5 | 1 | 13 | 1.72 (2.19) |
+| lr2 | 32 → 32 | 0.48 → **0.54** | 8 → 6 | 2 | 14 | 1 | 0 | 3.06 (4.30) |
+| ucsd-basement-prototype-lab | 17 → 17 | 0.58 → **0.62** | 2 → 1 | 2 | 5 | 1 | 9 | 1.72 (2.19) |
 | **mean** | | **0.52 → 0.58** | | | | | | |
 
 Silhouette IoU here is the plain one of §4 (no allowance for occlusion),
@@ -336,8 +336,9 @@ wall was seen, so it takes the named wall's predicted make-up. `median` /
 were 3× tiled, 9× flat; walls behind the camera and unseen side walls were
 all flat.
 
-Built-ins: 1–13 solid boxes per scene behind the relief (kitchen 10, of
-which the cabinet runs under both counters and the wall-cabinet block);
+Built-ins: 0–9 solid boxes per scene behind the relief (kitchen 7,
+including the cabinet runs under both counters and the wall-cabinet
+block; none in the two living rooms, which have no built-ins in view);
 each is exported to MuJoCo as a static collision box.
 
 ### 5.3 Photos not used for tuning
@@ -348,7 +349,7 @@ each is exported to MuJoCo as a static collision box.
 | photo | instances → objects | silhouette IoU (median) | objects < 0.3 | metres per unit | ceiling | wall-clock |
 | --- | ---: | ---: | ---: | ---: | --- | ---: |
 | bathroom1 | 22 → 22 | 0.63 (0.72) | 2 | 1.25 | 2.01 m (geometric) | 285 s |
-| cl2 | 89 → 80 | 0.55 (0.57) | 7 | 2.74 | 2.80 m (geometric) | 984 s |
+| cl2 | 89 → 79 | 0.55 (0.59) | 6 | 2.74 | 2.80 m (geometric) | 984 s |
 | k3 | 66 → 61 | 0.58 (0.58) | 2 | 2.12 | 2.84 m (geometric) | 755 s |
 | lr3 | 32 → 29 | 0.56 (0.58) | 5 | 2.90 | 3.17 m (geometric) | 367 s |
 
@@ -360,8 +361,8 @@ is now treated as not a wall (offset 1.75 → 0.25). Both were found only
 because the photo was new. The 89-instance classroom spent 16 minutes in
 stage 3–4, of which roughly 12 are SAM 3D.
 
-MuJoCo, all ten scenes, `--stabilize`: 2–21 objects welded per scene,
-1–13 left free, residual drift ≤ 5 cm over 2 s.
+MuJoCo, all ten scenes, `--stabilize`: 2–22 objects welded per scene,
+1–12 left free, residual drift ≤ 5 cm over 2 s.
 
 ### 5.4 Cost
 
