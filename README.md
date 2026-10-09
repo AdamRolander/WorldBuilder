@@ -56,7 +56,7 @@ viewer and to DCC plugins.
   to do on a borderline card: [docs/HARDWARE.md](docs/HARDWARE.md).
   Everything after reconstruction (placement, room, viewer, exports,
   Blender/MuJoCo) runs without a GPU.
-- ~60 GB free disk: ~15 GB of model checkpoints, and outputs run 0.5–1.5 GB
+- ~60 GB free disk: ~15 GB of model checkpoints, and outputs run 0.8–2 GB
   per scene (the shareable `scene_lite.glb` is 7–23 MB).
 - Conda or mamba.
 - A Hugging Face account, because **both** SAM checkpoint repos are gated and
