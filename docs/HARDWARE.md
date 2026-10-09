@@ -17,7 +17,8 @@ which includes PyTorch's cache and ~0.4 GB of desktop.
 | 1 detect (local) | Qwen3-VL-8B, bf16 | — (other process) | ~21.5 GB | parked in CPU RAM afterwards; 0 GB with the Gemini detector |
 | 2 segment | SAM 3 | 3.9 GB | — | |
 | 3 reconstruct | SAM 3D Objects (+ MoGe) | 19.2 GB | 22.8–23.7 GB | the stage that sets the floor; independent of object count |
-| 4 assemble + exports | none | 0 | 0 | CPU, ~10 s + ~25 s for the lite GLB |
+| 3b metric scale (optional) | MoGe-2 ViT-L, subprocess | ~2 GB (est.) | — | <1 s on GPU; falls back to CPU when under 4 GB is free |
+| 4 assemble + exports | none | 0 | 0 | CPU, 20–100 s (pose search and instance sharing dominate) + ~25 s for the lite GLB |
 
 Only one large model is on the GPU at a time (the README's "VRAM dance").
 Wall-clock on the 5090: 175–430 s per photo for 18–44 objects — about 8 s

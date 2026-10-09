@@ -234,7 +234,7 @@ def synthesize_fill(tex: np.ndarray, visible: np.ndarray, rows: bool = False,
     th, tw = visible.shape
     if not rows:
         r0, c0, r1, c1 = _coarse_rectangle(visible)
-        if (r1 - r0) * (c1 - c0) < 0.01 * th * tw or min(r1 - r0, c1 - c0) < 8:
+        if (r1 - r0) * (c1 - c0) < 0.003 * th * tw or min(r1 - r0, c1 - c0) < 12:
             return None, "none"
         patch = tex[r0:r1, c0:c1]
         if not _texture_like(patch, rows=False):

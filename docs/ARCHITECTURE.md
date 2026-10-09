@@ -22,8 +22,10 @@ segmentation_results.json + masks/*.png (+ masks/structural_{floor,wall,ceiling}
    │        pointmap.npz       scene point map (camera-frame world), validity, intrinsics
    ▼  stage 4  src/scene_assembly.py
    │   4a layout     src/room_layout.py    floor, gravity (all surfaces), yaw, walls, ceiling → layout.json
-   │   4b placement  src/placement.py      depth refit, contact support, IoU-checked moves, duplicate removal
-   │   4c room       src/room_texture.py   textured shell quads + photo relief of built-ins → room.glb (+ room.ply)
+   │   4b placement  src/placement.py      depth refit, silhouette pose search (src/pose_fit.py), contact
+   │                                       support, settling, instance sharing, walls, visibility, duplicates
+   │   4c room       src/room_texture.py   textured shell quads (predicted where unseen) + photo relief,
+   │                 src/builtin_boxes.py  solid boxes behind the relief → room.glb (+ room.ply)
    ▼  exports  reconstruction_results.json · world-space PLYs · scene_combined.ply
               scene.glb / scene_lite.glb (src/scene_export.py, src/mesh_bake.py)
               viewer.html (src/viewer_generator.py) · mujoco/scene.xml (src/mujoco_export.py)
@@ -49,9 +51,11 @@ scenes, and can be re-run on any finished scene with
   `v_gaussian` is the GLB vertex after the Y/Z swap
   `(x, y, z) → (x, −z, y)`. `src/geometry.world_vertices` is the single
   implementation; `tests/test_geometry.py` checks it against pytorch3d.
-* **Units** are MoGe's scale-invariant units, consistent within a scene.
-  `layout.estimated_metric_scale` converts to metres under a camera-height
-  prior (1.5 m). Nothing on disk is pre-multiplied by it.
+* **Units** are MoGe-1's scale-invariant units, consistent within a scene.
+  `layout.estimated_metric_scale` converts to metres: from MoGe-2's metric
+  point map when `3d_models/stage3/metric_scale.json` exists, otherwise a
+  camera-height prior (1.5 m); `layout.metric_scale_source` says which.
+  Nothing on disk is pre-multiplied by it.
 * **Intrinsics** are normalised (MoGe convention): `u = fx·x/z + cx` with
   `u ∈ [0,1]`, recovered from the point map when the depth model's are not
   passed through.
@@ -87,7 +91,8 @@ scenes, and can be re-run on any finished scene with
   is what keeps a wrong hint from doing damage.
 * **New export target**: read `scene_lite.glb` + `layout.json` +
   `reconstruction_results.json` (see `src/mujoco_export.py`, ~300 lines).
-* **Metric scale**: replace `estimated_metric_scale` in `estimate_layout`;
+* **Metric scale**: anything that writes `stage3/metric_scale.json`
+  (`scripts/estimate_metric_scale.py` does, with MoGe-2) sets it;
   everything else reads it from `layout.json`.
 * **Progress hooks**: the webapp polls the filesystem; a callback in
   `process_image` (CODE-3) would remove that.

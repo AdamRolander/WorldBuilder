@@ -19,7 +19,7 @@ git clone https://github.com/AdamRolander/WorldBuilder && cd WorldBuilder
 python -m venv .venv && source .venv/bin/activate
 pip install numpy pillow scipy trimesh requests python-dotenv opencv-python-headless \
             pytest ruff matplotlib fast-simplification xatlas pyrender mujoco gymnasium
-pytest                      # 60 tests, all CPU, ~15 s
+pytest                      # 70 tests, all CPU, ~40 s
 ```
 
 Then ask Adam for a **sample scene pack** (a zipped scene directory with
@@ -62,9 +62,9 @@ These are measurable: `scripts/audit_scene.py` prints the numbers, and
 | T8 | M | **Non-rectangular rooms** (`PIPE-8`). Fit several vertical planes in the aligned XZ plane (sequential RANSAC on wall points), build the shell as an extruded polygon, keep the box as fallback. Synthetic L-shaped room test in `tests/`. | L-shaped synthetic room recovered within 5 cm; no regression on the six validation scenes. |
 | T9 | M | **Doors and windows** (`PIPE-9`). Masks for "door"/"window" already come out of SAM 3 if prompted (needs a GPU run by someone else — ask for masks). Cut openings into shell quads, export them as named nodes. | `room.glb` has `room_door_*` / `room_window_*` nodes; RoomBuilder can read a door position. |
 | T10 | M | **Better hidden-area fill** (`PIPE-10`). `room_texture.fill_hidden` tiles the largest visible rectangle. Try exemplar-based synthesis or LaMa (runs on CPU for 512² textures) and compare on the validation scenes. | Side-by-side renders in the PR; no visible mirrored-tile pattern on the bathroom floor. |
-| T11 | M | **Relief clean-up.** The relief mesh (`room_texture.build_relief`) is raw point-map triangles. Fit planes to its connected components and snap vertices that are within tolerance (counters become flat, cabinet fronts vertical); optionally extrude counter tops down to the floor so they have sides. | Kitchen counter top is planar to < 5 mm in the relief; renders attached. |
+| T11 | M | **Built-ins clean-up.** `src/builtin_boxes.py` now puts solid boxes behind the relief. Remaining: snap the relief's vertices to those planes (counters flat, fronts vertical), merge the boxes of one cabinet run, give box sides the front's material instead of a flat colour. | Kitchen counter top is planar to < 5 mm in the relief; side views of the cabinet run look like cabinets; renders attached. |
 | T12 | S | **Yaw snapping for large furniture.** Sofas, beds and cabinets are almost always parallel to a wall. Snap an object's heading to the room axes when it is within ~10° and the silhouette IoU does not drop (the guard already exists in `placement.py`). | Unit test + audit numbers unchanged or better. |
-| T13 | M | **Instance sharing.** In a classroom, SAM 3D reconstructs eight slightly different chairs, some from a sliver of visible chair. Detect same-label objects with similar size and replace poorly-observed ones (small mask, low IoU) by a copy of the best one, re-posed to fit the mask. | Classroom scene: partial chairs replaced; file size down. |
+| T13 | M | **Instance sharing, second half.** `pose_fit.share_instances` replaces fragments and look-alike repeats, but conservatively (3 of 11 classroom chairs). Improve the same-model test (a DINO/CLIP embedding of the mask crop instead of hue + 16×16 correlation), and write shared meshes once in the GLB (glTF instancing). | More chairs shared with no false merges on the library's picture frames; lite GLB smaller. |
 | T14 | S | **Audit report as HTML.** One page per scene: photo, overlay, renders, per-object table, layout notes. Makes reviewing a pipeline change a click. | `scripts/audit_scene.py --html` writes it. |
 
 ## 3. Robotics and DCC integrations

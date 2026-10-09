@@ -212,6 +212,23 @@ The result must contain `sam3d_objects_repo/checkpoints/hf/pipeline.yaml` —
 that's the path `src/reconstruction_3d.py` loads. MoGe (`Ruicheng/moge-vitl`)
 is fetched automatically by SAM 3D on first run.
 
+### 4b. Optional: metric scale (MoGe-2)
+
+Without this, scenes are converted to metres by assuming the camera was
+1.5 m above the floor. With it, a metric depth model measures the scale.
+MoGe-2 needs a newer `moge` package than SAM 3D pins, so it goes in its own
+folder and is only ever imported by one script in a subprocess:
+
+```bash
+pip install --no-deps --target third_party/moge2 "git+https://github.com/microsoft/MoGe.git"
+pip install --no-deps --target third_party/moge2 \
+    "git+https://github.com/EasternJournalist/utils3d-moge.git@62f09d58509485564e24d5d9f6aac9ee9ebc0c37"
+python scripts/estimate_metric_scale.py outputs/<scene>     # also runs automatically after stage 3
+```
+
+The weights (~1.3 GB) download from Hugging Face on first use; check their
+licence on the model card before commercial use.
+
 ### 5. Configure `.env`
 
 Create `.env` in the project root (it's gitignored — never commit your key):
@@ -336,6 +353,8 @@ python scripts/audit_scene.py outputs/scene_a                    # score placeme
 python scripts/render_scene.py outputs/scene_a                   # headless contact sheet: photo view, orbit, top, side
 python -m src.scene_export outputs/scene_a --lite                # decimated GLB with baked textures
 python -m src.mujoco_export outputs/scene_a --stabilize --check  # MuJoCo model (see integrations/mujoco)
+python scripts/estimate_metric_scale.py outputs/scene_a          # metres per scene unit from MoGe-2, then replay
+python scripts/make_gallery.py outputs/run_b --before outputs/run_a   # before/after page for two runs
 python main.py --image photo.jpg --resume                        # reuse detection + masks already in the scene dir
 python scripts/bench_detectors.py --live demo_day --save bench.json        # same, live against the VLM server
 ```
@@ -384,9 +403,9 @@ outputs/<scene>/
 ├── masks/                         # stage 2: mask PNGs (+ structural_floor/wall/ceiling.png)
 ├── reconstruction_results.json    # objects (pose, support, fit to the photo), removed/failed with reasons, timings, peak VRAM
 ├── 3d_models/
-│   ├── stage3/                    # SAM 3D's raw output: model-space meshes, raw.json poses, pointmap.npz (replay input)
+│   ├── stage3/                    # SAM 3D's raw output: model-space meshes, raw.json poses, pointmap.npz, metric_scale.json
 │   ├── <id>_<label>.ply           # one world-space mesh per object instance (vertex colours)
-│   ├── room.glb                   # textured floor/walls/ceiling quads + photo relief of built-ins (named nodes)
+│   ├── room.glb                   # textured floor/walls/ceiling + photo relief + solid built-in boxes (named nodes)
 │   ├── room.ply                   # the same shell as vertex colours (fallback for PLY-only consumers)
 │   ├── layout.json                # floor, gravity, yaw, ceiling, wall evidence, scale estimate, placement diagnostics
 │   ├── scene_pointmap.npz         # MoGe scene points (aligned frame) for debugging / viewers
@@ -399,8 +418,9 @@ outputs/<scene>/
 ```
 
 Coordinates are **scale-invariant** (consistent within a scene, not across
-scenes). `layout.json → estimated_metric_scale` is a prior-based factor to
-metres (camera at ~1.5 m); proper metric scale is roadmap item `PIPE-6`.
+scenes). `layout.json → estimated_metric_scale` converts to metres: measured
+by MoGe-2 when §4b is installed, otherwise a camera-height prior
+(`metric_scale_source` says which).
 `viewer.html` loads Three.js from a CDN, so viewing needs network access
 (not the GPU).
 
@@ -486,8 +506,10 @@ src/
   stage3_cache.py           what stage 3 leaves behind so stage 4 can be replayed on a CPU
   scene_assembly.py         stage 4:  layout → placement → room → exports, from the cache
   room_layout.py            stage 4a: floor, gravity, yaw, walls, ceiling from the point map
-  placement.py              stage 4b: depth refit, contact support, IoU-checked moves, duplicate removal
-  room_texture.py           stage 4c: textured shell quads + photo relief of built-ins
+  placement.py              stage 4b: depth refit, contact support, settling, walls, visibility, duplicates
+  pose_fit.py               stage 4b: silhouette pose search and instance sharing
+  room_texture.py           stage 4c: textured shell quads (unseen parts predicted) + photo relief
+  builtin_boxes.py          stage 4c: solid boxes for counters/cabinets behind the relief
   room_generator.py         legacy box/label placement (fallback when there is no point map)
   mesh_bake.py              decimation + vertex-colour → texture baking (scene_lite.glb)
   mujoco_export.py          MuJoCo / MJX model export with a stability check
@@ -509,6 +531,8 @@ scripts/
   bench_detectors.py        local-VLM recall benchmark vs Gemini
   replay_layout.py          layout stage only (CPU MoGe) for fast tuning
   plot_scene.py             plan-view diagnostic PNG of a finished scene
+  estimate_metric_scale.py  metres per scene unit from MoGe-2 (isolated install)
+  make_gallery.py           before/after HTML page for two runs of the same photos
   replay_assembly.py        re-run stage 4 on a finished scene (CPU, seconds)
   audit_scene.py            score placement against the photo's masks and point map
   render_scene.py           headless contact-sheet renders (pyrender + EGL)

@@ -203,7 +203,11 @@ class SAM3DReconstructor:
         output_path.mkdir(parents=True, exist_ok=True)
         stage3_cache.cache_dir(output_path).mkdir(parents=True, exist_ok=True)
         print(f"\nLoading image: {image_path}")
-        image = load_image(str(image_path))          # HxWx3 uint8 (RGB)
+        image = load_image(str(image_path))          # HxWx3 uint8 (RGB) for ordinary photos
+        # Greyscale, palette and RGBA files come back with another shape and
+        # every object then fails inside SAM 3D; normalise once here.
+        if image.ndim != 3 or image.shape[2] != 3:
+            image = np.asarray(Image.open(image_path).convert("RGB"))
         H, W = image.shape[:2]
 
         use_shared = os.environ.get("WORLDBUILDER_SHARED_POINTMAP", "1") != "0"
