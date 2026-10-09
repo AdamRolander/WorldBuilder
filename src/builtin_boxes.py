@@ -58,7 +58,7 @@ def find_faces(points: np.ndarray, keep: np.ndarray, layout: rl.RoomLayout,
     for axis in range(3):
         others = [a for a in range(3) if a != axis]
         for sign in (+1, -1):
-            sel = keep & (N[..., axis] * sign > 0.85)
+            sel = keep & (N[..., axis] * sign > 0.94)        # within 20°: a sloped ceiling is not a soffit
             if int(sel.sum()) < min_px:
                 continue
             c = points[..., axis]

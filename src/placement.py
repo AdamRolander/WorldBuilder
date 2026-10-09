@@ -822,6 +822,8 @@ def place_objects(results: List[Dict], model_verts: Dict[int, np.ndarray], ev: S
         m = ev.masks.get(o.id)
         if m is None or pose_fit.fit_score(ev, o.fast_verts, m) >= 0.5:
             continue
+        if (o.r.get('fit_iou_raw') or 0.0) < min_fit_iou:
+            continue        # a mesh that misses its mask entirely is a failed reconstruction, not a pose to tune
         gain = pose_fit.refine_pose(ev, o)
         if gain is not None:
             refined[o.id] = round(gain, 3)
