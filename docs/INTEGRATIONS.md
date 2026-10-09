@@ -126,6 +126,46 @@ Nuances:
 
 ---
 
+## Status after the October 2026 pass
+
+* **Blender**: `blender --command extension validate` passes;
+  `blender --command extension build --source-dir integrations/blender_worldbuilder`
+  produces the installable zip. `scripts/test_blender_addon.py` runs the
+  whole flow inside `blender --background` (register → upload → poll →
+  download → import → render) and passed on Blender 5.0.1 (VALIDATION
+  §4.4). New in add-on 0.2.0: lite GLB by default (tens of MB, baked
+  textures), "Import existing scene", metric-scale checkbox, every room
+  surface and the relief as separate named objects under one scene empty.
+  Not yet exercised: the UI panel by a human, and Blender 4.2 LTS.
+* **Unreal**: unchanged scaffold, untested. When you try it, import
+  `GET /api/scenes/<id>/glb?lite=1` rather than the full GLB: the lite file
+  has ordinary textured materials, which Interchange imports without the
+  vertex-colour material the full file needs (`DCC-6`).
+* **MuJoCo / MJX**: new, see `integrations/mujoco/README.md`.
+* **Server endpoints for clients**: `GET /api/scenes` (newest first),
+  `GET /api/scenes/<id>/glb?lite=1`, `GET /api/scenes/<id>/mujoco[?mjx=1]`.
+
+### Testing the Blender add-on this weekend (10 minutes)
+
+```bash
+# terminal 1 (worldbuilder-vlm env), only for the local detector
+python vlm_server/server.py
+# terminal 2 (worldbuilder-main env)
+python -m webapp.server
+# terminal 3: automated check first
+blender --background --python scripts/test_blender_addon.py -- \
+    --scene <an existing scene id> --render /tmp/wb.png        # no GPU work, ~5 s
+# then by hand: build and install the extension
+blender --command extension build --source-dir integrations/blender_worldbuilder --output-dir /tmp
+#   Blender > Edit > Preferences > Get Extensions > ▾ > Install from Disk… > /tmp/worldbuilder-0.2.0.zip
+#   3D Viewport > N > WorldBuilder > "Import existing scene" (leave the id empty for the newest)
+#   then "Generate scene from photo"
+```
+
+The server reads scenes from `outputs/` directly under the project root
+(`WORLDBUILDER_OUTPUTS` overrides); scenes in sub-folders such as
+`outputs/10-08-validation/` are not listed unless you point it there.
+
 ## Roadmap items (see ROADMAP.md)
 
 * DCC-1 Test the Blender add-on end to end (needs Blender on a machine that can reach the server).
