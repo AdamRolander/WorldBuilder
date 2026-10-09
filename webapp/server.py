@@ -13,7 +13,9 @@ Exposes:
     POST /api/upload                accept image, queue pipeline job, return job_id
     GET  /api/jobs/<job_id>         job state (stage 1-5, status, scene_id)
     GET  /api/scenes/<scene>        scene manifest (objects, layout, files)
-    GET  /api/scenes/<scene>/glb    the scene as one GLB (for Blender/Unreal/web)
+    GET  /api/scenes                finished scenes, newest first
+    GET  /api/scenes/<scene>/glb    the scene as one GLB (?lite=1: decimated + baked textures)
+    GET  /api/scenes/<scene>/mujoco zip with a MuJoCo MJCF model of the scene
     GET  /outputs/<scene>/...       static access to reconstruction outputs
 
 Single in-process worker: only one pipeline job runs at a time (the GPU
@@ -244,23 +246,71 @@ def scene_manifest(scene_id):
                     "metadata": data.get("metadata", {}), "layout": layout,
                     "viewer": f"/outputs/{scene_id}/viewer.html",
                     "glb": f"/api/scenes/{scene_id}/glb" if (d / "scene.glb").exists() else None,
+                    "glb_lite": f"/api/scenes/{scene_id}/glb?lite=1",
+                    "mujoco": f"/api/scenes/{scene_id}/mujoco",
                     "room": f"/outputs/{scene_id}/3d_models/room.ply" if (d / "3d_models" / "room.ply").exists() else None})
+
+
+@app.route("/api/scenes")
+def list_scenes():
+    """Every finished scene, newest first (the DCC clients' "import existing" list)."""
+    scenes = []
+    for d in OUTPUTS_DIR.iterdir():
+        rec = d / "reconstruction_results.json"
+        if d.is_dir() and rec.exists():
+            scenes.append({"scene_id": d.name, "modified": rec.stat().st_mtime,
+                           "has_lite": (d / "scene_lite.glb").exists()})
+    scenes.sort(key=lambda s: -s["modified"])
+    return jsonify({"scenes": scenes})
 
 
 @app.route("/api/scenes/<scene_id>/glb")
 def scene_glb(scene_id):
+    """The scene as one GLB. ``?lite=1`` returns the decimated version with
+    baked textures (tens of MB instead of hundreds), which is what DCC tools
+    and game engines should import by default."""
     d = _safe_child(OUTPUTS_DIR, scene_id)
-    glb = d / "scene.glb"
-    if not glb.exists():
-        # Build it on demand from the baked PLYs (fast, CPU only).
+    lite = request.args.get("lite", "0").lower() in ("1", "true", "yes")
+    name = "scene_lite.glb" if lite else "scene.glb"
+    if not (d / name).exists():
+        # Build it on demand from the baked PLYs (CPU only).
         try:
-            from src.scene_export import export_scene_glb
+            from src.scene_export import export_scene_glb, export_scene_lite
             data = json.loads((d / "reconstruction_results.json").read_text())
-            export_scene_glb(d, data["objects"])
+            (export_scene_lite if lite else export_scene_glb)(d, data["objects"])
         except Exception as e:
             return jsonify({"error": f"GLB export failed: {e}"}), 500
-    return send_from_directory(d, "scene.glb", as_attachment=True,
-                               download_name=f"{scene_id}.glb", mimetype="model/gltf-binary")
+    return send_from_directory(d, name, as_attachment=True,
+                               download_name=f"{scene_id}{'_lite' if lite else ''}.glb",
+                               mimetype="model/gltf-binary")
+
+
+@app.route("/api/scenes/<scene_id>/mujoco")
+def scene_mujoco(scene_id):
+    """The scene as a MuJoCo model: a zip with ``scene.xml`` and ``assets/``.
+    Query: ``collision=hull|coacd|box``, ``mjx=1``, ``stabilize=0`` to skip
+    welding objects that do not rest."""
+    import shutil
+    d = _safe_child(OUTPUTS_DIR, scene_id)
+    collision = request.args.get("collision", "hull")
+    if collision not in ("hull", "coacd", "box"):
+        return jsonify({"error": "collision must be hull, coacd or box"}), 400
+    mjx = request.args.get("mjx", "0") in ("1", "true")
+    tag = f"mujoco_{'mjx' if mjx else collision}"
+    out = d / tag
+    try:
+        from src.mujoco_export import export_mujoco, export_stable
+        if request.args.get("stabilize", "1") in ("0", "false"):
+            export_mujoco(d, out, collision=collision, mjx=mjx)
+        else:
+            export_stable(d, out, collision=collision, mjx=mjx)
+    except ImportError as e:
+        return jsonify({"error": f"MuJoCo export needs `pip install mujoco` on the server ({e})"}), 501
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": f"MuJoCo export failed: {e}"}), 500
+    shutil.make_archive(str(d / tag), "zip", root_dir=out)
+    return send_from_directory(d, f"{tag}.zip", as_attachment=True, download_name=f"{scene_id}_{tag}.zip")
 
 
 if __name__ == "__main__":

@@ -37,11 +37,27 @@ def _load_world_mesh(ply_path: Path, name: str) -> Optional[trimesh.Trimesh]:
 
 
 def export_scene_glb(output_dir: Path, results: List[Dict], room_file: str = "3d_models/room.ply",
-                     filename: str = "scene.glb", include_room: bool = True) -> Optional[Path]:
-    """Write ``<output_dir>/<filename>``. Returns the path or None if empty."""
+                     filename: str = "scene.glb", include_room: bool = True,
+                     lite_faces: Optional[int] = None) -> Optional[Path]:
+    """Write ``<output_dir>/<filename>``. Returns the path or None if empty.
+
+    With ``lite_faces`` every object is decimated to that triangle budget
+    and its vertex colours are baked into a texture (``src/mesh_bake.py``):
+    the file shrinks by one to two orders of magnitude and is what game
+    engines, simulators and phones should load.
+    """
     output_dir = Path(output_dir)
     scene = trimesh.Scene()
     n = 0
+    scene_extent = None
+    if lite_faces:
+        from src.mesh_bake import lite_mesh, texture_budget
+        lp = output_dir / "3d_models" / "layout.json"
+        try:
+            lj = json.loads(lp.read_text())
+            scene_extent = float(np.max(np.asarray(lj["bounds_max"]) - np.asarray(lj["bounds_min"])))
+        except (OSError, ValueError, KeyError):
+            scene_extent = None
     for r in results:
         p = r.get("ply_path")
         if not p:
@@ -53,14 +69,27 @@ def export_scene_glb(output_dir: Path, results: List[Dict], room_file: str = "3d
         mesh = _load_world_mesh(p, name)
         if mesh is None:
             continue
+        if lite_faces:
+            ext = float(np.max(mesh.extents))
+            lite = lite_mesh(mesh, target_faces=lite_faces, name=name,
+                             tex_size=texture_budget(ext, scene_extent or 4 * ext))
+            lite.metadata.update(mesh.metadata)
+            mesh = lite
         mesh.metadata.update({"label": r.get("label"), "confidence": r.get("confidence"),
-                              "supported_by": r.get("supported_by")})
+                              "supported_by": r.get("supported_by"), "support": r.get("support")})
         scene.add_geometry(mesh, node_name=name, geom_name=name)
         n += 1
     if include_room:
-        room = _load_world_mesh(output_dir / room_file, "room")
-        if room is not None:
-            scene.add_geometry(room, node_name="room", geom_name="room")
+        room_glb = (output_dir / room_file).with_suffix(".glb")
+        if room_glb.exists():
+            # textured shell + relief, one named node per surface
+            rs = trimesh.load(str(room_glb), process=False)
+            for gname, geom in rs.geometry.items():
+                scene.add_geometry(geom, node_name=gname, geom_name=gname)
+        else:
+            room = _load_world_mesh(output_dir / room_file, "room")
+            if room is not None:
+                scene.add_geometry(room, node_name="room", geom_name="room")
     if n == 0 and len(scene.geometry) == 0:
         return None
     meta = {}
@@ -78,9 +107,21 @@ def export_scene_glb(output_dir: Path, results: List[Dict], room_file: str = "3d
     return out
 
 
+LITE_FACES = 8000
+
+
+def export_scene_lite(output_dir: Path, results: List[Dict], faces: int = LITE_FACES) -> Optional[Path]:
+    """``scene_lite.glb``: same scene, decimated objects with baked textures."""
+    return export_scene_glb(output_dir, results, filename="scene_lite.glb", lite_faces=faces)
+
+
 if __name__ == "__main__":
-    for d in sys.argv[1:]:
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    for d in args:
         d = Path(d)
         data = json.loads((d / "reconstruction_results.json").read_text())
         p = export_scene_glb(d, data["objects"])
         print(f"✓ {p}" if p else f"nothing to export in {d}")
+        if "--lite" in sys.argv:
+            p = export_scene_lite(d, data["objects"])
+            print(f"✓ {p} ({p.stat().st_size / 1e6:.1f} MB)" if p else "no lite export")
