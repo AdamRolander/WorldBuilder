@@ -25,7 +25,7 @@ per object in stage 3, 35 s for local detection, 5–13 s for segmentation.
 System RAM: 62 GB on the dev box; the parked models take roughly 30 GB of
 it, so treat 48 GB as the practical minimum and 64 GB as comfortable.
 Disk: ~15 GB of weights plus the Hugging Face cache for the VLM (~18 GB),
-and about 1–1.5 GB per scene with the full-resolution meshes.
+and 0.8–2 GB per scene with the full-resolution meshes.
 
 ## What that means for cards
 

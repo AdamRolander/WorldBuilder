@@ -87,7 +87,7 @@ The dependencies below drive this order more than priority does.
 | CODE-7 | ☐ | Structured logging (JSON lines per stage) instead of prints; the timing CSV becomes a view over it. |
 | CODE-8 | ☐ | Docker image for the server side (CUDA 12.8 base, both envs) — the biggest setup-time reducer for external users. T3. |
 | CODE-9 | ☑ | `scripts/audit_scene.py` (placement scored against masks and point map) and `scripts/render_scene.py` (headless contact sheets): a pipeline change can be judged without opening a viewer. |
-| CODE-10 | ☐ | Scenes are large on disk (stage-3 cache + world PLYs + full GLB ≈ 1 GB for 35 objects). Add `--keep minimal` that drops the full-resolution world PLYs and `scene.glb` once the lite GLB exists, and have the viewer load the lite GLB. |
+| CODE-10 | ☐ | Scenes are large on disk (stage-3 cache + world PLYs + full GLB: 0.8–2.1 GB per scene, 1.6 GB for the 35-object kitchen). Add `--keep minimal` that drops the full-resolution world PLYs and `scene.glb` once the lite GLB exists, and have the viewer load the lite GLB. |
 | CODE-11 | ☐ | `requirements.txt` pins numpy 1.26 but the working env has numpy 2.4; reconcile (the pipeline runs on 2.x). |
 
 ## 3. Publishing — `PUB-*`

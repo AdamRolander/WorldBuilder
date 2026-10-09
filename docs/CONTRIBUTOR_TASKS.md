@@ -23,7 +23,7 @@ pytest                      # 60 tests, all CPU, ~15 s
 ```
 
 Then ask Adam for a **sample scene pack** (a zipped scene directory with
-its `stage3/` cache, masks and the photo; `k1_q` is ~450 MB) and unpack it
+its `stage3/` cache, masks and the photo; the smallest validation scene, `cl5_q`, is ~800 MB until T2 exists) and unpack it
 under `outputs/`. With that you can run the whole back half of the
 pipeline:
 
