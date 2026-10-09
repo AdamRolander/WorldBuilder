@@ -95,7 +95,8 @@ def assemble_from_cache(models_dir: Path, image_rgb: np.ndarray,
         P, valid = pm["points"], pm["valid"]
         aabbs = compute_per_object_aabb(results)
         pairs = [(np.array(b['min']), np.array(b['max'])) for b in aabbs.values()]
-        layout = rl.estimate_layout(P, valid, pairs, structural_masks)
+        layout = rl.estimate_layout(P, valid, pairs, structural_masks,
+                                    metric_scale=stage3_cache.load_metric_scale(models_dir))
         for n in layout.notes:
             log(f"  layout: {n}")
         R = layout.R_total
@@ -150,7 +151,13 @@ def assemble_from_cache(models_dir: Path, image_rgb: np.ndarray,
                             floor_mask=(structural_masks or {}).get("floor"))
         verts = {r["id"]: model_vertices(r) for r in results}
         verts = {k: v for k, v in verts.items() if v is not None}
-        diag = place_objects(results, verts, ev, verbose=verbose)
+        room_info = {"min": list(layout.bounds_min), "max": list(layout.bounds_max),
+                     "sources": dict(layout.wall_sources),
+                     "ceiling_y": layout.ceiling_y if layout.ceiling_source == "geometric" else None}
+        hs, ws = pm["valid"].shape
+        image_small = np.asarray(Image.fromarray(image_rgb).resize((ws, hs), Image.BILINEAR))
+        diag = place_objects(results, verts, ev, verbose=verbose, room=room_info, image_small=image_small,
+                             share=os.environ.get("WORLDBUILDER_SHARE_INSTANCES", "1") != "0")
         diag["structural"] = structural
         failed = failed + [{"id": i, "label": v["label"], "status": f"removed: {v['reason']}"}
                            for i, v in diag.get("removed", {}).items()]
@@ -173,10 +180,11 @@ def assemble_from_cache(models_dir: Path, image_rgb: np.ndarray,
                 if floor_fitted:
                     enforce["y_min"] = "floor"
                     layout.bounds_min[1] = layout.floor_y
-                n_clamped = clamp_to_room(results, aabbs, layout.bounds_min, layout.bounds_max, enforce)
-                if n_clamped:
-                    log(f"  nudged {n_clamped} object(s) back inside detected walls")
-                    bounds = compute_scene_bounds(aabbs)
+                if mode != "evidence":          # evidence placement keeps objects inside itself
+                    n_clamped = clamp_to_room(results, aabbs, layout.bounds_min, layout.bounds_max, enforce)
+                    if n_clamped:
+                        log(f"  nudged {n_clamped} object(s) back inside detected walls")
+                bounds = compute_scene_bounds(aabbs, robust_percentile=0.0)
                 bmin, bmax = list(layout.bounds_min), list(layout.bounds_max)
                 for side, src in layout.wall_sources.items():
                     axis = 0 if side.startswith("x") else 2
@@ -187,7 +195,10 @@ def assemble_from_cache(models_dir: Path, image_rgb: np.ndarray,
                     else:
                         bmax[axis] = max(bmax[axis], bounds['max'][axis] + 0.02)
                 bmin[1] = layout.floor_y if floor_fitted else min(layout.floor_y, bounds['min'][1])
-                bmax[1] = max(layout.ceiling_y, bounds['max'][1] + 0.02)
+                # An observed ceiling is evidence too; only a prior-placed one
+                # moves up to make room for a tall object.
+                bmax[1] = (layout.ceiling_y if layout.ceiling_source == "geometric"
+                           else max(layout.ceiling_y, bounds['max'][1] + 0.02))
                 layout.bounds_min, layout.bounds_max = bmin, bmax
                 from scipy import ndimage
 
@@ -197,6 +208,7 @@ def assemble_from_cache(models_dir: Path, image_rgb: np.ndarray,
                 owner = object_pixels if object_pixels is not None else np.zeros(pm["valid"].shape, np.int32)
                 blocked = ndimage.binary_dilation(owner > 0, iterations=2)
                 room_meshes, stats = rt.build_shell(layout, pm["intrinsics"], image_rgb, depth, blocked)
+                m = room_meshes.get("room_floor")
                 for k, v in stats.items():
                     log(f"  room {k}: {v['visible_fraction']:.0%} seen in the photo, rest {v['fill']}")
                 relief_stats = {}
@@ -207,10 +219,24 @@ def assemble_from_cache(models_dir: Path, image_rgb: np.ndarray,
                         room_meshes["room_relief"] = relief
                         log(f"  relief (built-ins from the point map): {relief_stats['faces']:,} triangles, "
                             f"{relief_stats['frame_fraction']:.0%} of the frame")
+                builtins = []
+                if relief_stats and os.environ.get("WORLDBUILDER_BUILTINS", "1") != "0" \
+                        and getattr(rt.build_relief, "last", None) is not None:
+                    from src.builtin_boxes import build_builtins
+                    P_bg, keep_bg = rt.build_relief.last
+                    density = max(m.visual.material.baseColorTexture.size) / float(
+                        max(np.asarray(layout.bounds_max) - np.asarray(layout.bounds_min))) \
+                        if "room_floor" in room_meshes else None
+                    bi_meshes, builtins = build_builtins(P_bg.astype(np.float64), keep_bg, pm["valid"], layout,
+                                                         pm["intrinsics"], image_rgb, depth, blocked, density)
+                    room_meshes.update(bi_meshes)
+                    if builtins:
+                        log(f"  built-ins: {len(builtins)} solid boxes behind the relief "
+                            f"({sum(1 for b in builtins if b['thin'])} thinned to slabs)")
                 rt.export_room(room_meshes, models_dir / "room.glb")
                 room = rt.shell_vertex_color_mesh(room_meshes)
                 rl.save_layout(layout, models_dir / "layout.json",
-                               extra={"plane_texture_stats": stats, "relief": relief_stats,
+                               extra={"plane_texture_stats": stats, "relief": relief_stats, "builtins": builtins,
                                       "assembly": _jsonable(diag)})
             except Exception as e:
                 import traceback
@@ -244,7 +270,8 @@ def export_world(results: List[Dict], models_dir: Path, verbose: bool = True):
         if not src or not Path(src).exists():
             continue
         m = world_mesh(r)
-        out = models_dir / Path(src).name
+        # named by instance, not by mesh: shared instances reuse one model file
+        out = models_dir / f"{int(r['id']):03d}_{str(r['label']).replace(' ', '_').replace('/', '_')}.ply"
         m.export(str(out), file_type='ply')
         r['ply_path'] = str(out)
         r['ply_space'] = 'world'

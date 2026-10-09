@@ -78,11 +78,12 @@ def render_views(scene: Path, views, size=640, include_room=True):
     lo, hi = np.full(3, np.inf), np.full(3, -np.inf)
     for name, m in meshes:
         is_room = name.startswith("room")
+        is_shell = is_room and not (name.startswith("room_relief") or name.startswith("room_builtin"))
         pm = pyrender.Mesh.from_trimesh(m, smooth=True)
         for prim in pm.primitives:
             # Room faces point inward and are culled from behind, so outside
             # views look through the near walls; objects are never culled.
-            prim.material.doubleSided = not is_room
+            prim.material.doubleSided = not is_shell
             prim.material.metallicFactor = 0.0
             prim.material.roughnessFactor = 1.0
         sc.add(pm)

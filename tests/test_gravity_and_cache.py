@@ -66,3 +66,19 @@ def test_stage3_cache_roundtrip(tmp_path):
     assert raw["objects"][0]["model_path"] == str(models / "stage3" / "001_chair.ply")
     assert raw["objects"][0]["mask_path"] == str(tmp_path / "scene" / "masks" / "001_chair_i0.png")
     assert json.loads((models / "stage3" / "raw.json").read_text())["source_image"] == "photo.jpg"
+
+
+def test_metric_scale_file_replaces_the_camera_height_prior(tmp_path):
+    models = tmp_path / "scene" / "3d_models"
+    assert stage3_cache.load_metric_scale(models) is None
+    (models / "stage3").mkdir(parents=True)
+    (models / "stage3" / "metric_scale.json").write_text(json.dumps({"scale": 2.5, "spread": 0.02}))
+    assert stage3_cache.load_metric_scale(models) == 2.5
+    R = rot_x(-15.0)
+    P_cam, colors, depth, P_true, hit = raycast_room(R)
+    valid = np.isfinite(P_cam).all(-1)
+    prior = rl.estimate_layout(P_cam, valid, rng=np.random.default_rng(0))
+    metric = rl.estimate_layout(P_cam, valid, rng=np.random.default_rng(0), metric_scale=2.5)
+    assert prior.metric_scale_source.startswith("camera-height prior")
+    assert metric.estimated_metric_scale == 2.5 and metric.metric_scale_source.startswith("MoGe-2")
+    assert any("metric scale" in n for n in metric.notes)

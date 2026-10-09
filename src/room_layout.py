@@ -79,7 +79,8 @@ class RoomLayout:
     bounds_max: List[float]
     wall_sources: Dict[str, str] = field(default_factory=dict)  # side -> evidence
     camera_height: float = 0.0
-    estimated_metric_scale: float = 1.0      # multiply scene units by this for metres (prior: camera at 1.5 m)
+    estimated_metric_scale: float = 1.0      # multiply scene units by this for metres
+    metric_scale_source: str = "camera-height prior (1.5 m)"
     notes: List[str] = field(default_factory=list)
 
     def to_json(self) -> Dict:
@@ -634,13 +635,16 @@ def estimate_layout(points_world: np.ndarray, valid: np.ndarray,
                     structural_masks: Optional[Dict[str, np.ndarray]] = None,
                     padding_frac: float = 0.05,
                     camera_height_prior_m: float = 1.5,
-                    rng: Optional[np.random.Generator] = None) -> RoomLayout:
+                    rng: Optional[np.random.Generator] = None,
+                    metric_scale: Optional[float] = None) -> RoomLayout:
     """Fit floor, gravity, yaw, walls and ceiling.
 
     ``points_world`` (H,W,3) in SAM 3D's camera-frame world; ``valid`` (H,W).
     ``object_aabbs_world`` are (min, max) pairs in the same frame, used to
     make sure the room contains every object. ``structural_masks`` may hold
-    "floor", "wall", "ceiling" boolean masks from SAM 3.
+    "floor", "wall", "ceiling" boolean masks from SAM 3. ``metric_scale``
+    (metres per scene unit, e.g. from ``scripts/estimate_metric_scale.py``)
+    replaces the camera-height prior.
     """
     structural_masks = structural_masks or {}
     notes: List[str] = []
@@ -713,7 +717,13 @@ def estimate_layout(points_world: np.ndarray, valid: np.ndarray,
     else:
         floor_y = -float(floor.offset)          # camera at origin, normal is +Y after G
     camera_height = -floor_y
-    metric_scale = camera_height_prior_m / camera_height if camera_height > 1e-6 else 1.0
+    scale_source = "camera-height prior (1.5 m)"
+    if metric_scale is not None and metric_scale > 0:
+        scale_source = "MoGe-2 metric point map"
+        notes.append(f"metric scale ×{metric_scale:.3f} from MoGe-2 (camera {camera_height * metric_scale:.2f} m "
+                     f"above the floor)")
+    else:
+        metric_scale = camera_height_prior_m / camera_height if camera_height > 1e-6 else 1.0
 
     # Object bounds in the aligned frame.
     obj_min = np.full(3, np.inf); obj_max = np.full(3, -np.inf)
@@ -771,7 +781,8 @@ def estimate_layout(points_world: np.ndarray, valid: np.ndarray,
         gravity_rotation=G.tolist(), yaw_deg=float(yaw), floor=floor, floor_y=floor_y,
         ceiling_y=float(ceil_y), ceiling_source=ceil_src,
         bounds_min=bmin.tolist(), bounds_max=bmax.tolist(), wall_sources=sources,
-        camera_height=float(camera_height), estimated_metric_scale=float(metric_scale), notes=notes,
+        camera_height=float(camera_height), estimated_metric_scale=float(metric_scale),
+        metric_scale_source=scale_source, notes=notes,
     )
     return layout
 

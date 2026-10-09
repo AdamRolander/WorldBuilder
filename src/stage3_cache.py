@@ -10,6 +10,8 @@ five-minute GPU run. Stage 3 now writes, under ``3d_models/stage3/``:
 * ``raw.json``          the untouched pose per object (camera frame) + failures
 * ``pointmap.npz``      the scene point map (camera-frame world), validity
                         mask and normalised intrinsics, at ≤ ``MAX_SIDE`` px
+* ``metric_scale.json`` optional: metres per scene unit from MoGe-2
+                        (``scripts/estimate_metric_scale.py``)
 
 ``src/scene_assembly.py`` consumes only this directory, the photo and the
 masks; ``scripts/replay_assembly.py`` reruns it on any finished scene.
@@ -57,6 +59,19 @@ def load_pointmap(models_dir: Path) -> Optional[Dict]:
     z = np.load(path)
     return {"points": z["points"].astype(np.float64), "valid": z["valid"].astype(bool),
             "intrinsics": z["intrinsics"], "image_hw": tuple(int(x) for x in z["image_hw"])}
+
+
+def load_metric_scale(models_dir: Path) -> Optional[float]:
+    """Metres per scene unit from ``metric_scale.json`` (written by
+    ``scripts/estimate_metric_scale.py``), or None."""
+    path = cache_dir(models_dir) / "metric_scale.json"
+    if not path.exists():
+        return None
+    try:
+        s = float(json.loads(path.read_text())["scale"])
+    except (ValueError, KeyError, TypeError):
+        return None
+    return s if s > 0 else None
 
 
 def save_raw(models_dir: Path, results: List[Dict], failed: List[Dict], source_image: str) -> Path:

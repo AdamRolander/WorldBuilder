@@ -52,7 +52,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
       <option value="hidden">hidden</option>
     </select>
   </label>
-  <label><input type="checkbox" id="toggle-relief" checked> Built-ins (photo relief)</label>
+  <label><input type="checkbox" id="toggle-relief" checked> Built-ins (relief + boxes)</label>
   <label><input type="checkbox" id="toggle-points"> Photo point cloud</label>
   <div id="object-list"></div>
   <div class="meta" id="meta"></div>
@@ -113,7 +113,7 @@ dir.position.set(5, 10, 5); scene.add(dir);
 const meshes = {};
 const bbox = new THREE.Box3();
 let roomMesh = null;      // THREE.Mesh (vertex-coloured PLY) or THREE.Group (textured GLB)
-let reliefMesh = null;
+const reliefMeshes = [];
 
 // Textured room: one node per surface plus the photo relief of built-ins.
 function loadRoomGLB(url, done) {
@@ -121,13 +121,14 @@ function loadRoomGLB(url, done) {
     const group = gltf.scene;
     group.traverse(o => {
       if (!o.isMesh) return;
-      const isRelief = o.name.startsWith('room_relief') || (o.parent && o.parent.name.startsWith('room_relief'));
+      const nm = o.name + ' ' + (o.parent ? o.parent.name : '');
+      const isRelief = nm.includes('room_relief') || nm.includes('room_builtin');
       const map = o.material.map || null;
       if (map) { map.anisotropy = renderer.capabilities.getMaxAnisotropy(); }
       o.material = new THREE.MeshBasicMaterial({ map, color: 0xffffff, transparent: true, opacity: 1.0,
                                                  side: isRelief ? THREE.DoubleSide : THREE.FrontSide });
       o.renderOrder = -1;
-      if (isRelief) reliefMesh = o;
+      if (isRelief) reliefMeshes.push(o);
     });
     roomMesh = group;
     scene.add(group);
@@ -183,7 +184,7 @@ function onLoad() {
   document.getElementById('count').textContent = OBJECTS.length;
   let meta = `Objects extent: ${s.x.toFixed(2)} × ${s.y.toFixed(2)} × ${s.z.toFixed(2)}`;
   if (LAYOUT) {
-    if (LAYOUT.estimated_metric_scale) meta += `\nEst. scale: ×${LAYOUT.estimated_metric_scale.toFixed(2)} → metres (camera-height prior)`;
+    if (LAYOUT.estimated_metric_scale) meta += `\nScale: ×${LAYOUT.estimated_metric_scale.toFixed(2)} → metres (${LAYOUT.metric_scale_source || 'camera-height prior'})`;
     if (LAYOUT.ceiling_source) meta += `\nCeiling: ${LAYOUT.ceiling_source}; floor: ${LAYOUT.floor ? LAYOUT.floor.source : '?'}`;
     if (LAYOUT.wall_sources) meta += `\nWalls: ` + Object.entries(LAYOUT.wall_sources).map(([k,v]) => `${k}=${v}`).join(', ');
   }
@@ -226,7 +227,7 @@ document.getElementById('toggle-points').addEventListener('change', async e => {
 
 document.getElementById('room-mode').addEventListener('change', e => setRoomMode(e.target.value));
 document.getElementById('toggle-relief').addEventListener('change', e => {
-  if (reliefMesh) reliefMesh.visible = e.target.checked;
+  reliefMeshes.forEach(m => m.visible = e.target.checked);
 });
 document.getElementById('info').addEventListener('change', e => {
   if (e.target.tagName !== 'INPUT' || !e.target.dataset.t) return;

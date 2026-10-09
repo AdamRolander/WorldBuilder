@@ -79,13 +79,25 @@ def room_planes(layout: rl.RoomLayout, include_ceiling: bool = True,
 
 def project_plane_texture(plane: Dict, R_total: np.ndarray, K: np.ndarray, image_rgb: np.ndarray,
                           depth: np.ndarray, blocked: Optional[np.ndarray] = None,
-                          long_side: int = 1024, depth_tol: float = 0.06) -> Tuple[np.ndarray, np.ndarray]:
+                          long_side: int = 1024, depth_tol: float = 0.06,
+                          keep_flush: bool = False, return_quality: bool = False):
     """Rectified view of one plane. Returns ``(texture (th,tw,3) uint8,
     visible (th,tw) bool)``; row 0 is the plane's far edge along ``av`` so
     that trimesh/OpenGL UVs (v up) map ``v = t / sv``.
 
     ``depth`` is the camera-z map (any resolution, nan = unknown) and
-    ``blocked`` a same-size mask of pixels that belong to objects.
+    ``blocked`` a same-size mask of pixels that belong to objects. With
+    ``keep_flush`` an object pixel whose observed point lies *in* the plane
+    (within 1.5 % of its depth) is kept: tiles, panelling or a poster that
+    the detector listed as objects are the wall's surface, and without them
+    the wall would be painted with some other wall's colour. Used for walls
+    and ceilings; on the floor a flush object is a rug, which moves.
+
+    With ``return_quality`` two more arrays are returned: per texel, how
+    many photo pixels it spans in its worst direction (small = stretched,
+    blurry), and ``clean`` — seen and not part of any object, flush or not.
+    A flush mirror belongs on the wall where it was seen, but the wall's
+    material must be learned from texels that are only wall.
     """
     import cv2
     Hi, Wi = image_rgb.shape[:2]
@@ -108,11 +120,26 @@ def project_plane_texture(plane: Dict, R_total: np.ndarray, K: np.ndarray, image
         # the plane was actually observed, not placed by a prior.
         beyond = (z_obs > z * (1 + depth_tol)) if plane.get("evidence") else np.zeros_like(on_surface)
     visible = inside & np.isfinite(z_obs) & (on_surface | beyond)
+    clean = visible.copy()                   # seen *and* not part of any object
     if blocked is not None:
-        visible &= ~blocked[vi, ui]
+        blk = blocked[vi, ui]
+        clean &= ~blk
+        if keep_flush:
+            with np.errstate(invalid="ignore"):
+                blk = blk & ~(np.abs(z - z_obs) <= 0.015 * z_obs)
+        visible &= ~blk
     tex = cv2.remap(image_rgb, (u - 0.5).astype(np.float32), (v - 0.5).astype(np.float32),
                     cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
-    return tex, visible
+    if not return_quality:
+        return tex, visible
+    # Smallest singular value of d(photo pixel)/d(texel).
+    un, vn = np.nan_to_num(u), np.nan_to_num(v)
+    a, b = np.gradient(un, axis=1), np.gradient(un, axis=0)
+    c, d = np.gradient(vn, axis=1), np.gradient(vn, axis=0)
+    S = a * a + b * b + c * c + d * d
+    D = a * d - b * c
+    quality = np.sqrt(np.maximum(0.0, 0.5 * (S - np.sqrt(np.maximum(0.0, S * S - 4.0 * D * D)))))
+    return tex, visible, np.where(visible, quality, 0.0), clean
 
 
 def largest_rectangle(mask: np.ndarray) -> Tuple[int, int, int, int]:
@@ -138,44 +165,174 @@ def largest_rectangle(mask: np.ndarray) -> Tuple[int, int, int, int]:
     return best
 
 
-def fill_hidden(tex: np.ndarray, visible: np.ndarray, fallback_rgb=(200, 200, 200),
-                min_patch_frac: float = 0.02, max_lowfreq_std: float = 22.0) -> Tuple[np.ndarray, str]:
-    """Complete a plane texture. Returns ``(texture, how)`` with ``how`` in
-    {"complete", "tiled", "median", "fallback"}."""
+def _coarse_rectangle(mask: np.ndarray) -> Tuple[int, int, int, int]:
+    """``largest_rectangle`` on a ≤160-cell grid, in full-resolution indices."""
+    th, tw = mask.shape
+    k = max(1, int(np.ceil(max(th, tw) / 160)))
+    hs, ws = th // k, tw // k
+    if hs < 2 or ws < 2:
+        return (0, 0, 0, 0)
+    coarse = mask[:hs * k, :ws * k].reshape(hs, k, ws, k).all(axis=(1, 3))
+    r0, c0, r1, c1 = largest_rectangle(coarse)
+    return r0 * k, c0 * k, r1 * k, c1 * k
+
+
+def _texture_like(patch: np.ndarray, rows: bool, max_residual: float = 18.0) -> bool:
+    """No large-scale structure once smooth shading is discounted.
+
+    The patch is reduced to an 8×8 grid (8 columns per row band in ``rows``
+    mode, after removing each row's own colour) and a linear ramp is fitted
+    and removed: a lighting gradient passes, half a window or a whiteboard
+    edge does not, and would otherwise be stamped across the surface.
+    """
     import cv2
+    p = patch.astype(np.float32)
+    if rows:
+        p = p - np.median(p, axis=1, keepdims=True)
+    small = cv2.resize(p, (8, 8), interpolation=cv2.INTER_AREA).reshape(64, 3)
+    yy, xx = np.mgrid[:8, :8]
+    A = np.stack([xx.ravel(), yy.ravel(), np.ones(64)], 1).astype(np.float32)
+    coef, *_ = np.linalg.lstsq(A, small, rcond=None)
+    return float((small - A @ coef).std(axis=0).max()) <= max_residual
+
+
+def _detrend(patch: np.ndarray, rows: bool) -> np.ndarray:
+    """Detail of a patch on a flat base, so that tiling it repeats the
+    material but not the lighting (mirrored shadows read as blobs). In
+    ``rows`` mode the base keeps one colour per row, which preserves a
+    wall's vertical make-up (skirting, panelling, paper)."""
+    import cv2
+    p = patch.astype(np.float32)
+    h, w = p.shape[:2]
+    if rows:
+        k = max(3, (w // 2) | 1)
+        low = cv2.blur(p, (k, 1), borderType=cv2.BORDER_REFLECT)
+        base = np.median(p, axis=1, keepdims=True)
+    else:
+        k = max(3, (min(h, w) // 2) | 1)
+        low = cv2.blur(p, (k, k), borderType=cv2.BORDER_REFLECT)
+        base = np.median(p.reshape(-1, 3), axis=0)[None, None, :]
+    return p - low + base
+
+
+def synthesize_fill(tex: np.ndarray, visible: np.ndarray, rows: bool = False,
+                    max_bands: int = 4) -> Tuple[Optional[np.ndarray], str]:
+    """Predict a whole surface from the part of it that was seen.
+
+    ``rows=False`` (floors, ceilings): the material is the same in every
+    direction, so the largest visible rectangle is tiled with mirror
+    symmetry over the plane.
+
+    ``rows=True`` (walls): a wall is the same *along* its length but layered
+    over its height. Each row takes the median colour seen at that height,
+    and up to ``max_bands`` visible rectangles of that material add their
+    detail, tiled sideways only.
+
+    Returns ``(fill float32 (th,tw,3) or None, how)`` with ``how`` in
+    {"tiled", "banded", "none"}.
+    """
+    th, tw = visible.shape
+    if not rows:
+        r0, c0, r1, c1 = _coarse_rectangle(visible)
+        if (r1 - r0) * (c1 - c0) < 0.01 * th * tw or min(r1 - r0, c1 - c0) < 8:
+            return None, "none"
+        patch = tex[r0:r1, c0:c1]
+        if not _texture_like(patch, rows=False):
+            return None, "none"
+        fill = np.pad(_detrend(patch, rows=False), ((r0, th - r1), (c0, tw - c1), (0, 0)), mode="symmetric")
+        return fill.astype(np.float32), "tiled"
+
+    # Colour per row: the median of what was seen in that row, so the
+    # material that covers most of the wall at that height wins (a cream
+    # panel beside a window does not repaint the papered wall above it).
+    need = max(8, int(0.02 * tw))
+    counts = visible.sum(axis=1)
+    rows_ok = np.flatnonzero(counts >= need)
+    if not len(rows_ok):
+        return None, "none"
+    base = np.zeros((th, 3), np.float32)
+    for r in rows_ok:
+        base[r] = np.median(tex[r, visible[r]].astype(np.float32), axis=0)
+    missing = np.setdiff1d(np.arange(th), rows_ok)
+    if len(missing):
+        base[missing] = base[rows_ok[np.argmin(np.abs(rows_ok[None, :] - missing[:, None]), axis=1)]]
+    # Detail on top: visible rectangles of that same material, tiled sideways.
+    detail = np.zeros((th, tw, 3), np.float32)
+    free = np.ones(th, bool)
+    textured = False
+    # ...looked for only among texels that *are* that row's dominant colour
+    major = visible & (np.abs(tex.astype(np.float32) - base[:, None, :]).mean(axis=-1) < 30.0)
+    for _ in range(max_bands):
+        r0, c0, r1, c1 = _coarse_rectangle(major & free[:, None])
+        if (r1 - r0) < max(4, 0.03 * th) or (c1 - c0) < max(8, 0.05 * tw):
+            break
+        free[r0:r1] = False
+        patch = tex[r0:r1, c0:c1]
+        row_col = np.median(patch.astype(np.float32), axis=1)
+        if float(np.abs(row_col - base[r0:r1]).mean()) > 20.0 or not _texture_like(patch, rows=True):
+            continue                          # another material, or not a material at all
+        d = _detrend(patch, rows=True) - row_col[:, None, :]
+        detail[r0:r1] = np.pad(d, ((0, 0), (c0, tw - c1), (0, 0)), mode="symmetric")
+        textured = True
+    return base[:, None, :] + detail, "tiled" if textured else "banded"
+
+
+def fill_hidden(tex: np.ndarray, visible: np.ndarray, fallback_rgb=(200, 200, 200), rows: bool = False,
+                quality: Optional[np.ndarray] = None, donor: Optional[np.ndarray] = None,
+                return_fill: bool = False, source: Optional[np.ndarray] = None):
+    """Complete a plane texture. Returns ``(texture, how)`` (plus the pure
+    synthesized fill when ``return_fill``), ``how`` in {"complete",
+    "tiled", "banded", "donor", "median", "fallback"}.
+
+    ``quality`` (photo pixels per texel, from ``project_plane_texture``):
+    where a surface was seen at a grazing angle the photo holds a fraction
+    of a pixel per texel and the rectified texture is a smear. When the
+    surface can be synthesized, such texels are treated as unseen and
+    predicted from the sharp part instead. ``donor`` is another surface's
+    synthesized fill (same size) to use when this one has too little of its
+    own to learn from. ``source`` restricts which seen texels the material
+    may be learned from (default: all of them).
+    """
     from scipy import ndimage
     th, tw = visible.shape
     frac = float(visible.mean())
-    if frac > 0.999:
-        return tex, "complete"
+
+    def _ret(t, how, fill=None):
+        return (t, how, fill) if return_fill else (t, how)
+
     if frac < 0.005:
-        return np.tile(np.asarray(fallback_rgb, np.uint8), (th, tw, 1)), "fallback"
-    median = np.median(tex[visible], axis=0)
-    fill = np.tile(median, (th, tw, 1)).astype(np.float32)
-    how = "median"
+        if donor is not None:
+            return _ret(np.clip(donor, 0, 255).astype(np.uint8), "donor", donor)
+        flat = np.tile(np.asarray(fallback_rgb, np.float32), (th, tw, 1))
+        return _ret(flat.astype(np.uint8), "fallback", None)
 
-    # Largest visible rectangle, found on a coarse grid for speed.
-    k = max(1, int(np.ceil(max(th, tw) / 160)))
-    hs, ws = th // k, tw // k
-    if hs >= 4 and ws >= 4:
-        coarse = visible[:hs * k, :ws * k].reshape(hs, k, ws, k).all(axis=(1, 3))
-        r0, c0, r1, c1 = largest_rectangle(coarse)
-        r0, c0, r1, c1 = r0 * k, c0 * k, r1 * k, c1 * k
-        if (r1 - r0) * (c1 - c0) >= min_patch_frac * th * tw and min(r1 - r0, c1 - c0) >= 8:
-            patch = tex[r0:r1, c0:c1]
-            # Texture-like means: no large-scale structure. A patch holding a
-            # window or half a whiteboard would stamp it across the wall.
-            small = cv2.resize(patch, (8, 8), interpolation=cv2.INTER_AREA).astype(np.float32)
-            if float(small.std(axis=(0, 1)).max()) <= max_lowfreq_std:
-                fill = np.pad(patch, ((r0, th - r1), (c0, tw - c1), (0, 0)), mode="symmetric").astype(np.float32)
-                how = "tiled"
-
-    # Feather: observed texels fade into the fill over a few percent of the
-    # plane, so there is no hard line where the photo's knowledge ends.
+    sharp = visible
+    if quality is not None and visible.any():
+        ref = float(np.percentile(quality[visible], 90))
+        cand = visible & (quality >= 0.25 * ref)
+        if cand.sum() >= 0.25 * visible.sum():
+            sharp = cand
+    src = visible if source is None else (visible & source)
+    fill, how = synthesize_fill(tex, sharp & src, rows=rows)
+    if fill is None and sharp is not visible:
+        sharp = visible
+        fill, how = synthesize_fill(tex, src, rows=rows)
+    if fill is None:
+        sharp = visible                          # nothing to predict from: keep every seen texel
+        if donor is not None:
+            fill, how = donor.astype(np.float32), "donor"
+        else:
+            fill = np.tile(np.median(tex[visible], axis=0).astype(np.float32), (th, tw, 1))
+            how = "median"
+    pure = fill if how in ("tiled", "banded") else None
+    if frac > 0.999 and sharp is visible:
+        return _ret(tex, "complete", pure)
+    # Feather: observed texels fade into the prediction over a few percent
+    # of the plane, so there is no hard line where the photo's knowledge ends.
     ramp = max(2.0, 0.02 * max(th, tw))
-    alpha = np.clip(ndimage.distance_transform_edt(visible) / ramp, 0, 1)[..., None]
+    alpha = np.clip(ndimage.distance_transform_edt(sharp) / ramp, 0, 1)[..., None]
     out = alpha * tex.astype(np.float32) + (1 - alpha) * fill
-    return np.clip(out, 0, 255).astype(np.uint8), how
+    return _ret(np.clip(out, 0, 255).astype(np.uint8), how, pure)
 
 
 # ---------------------------------------------------------------------------
@@ -198,16 +355,44 @@ def build_shell(layout: rl.RoomLayout, K: np.ndarray, image_rgb: np.ndarray, dep
     R = layout.R_total
     meshes, stats = {}, {}
     planes = room_planes(layout, include_ceiling, include_front_wall)
-    projected = {name: project_plane_texture(pl, R, K, image_rgb, depth, blocked, long_side)
+    projected = {name: project_plane_texture(pl, R, K, image_rgb, depth, blocked, long_side,
+                                             keep_flush=(name != "floor"), return_quality=True)
                  for name, pl in planes.items()}
     # A wall the photo never saw takes the colour of the walls it did see,
     # which beats any hard-coded default.
-    seen_wall = [tex[vis] for name, (tex, vis) in projected.items() if name.startswith("wall") and vis.mean() > 0.02]
+    seen_wall = [tex[clean] for name, (tex, vis, _, clean) in projected.items()
+                 if name.startswith("wall") and clean.mean() > 0.02]
     wall_rgb = tuple(np.median(np.concatenate(seen_wall), axis=0).astype(int)) if seen_wall else FALLBACK_RGB["wall"]
-    for name, pl in planes.items():
+    # First pass: every plane predicts itself from what was seen of it.
+    done = {}
+    for name in planes:
         kind = "wall" if name.startswith("wall") else name
-        tex, vis = projected[name]
-        tex, how = fill_hidden(tex, vis, wall_rgb if kind == "wall" else FALLBACK_RGB[kind])
+        tex, vis, qual, clean = projected[name]
+        done[name] = fill_hidden(tex, vis, wall_rgb if kind == "wall" else FALLBACK_RGB[kind],
+                                 rows=(kind == "wall"), quality=qual, return_fill=True, source=clean)
+    # Second pass: walls of one room are usually finished alike. A wall that
+    # had nothing to learn from borrows the best-seen wall's predicted
+    # make-up (all walls share the floor-to-ceiling axis, so skirting and
+    # panelling line up), tiled along its own length.
+    donors = [(projected[n][1].mean(), n) for n in planes
+              if n.startswith("wall") and done[n][2] is not None]
+    if donors:
+        donor_name = max(donors)[1]
+        dfill = done[donor_name][2]
+        for name in planes:
+            if not name.startswith("wall") or done[name][1] not in ("fallback", "median"):
+                continue
+            tex, vis, qual, clean = projected[name]
+            th, tw = vis.shape
+            scaled = _resize_rows(dfill, th)
+            reps = int(np.ceil(tw / scaled.shape[1]))
+            strip = np.concatenate([scaled if i % 2 == 0 else scaled[:, ::-1] for i in range(reps)], axis=1)[:, :tw]
+            t2, how2, _ = fill_hidden(tex, vis, wall_rgb, rows=True, quality=qual, donor=strip,
+                                      return_fill=True, source=clean)
+            done[name] = (t2, f"like {donor_name}" if how2 == "donor" else how2, None)
+    for name, pl in planes.items():
+        tex, how, _ = done[name]
+        vis = projected[name][1]
         o, au, av, su, sv = pl["o"], pl["au"], pl["av"], pl["su"], pl["sv"]
         verts = np.array([o, o + su * au, o + su * au + sv * av, o + sv * av])
         uv = np.array([[0, 0], [1, 0], [1, 1], [0, 1]], float)
@@ -225,13 +410,21 @@ def build_shell(layout: rl.RoomLayout, K: np.ndarray, image_rgb: np.ndarray, dep
     return meshes, stats
 
 
+def _resize_rows(img: np.ndarray, th: int) -> np.ndarray:
+    """Scale an image to ``th`` rows, keeping its aspect ratio."""
+    import cv2
+    h, w = img.shape[:2]
+    tw = max(2, int(round(w * th / max(h, 1))))
+    return cv2.resize(img.astype(np.float32), (tw, th), interpolation=cv2.INTER_AREA if th < h else cv2.INTER_LINEAR)
+
+
 def shell_vertex_color_mesh(meshes: Dict, cells: int = 128):
     """The shell as one vertex-coloured grid mesh (for PLY consumers),
     sampled from the textures so both representations agree."""
     import trimesh
     V_all, F_all, C_all, off = [], [], [], 0
     for name, m in meshes.items():
-        if name == "room_relief":
+        if name == "room_relief" or name.startswith("room_builtin"):
             continue
         v = np.asarray(m.vertices)
         o, e_u, e_v = v[0], v[1] - v[0], v[3] - v[0]
@@ -317,6 +510,7 @@ def build_relief(points_aligned: np.ndarray, valid: np.ndarray, owner: np.ndarra
         else:
             on_shell |= d < -0.10 * float(max(dims))     # far outside an assumed side
     keep = bg & ~on_shell
+    build_relief.last = (P, keep)             # reused by src/builtin_boxes.py
 
     s = max(1, int(np.ceil(np.sqrt(h * w / max_vertices))))
     ii, jj = np.arange(0, h, s), np.arange(0, w, s)
