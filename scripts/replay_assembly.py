@@ -25,7 +25,7 @@ from src import stage3_cache  # noqa: E402
 from src.scene_assembly import assemble_from_cache, finalize_scene, load_structural_masks  # noqa: E402
 
 
-def replay(scene: Path, placement=None, build_room=True, quiet=False) -> None:
+def replay(scene: Path, placement=None, build_room=True, quiet=False, lite=True) -> None:
     models = scene / "3d_models"
     raw = stage3_cache.load_raw(models)
     if raw is None:
@@ -40,7 +40,7 @@ def replay(scene: Path, placement=None, build_room=True, quiet=False) -> None:
         meta = json.loads(old.read_text()).get("metadata", {})
     meta.update(source_image=raw["source_image"], image_size=[image.shape[1], image.shape[0]],
                 total_objects=len(results), replayed=datetime.now().isoformat(timespec="seconds"))
-    finalize_scene(scene, results, failed, meta, verbose=not quiet)
+    finalize_scene(scene, results, failed, meta, verbose=not quiet, lite=lite)
     print(f"✓ {scene.name}: {len(results)} objects placed in {time.time() - t:.1f}s")
 
 
@@ -50,9 +50,10 @@ def main():
     ap.add_argument("--placement", choices=["evidence", "legacy", "raw"])
     ap.add_argument("--no-room", action="store_true")
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--no-lite", action="store_true", help="skip scene_lite.glb (faster while iterating)")
     a = ap.parse_args()
     for s in a.scene:
-        replay(s, a.placement, not a.no_room, a.quiet)
+        replay(s, a.placement, not a.no_room, a.quiet, not a.no_lite)
 
 
 if __name__ == "__main__":

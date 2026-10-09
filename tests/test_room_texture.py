@@ -1,5 +1,6 @@
 """Tests for the textured shell and relief (src/room_texture.py)."""
 import numpy as np
+import pytest
 
 from src import room_layout as rl
 from src import room_texture as rt
@@ -53,7 +54,7 @@ def test_plane_textures_show_the_true_surface():
     planes = rt.room_planes(layout)
     for name, true_name in (("floor", "floor"), ("wall_z_max", "z_max")):
         pl = planes[name]
-        tex, vis = rt.project_plane_texture(pl, layout.R_total, K, colors, depth, long_side=160)
+        tex, vis = rt.project_plane_texture(pl, layout.R_total, K, colors, depth, long_side=160)[:2]
         assert vis.mean() > 0.3
         th, tw = vis.shape
         rows, cols = np.nonzero(vis)
@@ -78,7 +79,8 @@ def test_shell_meshes_have_uvs_and_face_inward():
         assert m.visual.uv.shape == (4, 2)
         to_centre = centre - m.triangles_center[0]
         assert float(m.face_normals[0] @ to_centre) > 0, name
-    assert stats["wall_z_min"]["fill"] in ("fallback", "median")      # behind the camera
+    fill = stats["wall_z_min"]["fill"]                                # behind the camera: never seen
+    assert fill in ("fallback", "median") or fill.startswith("like wall_")
     ply = rt.shell_vertex_color_mesh(meshes, cells=16)
     assert len(ply.vertices) > 100 and ply.visual.kind == "vertex"
 
@@ -104,3 +106,60 @@ def test_relief_meshes_a_counter_but_not_the_shell_or_objects():
     cen = mesh.triangles_center
     assert np.mean(np.sum(mesh.face_normals * -cen, axis=1) > 0) > 0.95   # faces look at the camera
     assert mesh.visual.uv.min() >= 0 and mesh.visual.uv.max() <= 1
+
+
+def test_wall_prediction_is_layered_and_ignores_a_minority_material():
+    """Top half paper (reddish, striped), bottom half panelling (brown). A
+    bright panel covers the upper-left corner. Only the left 45 % was seen."""
+    th, tw = 120, 240
+    yy, xx = np.mgrid[:th, :tw]
+    tex = np.zeros((th, tw, 3), np.float32)
+    tex[:60] = np.stack([170 + 25 * ((xx[:60] // 6) % 2), 110 + 0 * xx[:60], 100 + 0 * xx[:60]], -1)
+    tex[60:] = (120, 90, 60)
+    tex[:60, :30] = 245                                   # the minority material
+    vis = np.zeros((th, tw), bool)
+    vis[:, :108] = True
+    fill, how = rt.synthesize_fill(tex.astype(np.uint8), vis, rows=True)
+    assert how == "tiled"
+    far = fill[:, 180:]
+    assert far[10:50, :, 0].mean() > 160 and far[10:50, :, 2].mean() < 130     # paper, not the white panel
+    assert abs(far[70:110, :, 0].mean() - 120) < 12                            # panelling below
+    assert far[10:50, :, 0].std() > 5                                          # stripes continue
+    out, how2 = rt.fill_hidden(tex.astype(np.uint8), vis, rows=True)
+    np.testing.assert_array_equal(out[70:110, 20:80], tex[70:110, 20:80].astype(np.uint8))
+
+
+def test_blurry_texels_are_predicted_when_the_surface_can_be():
+    rng = np.random.default_rng(0)
+    th, tw = 96, 160
+    tex = np.clip(128 + 30 * ((np.mgrid[:th, :tw][1] // 8) % 2)[..., None] + rng.integers(-3, 4, (th, tw, 3)), 0, 255)
+    tex = tex.astype(np.uint8)
+    vis = np.ones((th, tw), bool)
+    quality = np.ones((th, tw)); quality[:, 110:] = 0.05           # the right third was seen at a grazing angle
+    smeared = tex.copy(); smeared[:, 110:] = 128                    # ...and is a smear in the photo
+    out, how = rt.fill_hidden(smeared, vis, quality=quality)
+    assert how == "tiled"
+    assert out[:, 130:].astype(float).std() > 8                     # the pattern is back
+    np.testing.assert_array_equal(out[20:70, 20:80], smeared[20:70, 20:80])
+
+
+def test_builtin_box_under_a_counter_top():
+    from src import builtin_boxes as bb
+    R, P_cam, valid, colors, depth, hit, layout = _layout()
+    P_a = (P_cam @ layout.R_total.T).copy()
+    Hh, Ww = valid.shape
+    counter = np.zeros_like(valid)
+    counter[int(0.70 * Hh):int(0.92 * Hh), int(0.25 * Ww):int(0.75 * Ww)] = True
+    counter &= hit == "floor"
+    # a surface 0.5 above the floor *along the same rays*, so pixels and points stay consistent
+    P_a[counter] *= (layout.floor_y + 0.5) / layout.floor_y
+    faces = bb.find_faces(P_a, counter, layout, min_frame_frac=0.002)
+    tops = [f for f in faces if f["axis"] == 1 and f["sign"] > 0]
+    assert tops and abs(tops[0]["coord"] - (layout.floor_y + 0.5)) < 0.03
+    box = bb.face_to_box(tops[0], layout, P_a, valid)
+    assert not box["thin"]
+    assert box["min"][1] == pytest.approx(layout.floor_y, abs=1e-6)            # solid down to the floor
+    assert box["max"][1] < layout.floor_y + 0.5                                 # just under the seen surface
+    depth_a = np.where(valid, ((P_a @ layout.R_total) @ rl.OPENCV_TO_WORLD.T)[..., 2], np.nan)
+    meshes, boxes = bb.build_builtins(P_a, counter, valid, layout, K, colors, depth_a)
+    assert boxes and any(n.endswith("_face") for n in meshes) and any(n.endswith("_body") for n in meshes)

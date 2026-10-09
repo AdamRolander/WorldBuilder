@@ -136,6 +136,7 @@ class PlacedObject:
         self.r = result
         self.model = model_verts
         self._verts: Optional[np.ndarray] = None
+        self._idx: Optional[np.ndarray] = None
 
     @property
     def id(self) -> int:
@@ -158,6 +159,45 @@ class PlacedObject:
     @property
     def height(self) -> float:
         return float(self.hi[1] - self.lo[1])
+
+    @property
+    def fast_verts(self) -> np.ndarray:
+        """A fixed random subset of the world vertices (≤ 30k) for pose
+        searches that splat the object hundreds of times."""
+        n = len(self.model)
+        if n <= 30_000:
+            return self.verts
+        if self._idx is None or len(self._idx) and self._idx.max() >= n:
+            self._idx = np.random.default_rng(0).choice(n, 30_000, replace=False)
+        return self.verts[self._idx]
+
+    def scale_about_centre(self, s: float):
+        c = 0.5 * (self.lo + self.hi)
+        self.r['scale'] = (np.asarray(self.r['scale'], float) * s).tolist()
+        self.r['translation'] = (c + (np.asarray(self.r['translation'], float) - c) * s).tolist()
+        self._verts = None
+
+    def rotate_about_vertical(self, yaw: float):
+        """Turn the object about the vertical axis through its centre."""
+        c, s = np.cos(yaw), np.sin(yaw)
+        Y = np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
+        self.set_rotation(matrix_to_quat(quat_to_matrix(self.r['rotation_quaternion']) @ Y.T))
+
+    def stretch_down(self, factor: float) -> bool:
+        """Lengthen the object downward, keeping its top where it is. Only
+        possible when one model axis is vertical (true after the upright
+        correction); returns False otherwise."""
+        R = quat_to_matrix(self.r['rotation_quaternion'])
+        i = int(np.argmax(np.abs(R[:, 1])))
+        if abs(R[i, 1]) < 0.97:
+            return False
+        top = float(self.hi[1])
+        sc = np.asarray(self.r['scale'], float).copy()
+        sc[i] *= factor
+        self.r['scale'] = sc.tolist()
+        self._verts = None
+        self.translate([0, top - float(self.hi[1]), 0])
+        return True
 
     def translate(self, d):
         self.r['translation'] = (np.asarray(self.r['translation'], float) + np.asarray(d, float)).tolist()
@@ -446,15 +486,234 @@ def _quality(o: PlacedObject, ev: Optional[SceneEvidence]) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Settling, walls, visibility
+# ---------------------------------------------------------------------------
+
+def settle_unsupported(ev: SceneEvidence, objs: List[PlacedObject], room: Optional[Dict] = None,
+                       max_iou_loss: float = 0.25) -> Dict[int, str]:
+    """Give every free-standing object something to stand on.
+
+    After the contact pass some objects still float: their bottom edge is
+    hidden behind something or cut off by the frame, so the photo offers no
+    contact. Physics still applies: an object that is not hanging from the
+    ceiling and not mounted on a wall rests on whatever is under it. For
+    each such object the target is the floor or the top of a supported
+    object under its footprint, and three ways of reaching it are tried:
+
+    * ``shift``    move straight down;
+    * ``slide``    slide along the viewing rays (farther and larger);
+    * ``stretch``  lengthen the object downward with its top fixed — right
+                   when the mesh is short because its lower part was never
+                   seen (allowed up to +35 %, up to +100 % when the mask is
+                   cut by the bottom of the frame).
+
+    The one that keeps the best silhouette match wins. Objects whose gap is
+    large compared with their own size are left alone: a pendant lamp is
+    not a floor lamp.
+    """
+    out: Dict[int, str] = {}
+    if ev.floor_y is None:
+        return out
+    H = ev.room_height
+    ceiling = room.get("ceiling_y") if room else None
+    for o in sorted(objs, key=lambda o: o.lo[1]):
+        if o.r.get('support') is not None:
+            continue
+        lo, hi = o.lo, o.hi
+        h = max(float(hi[1] - lo[1]), 1e-6)
+        if ceiling is not None and hi[1] > ceiling - 0.05 * H:
+            continue                                   # reaches the ceiling: hanging
+        target, sup_id = ev.floor_y, None
+        area = max(1e-9, (hi[0] - lo[0]) * (hi[2] - lo[2]))
+        for b in objs:
+            if b is o or b.r.get('support') is None:
+                continue
+            blo, bhi = b.lo, b.hi
+            ox = min(hi[0], bhi[0]) - max(lo[0], blo[0])
+            oz = min(hi[2], bhi[2]) - max(lo[2], blo[2])
+            if ox <= 0 or oz <= 0 or ox * oz < 0.5 * area:
+                continue
+            top = local_top(b, lo, hi, lo[1] + 0.05 * H)
+            if top is not None and top > target:
+                target, sup_id = top, b.id
+        gap = float(lo[1] - target)
+        if gap <= 1e-6 or gap > max(0.75 * h, 0.10 * H):
+            continue
+        if room and gap > 0.3 * h and _near_detected_wall(lo, hi, room, 0.03 * H):
+            continue                                   # small thing high on a wall: mounted
+        mask = ev.masks.get(o.id)
+        cut = mask is not None and bool(mask[-2:].any())
+        snap = o.snapshot()
+        before = fit_iou(ev, o)
+        options = []
+        o.translate([0, -gap, 0])
+        options.append((fit_iou(ev, o), "shift", o.snapshot()))
+        o.restore(snap)
+        if abs(lo[1]) > 0.2 * H and target * lo[1] > 0 and 0.8 <= target / lo[1] <= 1.25:
+            o.slide_along_rays(target / lo[1])
+            if not _beyond_detected_wall(o, room, 0.02 * H):     # farther is only an option inside the room
+                options.append((fit_iou(ev, o), "slide", o.snapshot()))
+            o.restore(snap)
+        if gap <= (1.0 if cut else 0.35) * h and o.stretch_down((h + gap) / h):
+            options.append((fit_iou(ev, o), "stretch", o.snapshot()))
+        o.restore(snap)
+        best = max(options, key=lambda t: -1.0 if t[0] is None else t[0])
+        if before is not None and best[0] is not None and best[0] < before - max_iou_loss:
+            continue
+        o.restore(best[2])
+        o.r.update(snapped=True, support=FLOOR if sup_id is None else "object", supported_by=sup_id,
+                   support_source=f"settle-{best[1]}", support_y=round(float(target), 4))
+        out[o.id] = best[1]
+    return out
+
+
+def _beyond_detected_wall(o: "PlacedObject", room: Optional[Dict], tol: float) -> bool:
+    """True if the object sticks out through an observed wall by more than ``tol``."""
+    if not room:
+        return False
+    lo, hi = o.lo, o.hi
+    for side, src in room.get("sources", {}).items():
+        if not str(src).startswith("wall"):
+            continue
+        axis = 0 if side.startswith("x") else 2
+        over = (room["min"][axis] - lo[axis]) if side.endswith("min") else (hi[axis] - room["max"][axis])
+        if over > tol:
+            return True
+    return False
+
+
+def _near_detected_wall(lo, hi, room: Dict, tol: float) -> bool:
+    for side, src in room.get("sources", {}).items():
+        if not str(src).startswith("wall"):
+            continue
+        axis = 0 if side.startswith("x") else 2
+        if side.endswith("min") and lo[axis] - room["min"][axis] < tol:
+            return True
+        if side.endswith("max") and room["max"][axis] - hi[axis] < tol:
+            return True
+    return False
+
+
+def keep_inside_walls(ev: SceneEvidence, objs: List[PlacedObject], room: Dict,
+                      min_slide: float = 0.8, max_push_frac: float = 0.35) -> int:
+    """Bring objects that poke through an *observed* wall back inside.
+
+    A wall backed by thousands of point-map votes beats one object's depth,
+    so the object is wrong. Its position in the image is right, though, so
+    it is slid along its viewing rays (nearer and proportionally smaller)
+    until it fits, then put back on its support. Only if that needs more
+    than a 20 % slide does it fall back to a capped sideways push.
+    """
+    moved = 0
+    for o in objs:
+        for side, src in room.get("sources", {}).items():
+            if not str(src).startswith("wall"):
+                continue
+            axis = 0 if side.startswith("x") else 2
+            lo, hi = o.lo, o.hi
+            wall = room["min"][axis] if side.endswith("min") else room["max"][axis]
+            extreme = lo[axis] if side.endswith("min") else hi[axis]
+            over = (wall - extreme) if side.endswith("min") else (extreme - wall)
+            if over <= 1e-6:
+                continue
+            bottom = float(lo[1])
+            snap = o.snapshot()
+            options = []
+            k = wall / extreme if extreme * wall > 0 else 0.0
+            if min_slide <= k < 1.0:
+                o.slide_along_rays(k * 0.999)
+                if o.r.get('support') is not None:       # stay on the support it was put on
+                    o.translate([0, bottom - float(o.lo[1]), 0])
+                options.append((fit_iou(ev, o), o.snapshot()))
+                o.restore(snap)
+            d = min(over, max_push_frac * max(float(hi[axis] - lo[axis]), 1e-6))
+            d = d if side.endswith("min") else -d
+            o.translate([d if axis == 0 else 0, 0, d if axis == 2 else 0])
+            options.append((fit_iou(ev, o), o.snapshot()))
+            best = max(options, key=lambda t: -1.0 if t[0] is None else t[0])
+            o.restore(best[1])
+            o.r['wall_clamped'] = True
+            moved += 1
+    return moved
+
+
+def enforce_visibility(ev: SceneEvidence, objs: List[PlacedObject], min_hidden: float = 0.3) -> Dict[int, float]:
+    """An object the photo shows must not end up behind another object.
+
+    For every object, look at the pixels of its mask: there the photo saw
+    *it*, so it has to be the nearest thing along those rays. If a larger
+    object's mesh is in front on more than ``min_hidden`` of them (pillows
+    swallowed by the sofa they lie on), the smaller object is slid toward
+    the camera until it clears. Returns ``{id: factor}``.
+    """
+    h, w = ev.hw
+    z1 = np.full((h, w), np.inf); id1 = np.zeros((h, w), np.int32)
+    z2 = np.full((h, w), np.inf)
+    own: Dict[int, np.ndarray] = {}
+    for o in objs:
+        sil, zb = splat(ev, o.fast_verts)
+        zb = np.where(sil, zb, np.inf)
+        own[o.id] = zb
+        # Glass does not hide what is behind it. If, over an object's own
+        # mask, the photo mostly saw something *farther* than its mesh, the
+        # object is transparent (or misplaced) and cannot count as a blocker.
+        m = ev.masks.get(o.id)
+        if m is not None:
+            px = m & sil & ev.valid
+            if int(px.sum()) >= 20:
+                with np.errstate(invalid="ignore"):
+                    through = float(np.mean(ev.depth[px] > zb[px] * 1.15))
+                if through > 0.4:
+                    o.r['seen_through'] = round(through, 2)
+                    continue
+        nearer = zb < z1
+        z2 = np.where(nearer, z1, np.minimum(z2, zb))
+        id1 = np.where(nearer, o.id, id1)
+        z1 = np.where(nearer, zb, z1)
+    size = {o.id: float(np.prod(np.maximum(o.hi - o.lo, 1e-9))) for o in objs}
+    out: Dict[int, float] = {}
+    for o in sorted(objs, key=lambda o: size[o.id]):
+        m = ev.masks.get(o.id)
+        if m is None:
+            continue
+        zo = own[o.id]
+        px = m & np.isfinite(zo)
+        if int(px.sum()) < 20:
+            continue
+        others = np.where(id1 == o.id, z2, z1)
+        hidden = px & (others < zo * 0.98)
+        if hidden.sum() < min_hidden * px.sum():
+            continue
+        blockers = id1[hidden]
+        ids, counts = np.unique(blockers[blockers != o.id], return_counts=True)
+        if not len(ids) or size.get(int(ids[np.argmax(counts)]), 0.0) < size[o.id]:
+            continue                                   # the bigger object does not yield
+        if o.r.get('support') in (FLOOR, SURFACE):
+            continue        # pinned by an observed contact; sliding would lift it off or shift its image
+        k = float(np.median(others[hidden] / zo[hidden])) * 0.97
+        if not (0.8 <= k < 1.0):
+            continue        # a larger disagreement means one of the two meshes is wrong, not just deep
+        o.slide_along_rays(k)
+        o.r['moved_in_front'] = round(k, 3)
+        out[o.id] = round(k, 3)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
 
 def place_objects(results: List[Dict], model_verts: Dict[int, np.ndarray], ev: SceneEvidence,
                   verbose: bool = True, min_supporter_iou: float = 0.3, max_iou_loss: float = 0.12,
-                  min_fit_iou: float = 0.08) -> Dict:
+                  min_fit_iou: float = 0.08, room: Optional[Dict] = None,
+                  image_small: Optional[np.ndarray] = None, share: bool = True) -> Dict:
     """Place every object using the evidence in ``ev``. ``results`` are in
     the aligned frame already (gravity + yaw applied); they are mutated in
-    place and duplicates are removed from the list. Returns diagnostics."""
+    place and duplicates are removed from the list. Returns diagnostics.
+
+    ``room`` (``{"min", "max", "sources", "ceiling_y"}`` from the layout)
+    enables the wall and ceiling reasoning; ``image_small`` (the photo at
+    point-map resolution) enables instance sharing."""
     log = print if verbose else (lambda *a, **k: None)
     objs = [PlacedObject(r, model_verts[r['id']]) for r in results if r['id'] in model_verts]
     by_id = {o.id: o for o in objs}
@@ -473,6 +732,22 @@ def place_objects(results: List[Dict], model_verts: Dict[int, np.ndarray], ev: S
     diag['depth_refit'] = refits
     log(f"  upright-corrected {n_up}/{len(objs)}; depth refit {len(refits)}"
         + (": " + ", ".join(f"{by_id[i].r['label']}×{k}" for i, k in refits.items()) if refits else ""))
+
+    # 2b. objects that still fit their mask poorly: search size/position/depth
+    from src import pose_fit
+    refined = {}
+    for o in objs:
+        m = ev.masks.get(o.id)
+        if m is None or pose_fit.fit_score(ev, o.fast_verts, m) >= 0.5:
+            continue
+        gain = pose_fit.refine_pose(ev, o)
+        if gain is not None:
+            refined[o.id] = round(gain, 3)
+            refit_depth(ev, o)               # size or position changed: put the surface back at its depth
+    diag['pose_refined'] = refined
+    if refined:
+        log("  pose refined by silhouette search: " + ", ".join(
+            f"{by_id[i].r['label']} +{g}" for i, g in refined.items()))
 
     # 3. contacts
     contacts: Dict[int, Contact] = {}
@@ -536,7 +811,8 @@ def place_objects(results: List[Dict], model_verts: Dict[int, np.ndarray], ev: S
         bottom = o.lo[1]
         if abs(bottom) > 0.2 * H and target * bottom > 0 and 0.8 <= target / bottom <= 1.25:
             o.slide_along_rays(target / bottom)
-            options.append((fit_iou(ev, o), "slide", o.snapshot()))
+            if not _beyond_detected_wall(o, room, 0.02 * H):
+                options.append((fit_iou(ev, o), "slide", o.snapshot()))
             o.restore(snap)
         best = max(options, key=lambda t: -1.0 if t[0] is None else t[0])
         if before is not None and best[0] is not None and best[0] < before - max_iou_loss:
@@ -554,6 +830,20 @@ def place_objects(results: List[Dict], model_verts: Dict[int, np.ndarray], ev: S
     log(f"  contact: {diag['support'][FLOOR]} on the floor, {diag['support']['object']} on another object, "
         f"{diag['support'][SURFACE]} on an unmodelled surface, {diag['unsupported']} left as posed")
 
+    # 4b. free-standing objects with no visible contact still rest on something
+    settled = settle_unsupported(ev, objs, room)
+    diag['settled'] = settled
+    if settled:
+        log("  settled: " + ", ".join(f"{by_id[i].r['label']} ({how})" for i, how in settled.items()))
+
+    # 4c. the same model photographed several times: reuse the best-observed one
+    diag['instances'] = []
+    if share and image_small is not None:
+        diag['instances'] = pose_fit.share_instances(ev, objs, image_small)
+        if diag['instances']:
+            log("  instances shared: " + ", ".join(
+                f"{d['label']} #{d['id']}←#{d['exemplar']} ({d['own_score']}→{d['score']})" for d in diag['instances']))
+
     # 5. nothing below a fitted floor
     raised = 0
     if ev.floor_y is not None:
@@ -564,6 +854,16 @@ def place_objects(results: List[Dict], model_verts: Dict[int, np.ndarray], ev: S
                 raised += 1
     diag['raised_to_floor'] = raised
 
+    # 5b. inside observed walls; 5c. what the photo shows is not behind something else
+    if room:
+        diag['wall_clamped'] = keep_inside_walls(ev, objs, room)
+        if diag['wall_clamped']:
+            log(f"  brought {diag['wall_clamped']} object(s) back inside observed walls")
+    diag['moved_in_front'] = enforce_visibility(ev, objs)
+    if diag['moved_in_front']:
+        log("  moved in front of what hid them: " + ", ".join(
+            f"{by_id[i].r['label']}×{k}" for i, k in diag['moved_in_front'].items()))
+
     # 6. reprojection check
     for o in objs:
         o.r['fit_iou'] = _round(fit_iou(ev, o))
@@ -572,7 +872,7 @@ def place_objects(results: List[Dict], model_verts: Dict[int, np.ndarray], ev: S
     removed: Dict[int, str] = {}
     for o in objs:
         iou = o.r.get('fit_iou')
-        if iou is not None and iou < min_fit_iou:
+        if iou is not None and iou < min_fit_iou and not o.r.get('instance_of'):
             removed[o.id] = f"mesh does not match its mask (IoU {iou:.2f})"
     # 8. duplicates
     dups = find_duplicates([o for o in objs if o.id not in removed], ev)

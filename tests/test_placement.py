@@ -199,3 +199,90 @@ def test_structural_duplicates_spare_the_rug():
     rug = np.zeros((40, 40), bool); rug[28:34, 10:25] = True
     out = pl.structural_duplicates({1: carpet, 2: rug}, {"floor": floor})
     assert out == {1: "floor"}
+
+
+# ---------------------------------------------------------------------------
+# Second pass: settling, walls, visibility, silhouette search
+# ---------------------------------------------------------------------------
+
+ROOM = {"min": [-2.0, FLOOR_Y, -0.1], "max": [2.0, CEIL_Y, WALL_Z],
+        "sources": {"x_min": "extent", "x_max": "extent", "z_min": "extent", "z_max": "wall(9999)"},
+        "ceiling_y": CEIL_Y}
+
+
+def _objs(results, verts):
+    return {r["id"]: pl.PlacedObject(r, verts[r["id"]]) for r in results}
+
+
+def test_unsupported_object_settles_onto_what_is_under_it(scene):
+    ev, results, verts = scene
+    o = _objs(results, verts)
+    o[1].r["support"] = pl.FLOOR
+    o[2].translate([0, 0.06, 0])                       # lamp floats; no contact was found for it
+    o[3].r["support"] = None
+    settled = pl.settle_unsupported(ev, list(o.values()), ROOM)
+    assert 2 in settled and o[2].r["supported_by"] == 1
+    assert o[2].lo[1] == pytest.approx(-0.5, abs=0.02)
+    # the picture hangs 1.4 above the floor and is 0.5 tall: far beyond a settling gap
+    assert 3 not in settled and o[3].lo[1] == pytest.approx(0.2, abs=1e-6)
+
+
+def test_stretch_down_keeps_the_top(scene):
+    ev, results, verts = scene
+    lamp = _objs(results, verts)[2]
+    top, bottom = float(lamp.hi[1]), float(lamp.lo[1])
+    assert lamp.stretch_down(1.5)
+    assert lamp.hi[1] == pytest.approx(top, abs=1e-6)
+    assert lamp.lo[1] == pytest.approx(top - 1.5 * (top - bottom), abs=1e-6)
+
+
+def test_object_through_an_observed_wall_comes_back_inside(scene):
+    ev, results, verts = scene
+    o = _objs(results, verts)
+    o[3].slide_along_rays(1.12)                        # too deep: pokes through the back wall
+    assert o[3].hi[2] > WALL_Z + 0.2
+    assert pl.keep_inside_walls(ev, list(o.values()), ROOM) == 1
+    assert o[3].hi[2] <= WALL_Z + 1e-3
+    np.testing.assert_allclose(o[3].lo, BOXES[3][0], atol=0.06)   # and it is where the photo has it
+
+
+def test_visible_object_is_moved_in_front_of_what_hides_it(scene):
+    ev, results, verts = scene
+    o = _objs(results, verts)
+    o[2].r["support"] = "object"
+    o[1].translate([0, 0.3, 0])                        # the table's mesh now stands in front of the lamp
+    z_before = float(o[2].lo[2])
+    moved = pl.enforce_visibility(ev, list(o.values()))
+    assert 2 in moved and o[2].lo[2] < z_before
+    # an object pinned to the floor by an observed contact is not slid
+    o2 = _objs(*scene[1:])
+    o2[2].r["support"] = pl.FLOOR
+    o2[1].translate([0, 0.3, 0])
+    assert 2 not in pl.enforce_visibility(ev, list(o2.values()))
+
+
+def test_silhouette_search_recovers_a_shifted_object_and_respects_occlusion(scene):
+    from src import pose_fit
+    ev, results, verts = scene
+    o = _objs(results, verts)
+    good = pose_fit.fit_score(ev, o[2].fast_verts, ev.masks[2])
+    o[2].translate([0.1, 0.05, 0])
+    bad = pose_fit.fit_score(ev, o[2].fast_verts, ev.masks[2])
+    assert good > 0.8 > bad
+    assert pose_fit.refine_pose(ev, o[2]) is not None
+    np.testing.assert_allclose(o[2].lo[:2], BOXES[2][0][:2], atol=0.03)
+    # pushed far away and scaled up, the silhouette is unchanged but the depth is wrong
+    o[3].slide_along_rays(0.5)
+    assert pose_fit.fit_score(ev, o[3].fast_verts, ev.masks[3]) < 0.2
+    # the table is partly hidden by the lamp standing on it: that must not count against it
+    assert pose_fit.fit_score(ev, o[1].fast_verts, ev.masks[1]) > 0.6
+    assert pose_fit.hidden_fraction(ev, o[1].fast_verts, ev.masks[1]) > 0.0
+
+
+def test_placement_with_room_and_image_runs_all_steps(scene):
+    ev, results, verts = scene
+    img = np.full(ev.hw + (3,), 128, np.uint8)
+    diag = pl.place_objects(results, verts, ev, verbose=False, room=ROOM, image_small=img)
+    for key in ("pose_refined", "settled", "instances", "moved_in_front"):
+        assert key in diag
+    assert len(results) == 3 and not diag["removed"]

@@ -165,6 +165,24 @@ class SAM3DReconstructor:
             intr = intrinsics_from_pointmap(points.detach().float().cpu().numpy(), valid_np)
         return {"pointmap": points, "intrinsics": intr, "valid": valid_np}
 
+    # -- metric scale -----------------------------------------------------------
+    @staticmethod
+    def _estimate_metric_scale(models_dir: Path) -> None:
+        """Run ``scripts/estimate_metric_scale.py`` for this scene if MoGe-2
+        is installed (it needs a newer ``moge`` than SAM 3D pins, hence the
+        subprocess). Failure is not fatal: stage 4 falls back to the prior."""
+        import subprocess
+        script = _PROJECT_ROOT / "scripts" / "estimate_metric_scale.py"
+        if os.environ.get("WORLDBUILDER_METRIC", "1") == "0" or not (_PROJECT_ROOT / "third_party" / "moge2").exists():
+            return
+        try:
+            out = subprocess.run([sys.executable, str(script), str(Path(models_dir).parent)],
+                                 capture_output=True, text=True, timeout=300)
+            line = [ln for ln in out.stdout.splitlines() if "per scene unit" in ln]
+            print(f"✓ Metric scale: {line[-1]}" if line else f"⚠️  Metric scale not estimated: {out.stderr[-200:]}")
+        except Exception as e:
+            print(f"⚠️  Metric scale not estimated: {str(e)[:120]}")
+
     # -- per-object reconstruction -----------------------------------------
     def reconstruct_objects(self, image_path: str, segmentation_results: List[Dict],
                             output_dir: str = "outputs/3d_models", quality: str = 'high',
@@ -267,6 +285,7 @@ class SAM3DReconstructor:
             stage3_cache.save_pointmap(
                 output_path, scene_pm["pointmap"].detach().float().cpu().numpy(),
                 scene_pm["valid"], scene_pm["intrinsics"], (H, W))
+        self._estimate_metric_scale(output_path)
         if results:
             from src.scene_assembly import assemble_from_cache
             try:
