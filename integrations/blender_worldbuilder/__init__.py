@@ -7,8 +7,10 @@ free of Meta's SAM licence terms, which the Extensions platform would not
 accept in a bundled form.
 
 Flow:  pick a photo → POST /api/upload → poll /api/jobs/<id> → GET
-/api/scenes/<id>/glb → bpy.ops.import_scene.gltf → objects land in a
-collection named after the scene with the room as a separate object.
+/api/scenes/<id>/glb?lite=1 → bpy.ops.import_scene.gltf → objects land in a
+collection named after the scene under one empty (scaled to metres), with
+each room surface and the photo relief as separate objects. "Import
+existing scene" skips the upload and pulls a scene the server already has.
 
 Works on Blender 4.2+ (extension) and as a legacy add-on on 3.6+ via
 ``bl_info``. Only stdlib + bpy; no wheels.
@@ -29,7 +31,7 @@ from bpy.types import AddonPreferences, Operator, Panel
 bl_info = {
     "name": "WorldBuilder",
     "author": "Adam Rolander",
-    "version": (0, 1, 0),
+    "version": (0, 2, 0),
     "blender": (3, 6, 0),
     "location": "3D Viewport > Sidebar > WorldBuilder",
     "description": "Turn a photo of a room into a 3D scene via a local WorldBuilder server",
@@ -73,10 +75,50 @@ def upload_photo(server, path, detector):
         return json.loads(r.read().decode())
 
 
-def download_glb(server, scene_id, dest_dir):
-    dest = os.path.join(dest_dir, f"{scene_id}.glb")
-    urllib.request.urlretrieve(f"{server}/api/scenes/{urllib.parse.quote(scene_id)}/glb", dest)
+def download_glb(server, scene_id, dest_dir, lite=True):
+    """``lite``: decimated meshes with baked textures (tens of MB). The full
+    GLB is SAM 3D's raw output with vertex colours and can be hundreds of MB."""
+    dest = os.path.join(dest_dir, f"{scene_id}{'_lite' if lite else ''}.glb")
+    url = f"{server}/api/scenes/{urllib.parse.quote(scene_id)}/glb" + ("?lite=1" if lite else "")
+    urllib.request.urlretrieve(url, dest)
     return dest
+
+
+def metric_scale(server, scene_id):
+    """Scene units -> metres, from the server's layout estimate (1.0 if unknown)."""
+    try:
+        m = _get_json(f"{server}/api/scenes/{urllib.parse.quote(scene_id)}")
+        return float((m.get("layout") or {}).get("estimated_metric_scale") or 1.0)
+    except Exception:  # noqa: BLE001
+        return 1.0
+
+
+def import_glb(context, glb, scene_id, import_room=True, scale=1.0):
+    """Import a WorldBuilder GLB into its own collection under one empty.
+
+    Kept free of operator state so it can be driven from a script or a test
+    (``blender --background --python ...``). Returns the imported objects.
+    """
+    before = set(bpy.data.objects)
+    bpy.ops.import_scene.gltf(filepath=glb)
+    new = [o for o in bpy.data.objects if o not in before]
+    coll = bpy.data.collections.new(f"WorldBuilder {scene_id}")
+    context.scene.collection.children.link(coll)
+    root = bpy.data.objects.new(f"WorldBuilder {scene_id}", None)
+    coll.objects.link(root)
+    root.scale = (scale, scale, scale)
+    kept = []
+    for o in new:
+        if o.name.lower().startswith("room") and not import_room:
+            bpy.data.objects.remove(o)
+            continue
+        for c in list(o.users_collection):
+            c.objects.unlink(o)
+        coll.objects.link(o)
+        if o.parent is None:
+            o.parent = root
+        kept.append(o)
+    return kept
 
 
 # --------------------------------------------------------------------------
@@ -117,6 +159,10 @@ class WB_OT_generate(Operator):
     filepath: StringProperty(subtype="FILE_PATH")
     filter_glob: StringProperty(default="*.jpg;*.jpeg;*.png;*.webp", options={"HIDDEN"})
     import_room: BoolProperty(name="Import room (floor/walls/ceiling)", default=True)
+    lite: BoolProperty(name="Lite meshes (baked textures)", default=True,
+                       description="Decimated objects with textures; turn off for SAM 3D's full-resolution meshes")
+    use_metric_scale: BoolProperty(name="Scale to metres (estimate)", default=True,
+                                   description="Apply the server's metric-scale estimate to the scene root")
 
     _timer = None
     _thread = None
@@ -132,7 +178,8 @@ class WB_OT_generate(Operator):
         if not os.path.exists(path):
             self.report({"ERROR"}, f"File not found: {path}")
             return {"CANCELLED"}
-        _STATE.update(status="uploading…", job=None, error=None, glb=None, scene_id=None)
+        _STATE.update(status="uploading…", job=None, error=None, glb=None, scene_id=None, scale=1.0)
+        lite, want_scale = self.lite, self.use_metric_scale
 
         def work():
             try:
@@ -151,7 +198,9 @@ class WB_OT_generate(Operator):
                         raise RuntimeError(st.get("error") or "pipeline failed")
                     time.sleep(2)
                 _STATE["status"] = "downloading GLB…"
-                _STATE["glb"] = download_glb(server, job["scene_id"], tempfile.gettempdir())
+                if want_scale:
+                    _STATE["scale"] = metric_scale(server, job["scene_id"])
+                _STATE["glb"] = download_glb(server, job["scene_id"], tempfile.gettempdir(), lite=lite)
                 _STATE["status"] = "importing"
             except urllib.error.URLError as e:
                 _STATE["error"] = f"Cannot reach WorldBuilder server at {server}: {e.reason}"
@@ -187,19 +236,43 @@ class WB_OT_generate(Operator):
             self._timer = None
 
     def _import(self, context, glb, scene_id):
-        before = set(bpy.data.objects)
-        bpy.ops.import_scene.gltf(filepath=glb)
-        new = [o for o in bpy.data.objects if o not in before]
-        coll = bpy.data.collections.new(f"WorldBuilder {scene_id}")
-        context.scene.collection.children.link(coll)
-        for o in new:
-            for c in list(o.users_collection):
-                c.objects.unlink(o)
-            coll.objects.link(o)
-            if o.name.lower().startswith("room") and not self.import_room:
-                bpy.data.objects.remove(o)
+        new = import_glb(context, glb, scene_id, self.import_room, _STATE.get("scale", 1.0))
         _STATE["status"] = f"imported {len(new)} objects"
-        self.report({"INFO"}, f"WorldBuilder: imported {len(new)} objects into '{coll.name}'")
+        self.report({"INFO"}, f"WorldBuilder: imported {len(new)} objects into 'WorldBuilder {scene_id}'")
+
+
+class WB_OT_import_existing(Operator):
+    """Import a scene the server has already built (no new reconstruction)"""
+    bl_idname = "worldbuilder.import_existing"
+    bl_label = "Import existing scene"
+    bl_options = {"REGISTER", "UNDO"}
+
+    scene_id: StringProperty(name="Scene id", description="Folder name under the server's outputs/ (empty: newest)")
+    import_room: BoolProperty(name="Import room (floor/walls/ceiling)", default=True)
+    lite: BoolProperty(name="Lite meshes (baked textures)", default=True)
+    use_metric_scale: BoolProperty(name="Scale to metres (estimate)", default=True)
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self)
+
+    def execute(self, context):
+        server = _prefs(context).server_url.rstrip("/")
+        try:
+            sid = self.scene_id.strip()
+            if not sid:
+                scenes = _get_json(f"{server}/api/scenes").get("scenes", [])
+                if not scenes:
+                    self.report({"ERROR"}, "The server has no finished scenes")
+                    return {"CANCELLED"}
+                sid = scenes[0]["scene_id"]
+            glb = download_glb(server, sid, tempfile.gettempdir(), lite=self.lite)
+            scale = metric_scale(server, sid) if self.use_metric_scale else 1.0
+            new = import_glb(context, glb, sid, self.import_room, scale)
+        except Exception as e:  # noqa: BLE001
+            self.report({"ERROR"}, f"Import failed: {e}")
+            return {"CANCELLED"}
+        self.report({"INFO"}, f"WorldBuilder: imported {len(new)} objects from '{sid}'")
+        return {"FINISHED"}
 
 
 class WB_OT_check_server(Operator):
@@ -232,6 +305,7 @@ class WB_PT_panel(Panel):
     def draw(self, context):
         col = self.layout.column(align=True)
         col.operator(WB_OT_generate.bl_idname, icon="IMAGE_DATA")
+        col.operator(WB_OT_import_existing.bl_idname, icon="IMPORT")
         col.operator(WB_OT_check_server.bl_idname, icon="URL")
         if _STATE["status"]:
             col.label(text=_STATE["status"])
@@ -239,7 +313,7 @@ class WB_PT_panel(Panel):
         col.label(text=f"Server: {_prefs(context).server_url}")
 
 
-classes = (WB_Preferences, WB_OT_generate, WB_OT_check_server, WB_PT_panel)
+classes = (WB_Preferences, WB_OT_generate, WB_OT_import_existing, WB_OT_check_server, WB_PT_panel)
 
 
 def register():

@@ -1,9 +1,9 @@
 schema_version = "1.0.0"
 
 id = "worldbuilder"
-version = "0.1.0"
+version = "0.2.0"
 name = "WorldBuilder"
-tagline = "Turn a photo of a room into a 3D scene via a local WorldBuilder server"
+tagline = "Turn a photo of a room into a 3D scene"
 maintainer = "Adam Rolander <arolander@ucsd.edu>"
 type = "add-on"
 
@@ -19,8 +19,8 @@ copyright = ["2026 Adam Rolander"]
 
 # Required by the Extensions platform: declare every permission up front.
 [permissions]
-network = "Send the photo to your own WorldBuilder server and download the resulting GLB scene"
-files = "Read the selected photo and write the downloaded GLB into Blender's temp directory"
+network = "Send the photo to your WorldBuilder server, download the scene"
+files = "Read the chosen photo, write the downloaded GLB to temp"
 
 # No bundled wheels: the add-on only uses Blender's Python stdlib + bpy.
 # (urllib for HTTP, so no `requests` wheel is needed.)
