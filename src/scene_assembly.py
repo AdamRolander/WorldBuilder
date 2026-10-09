@@ -158,6 +158,8 @@ def assemble_from_cache(models_dir: Path, image_rgb: np.ndarray,
         image_small = np.asarray(Image.fromarray(image_rgb).resize((ws, hs), Image.BILINEAR))
         diag = place_objects(results, verts, ev, verbose=verbose, room=room_info, image_small=image_small,
                              share=os.environ.get("WORLDBUILDER_SHARE_INSTANCES", "1") != "0")
+        for side in diag.get("disputed_walls", []):
+            layout.wall_sources[side] = "extent (objects stand beyond the fitted plane)"
         diag["structural"] = structural
         failed = failed + [{"id": i, "label": v["label"], "status": f"removed: {v['reason']}"}
                            for i, v in diag.get("removed", {}).items()]

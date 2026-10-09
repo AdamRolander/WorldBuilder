@@ -269,7 +269,124 @@ python scripts/audit_scene.py outputs/10-08-validation/k1_q                     
 python scripts/render_scene.py outputs/10-08-validation/k1_q                         # contact sheet
 ```
 
-## 5. Known limitations seen in these runs
+## 5. Second pass, 2026-10-08 (settling, pose search, predictive textures, built-ins, metric scale)
+
+Same six photos, stage 4 replayed on the CPU from the same stage-3 caches;
+"before" is §4's result (kept in `outputs/10-08-pass1/`), "after" is
+`outputs/10-08-validation/`. Then four photos that were not used for any
+tuning (§5.3). Gallery pages: `outputs/10-08-validation/index.html`,
+`outputs/10-08-newphotos/index.html`.
+
+### 5.1 Placement and scale
+
+| scene | objects | silhouette IoU | objects < 0.3 | settled | pose-searched | instances shared | built-in boxes | metres per unit (was prior) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| bathroom3 | 34 → 35 | 0.51 → **0.63** | 6 → 1 | 0 | 15 | 2 | 8 | 1.48 (2.11) |
+| cl5 | 24 → 25 | 0.49 → **0.51** | 6 → 7 | 1 | 10 | 3 | 6 | 2.95 (4.12) |
+| k1 | 35 → 36 | 0.50 → **0.53** | 6 → 4 | 3 | 15 | 2 | 10 | 1.35 (2.05) |
+| lib2 | 38 → 40 | 0.58 → **0.62** | 2 → 3 | 3 | 10 | 7 | 3 | 2.55 (4.30) |
+| lr2 | 32 → 33 | 0.48 → **0.54** | 8 → 6 | 2 | 15 | 1 | 1 | 3.06 (4.30) |
+| ucsd-basement-prototype-lab | 17 → 17 | 0.58 → **0.62** | 2 → 1 | 2 | 5 | 1 | 13 | 1.72 (2.19) |
+| **mean** | | **0.52 → 0.58** | | | | | | |
+
+Silhouette IoU here is the plain one of §4 (no allowance for occlusion),
+so replacing a visible chair fragment by a whole chair that is half hidden
+behind a desk *lowers* it; the classroom's flat number hides its largest
+visual change. What each column means:
+
+* **settled** — free-standing objects with no visible contact, put on what
+  is under them (straight down, along the rays, or stretched downward when
+  the mesh is short because its lower part was never seen). Objects the
+  photo shows mounted on a surface or hanging from the ceiling are left
+  alone (`placement.attachment`).
+* **pose-searched** — objects whose occlusion-aware score was under 0.5 and
+  improved by at least 0.05 under a size / position search.
+* **instances shared** — objects that took the mesh of the best-observed
+  instance of the same model.
+* **metres per unit** — MoGe-2's metric depth against the scale-free point
+  map, median over pixels (spread ±1–5 %); in brackets the old
+  camera-at-1.5 m prior, which overestimated every one of these scenes by
+  27–69 %. Measured ceilings are now 2.0–3.2 m across the ten scenes
+  (two at 2.0–2.1 m look some 10–15 % low for a real room: the scale is
+  plausible, not verified).
+
+Reported issues and what the logs show now: living-room pillows are slid
+in front of the sofa mesh that hid them (5 pillows and a throw, factors
+0.86–0.93) and the corner plant is back inside the observed wall; the kitchen island (a
+short mesh cut by the bottom of the frame) is stretched to the floor; three
+of eleven classroom chairs are replaced by the best-observed chair, the
+rest keep their own meshes.
+
+### 5.2 Room
+
+| scene | floor | ceiling | far wall | side walls | wall behind camera |
+| --- | --- | --- | --- | --- | --- |
+| bathroom3 | tiled (9% seen) | tiled (17% seen) | tiled (38% seen) | like wall_z_max (0% seen); tiled (6% seen) | like wall_z_max (0% seen) |
+| cl5 | tiled (20% seen) | tiled (4% seen) | tiled (78% seen) | tiled (22% seen); tiled (11% seen) | like wall_z_max (0% seen) |
+| k1 | median (14% seen) | tiled (23% seen) | banded (2% seen) | like wall_x_max (0% seen); tiled (6% seen) | like wall_x_max (0% seen) |
+| lib2 | tiled (17% seen) | fallback (0% seen) | tiled (45% seen) | banded (11% seen); tiled (5% seen) | like wall_z_max (0% seen) |
+| lr2 | tiled (4% seen) | tiled (22% seen) | tiled (64% seen) | like wall_z_max (0% seen); banded (11% seen) | like wall_z_max (0% seen) |
+| ucsd-basement-prototype-lab | tiled (7% seen) | tiled (28% seen) | tiled (13% seen) | banded (1% seen); like wall_z_max (0% seen) | like wall_z_max (0% seen) |
+
+`tiled`: predicted from the seen part with detail (walls: per-row dominant
+colour + sideways-tiled detail; floors/ceilings: lighting-free mirrored
+tiling). `banded`: per-row colours only. `like wall_…`: nothing of this
+wall was seen, so it takes the named wall's predicted make-up. `median` /
+`fallback`: flat colour. In §4 the same twelve floor and far-wall planes
+were 3× tiled, 9× flat; walls behind the camera and unseen side walls were
+all flat.
+
+Built-ins: 1–13 solid boxes per scene behind the relief (kitchen 10, of
+which the cabinet runs under both counters and the wall-cabinet block);
+each is exported to MuJoCo as a static collision box.
+
+### 5.3 Photos not used for tuning
+
+`demo_day/lr3.jpg`, `demo_day/cl2.jpg`, `demo_day/k3.png`,
+`test_images/bathroom1.jpg`, full pipeline with the local VLM:
+
+| photo | instances → objects | silhouette IoU (median) | objects < 0.3 | metres per unit | ceiling | wall-clock |
+| --- | ---: | ---: | ---: | ---: | --- | ---: |
+| bathroom1 | 22 → 22 | 0.63 (0.72) | 2 | 1.25 | 2.01 m (geometric) | 285 s |
+| cl2 | 89 → 80 | 0.55 (0.57) | 7 | 2.74 | 2.80 m (geometric) | 984 s |
+| k3 | 66 → 61 | 0.58 (0.58) | 2 | 2.12 | 2.84 m (geometric) | 755 s |
+| lr3 | 32 → 29 | 0.56 (0.58) | 5 | 2.90 | 3.17 m (geometric) | 367 s |
+
+`k3.png` is a palette PNG; every object failed in stage 3 until the image
+was converted to RGB on load (fixed, rerun). In the same kitchen the layout
+stage took a tall cabinet front for the left wall and 47 of 61 objects
+stood "beyond" it; a fitted wall that a quarter of the objects are beyond
+is now treated as not a wall (offset 1.75 → 0.25). Both were found only
+because the photo was new. The 89-instance classroom spent 16 minutes in
+stage 3–4, of which roughly 12 are SAM 3D.
+
+MuJoCo, all ten scenes, `--stabilize`: 2–21 objects welded per scene,
+1–13 left free, residual drift ≤ 5 cm over 2 s.
+
+### 5.4 Cost
+
+Stage 4 went from ~10 s to 20–100 s per scene (pose search and instance
+search splat each candidate pose into the photo); the lite GLB adds ~25 s.
+MoGe-2 adds under a second on the GPU.
+
+## 6. Known limitations seen in these runs
+
+* **Instance sharing is conservative**: it would rather keep eight
+  slightly different chairs than merge two different objects, and its
+  same-model test (hue plus a 16×16 crop correlation) is crude.
+* **Wall prediction assumes an ordinary wall**: uniform along its length,
+  layered over its height. A wall never seen gets no windows or doors, and
+  one odd region can be continued along the whole wall.
+* **Built-in boxes are coarse**: flat-coloured on unseen sides, one box
+  per seen face, none where no face was seen.
+* **The visibility rule moves the smaller object**, also when the larger
+  mesh is the wrong one.
+* **Plain silhouette IoU under-rates occluded objects**; an
+  occlusion-aware score exists in `src/pose_fit.py` and should become the
+  audit's headline number.
+
+Earlier limitations (first pass), most still true:
+
 
 * **Partially visible objects stay partial.** A chair seen as a seat back
   behind a desk becomes a small floating slab: SAM 3D reconstructed what
