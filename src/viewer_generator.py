@@ -3,9 +3,10 @@
 All PLYs on disk are already in world space (the pipeline bakes poses), so
 the viewer is a passive renderer. Changes from the demo-era viewer:
 
-* the room is rendered with its **vertex colours** (the layout stage
-  projects the photo onto floor/walls/ceiling) and can be toggled between
-  textured, ghosted and hidden;
+* the room is loaded from ``room.glb`` (textured quads + the photo relief
+  of built-ins, see ``src/room_texture.py``) with the vertex-coloured
+  ``room.ply`` as fallback, and can be toggled between textured, ghosted
+  and hidden; the relief has its own toggle;
 * a "photo point cloud" toggle shows the MoGe scene points from
   ``scene_pointmap.npz`` when the viewer is served by the webapp (it is
   decoded client-side from a small JSON sidecar we write here);
@@ -46,11 +47,12 @@ _TEMPLATE = r"""<!DOCTYPE html>
   <h3>Scene (<span id="count">0</span> objects)</h3>
   <label>Room:
     <select id="room-mode">
-      <option value="ghost" selected>ghosted</option>
-      <option value="textured">textured</option>
+      <option value="textured" selected>textured</option>
+      <option value="ghost">ghosted</option>
       <option value="hidden">hidden</option>
     </select>
   </label>
+  <label><input type="checkbox" id="toggle-relief" checked> Built-ins (relief + boxes)</label>
   <label><input type="checkbox" id="toggle-points"> Photo point cloud</label>
   <div id="object-list"></div>
   <div class="meta" id="meta"></div>
@@ -65,6 +67,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { VRButton } from 'three/addons/webxr/VRButton.js';
 
 const OBJECTS = __OBJECTS_JSON__;
@@ -72,6 +75,7 @@ const FAILED  = __FAILED_JSON__;
 const ROOM    = __ROOM_FILE__;
 const LAYOUT  = __LAYOUT_JSON__;
 const POINTS  = __POINTS_FILE__;
+const ROOM_GLB = __ROOM_GLB__;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x1a1a1a);
@@ -108,7 +112,35 @@ dir.position.set(5, 10, 5); scene.add(dir);
 
 const meshes = {};
 const bbox = new THREE.Box3();
-let roomMesh = null;
+let roomMesh = null;      // THREE.Mesh (vertex-coloured PLY) or THREE.Group (textured GLB)
+const reliefMeshes = [];
+
+// Textured room: one node per surface plus the photo relief of built-ins.
+function loadRoomGLB(url, done) {
+  new GLTFLoader().load(url, gltf => {
+    const group = gltf.scene;
+    group.traverse(o => {
+      if (!o.isMesh) return;
+      const nm = o.name + ' ' + (o.parent ? o.parent.name : '');
+      const isRelief = nm.includes('room_relief') || nm.includes('room_builtin');
+      const map = o.material.map || null;
+      if (map) { map.anisotropy = renderer.capabilities.getMaxAnisotropy(); }
+      o.material = new THREE.MeshBasicMaterial({ map, color: 0xffffff, transparent: true, opacity: 1.0,
+                                                 side: isRelief ? THREE.DoubleSide : THREE.FrontSide });
+      o.renderOrder = -1;
+      if (isRelief) reliefMeshes.push(o);
+    });
+    roomMesh = group;
+    scene.add(group);
+    done();
+  }, undefined, e => { console.error(url, e); if (ROOM) loadPLY(ROOM, '__room__', false, done); else done(); });
+}
+function setRoomMode(mode) {
+  if (!roomMesh) return;
+  roomMesh.visible = mode !== 'hidden';
+  const op = mode === 'ghost' ? 0.35 : 1.0;
+  roomMesh.traverse(o => { if (o.isMesh) { o.material.opacity = op; o.material.depthWrite = mode !== 'ghost'; o.material.needsUpdate = true; } });
+}
 
 function loadPLY(url, key, isObject, done) {
   new PLYLoader().load(url, geom => {
@@ -119,7 +151,7 @@ function loadPLY(url, key, isObject, done) {
       material = new THREE.MeshBasicMaterial({ vertexColors: hasColors, side: THREE.FrontSide });
     } else {
       material = new THREE.MeshBasicMaterial({ vertexColors: hasColors, color: hasColors ? 0xffffff : 0xd4c9b5,
-                                               side: THREE.DoubleSide, transparent: true, opacity: 0.35 });
+                                               side: THREE.DoubleSide, transparent: true, opacity: 1.0 });
     }
     const m = new THREE.Mesh(geom, material);
     if (!isObject) { m.renderOrder = -1; roomMesh = m; }
@@ -131,7 +163,7 @@ function loadPLY(url, key, isObject, done) {
 }
 
 let loaded = 0;
-const total = OBJECTS.length + (ROOM ? 1 : 0);
+const total = OBJECTS.length + ((ROOM || ROOM_GLB) ? 1 : 0);
 const progressEl = document.getElementById('progress');
 function onLoad() {
   loaded++;
@@ -152,7 +184,7 @@ function onLoad() {
   document.getElementById('count').textContent = OBJECTS.length;
   let meta = `Objects extent: ${s.x.toFixed(2)} × ${s.y.toFixed(2)} × ${s.z.toFixed(2)}`;
   if (LAYOUT) {
-    if (LAYOUT.estimated_metric_scale) meta += `\nEst. scale: ×${LAYOUT.estimated_metric_scale.toFixed(2)} → metres (camera-height prior)`;
+    if (LAYOUT.estimated_metric_scale) meta += `\nScale: ×${LAYOUT.estimated_metric_scale.toFixed(2)} → metres (${LAYOUT.metric_scale_source || 'camera-height prior'})`;
     if (LAYOUT.ceiling_source) meta += `\nCeiling: ${LAYOUT.ceiling_source}; floor: ${LAYOUT.floor ? LAYOUT.floor.source : '?'}`;
     if (LAYOUT.wall_sources) meta += `\nWalls: ` + Object.entries(LAYOUT.wall_sources).map(([k,v]) => `${k}=${v}`).join(', ');
   }
@@ -173,7 +205,8 @@ FAILED.forEach(f => {
   const l = document.createElement('label'); l.className = 'failed';
   l.textContent = `${f.label} (${f.status || 'failed'})`; list.appendChild(l);
 });
-if (ROOM) loadPLY(ROOM, '__room__', false, onLoad);
+if (ROOM_GLB) loadRoomGLB(ROOM_GLB, onLoad);
+else if (ROOM) loadPLY(ROOM, '__room__', false, onLoad);
 
 // Optional photo point cloud (JSON sidecar written by the pipeline).
 let pointsObj = null;
@@ -192,12 +225,9 @@ document.getElementById('toggle-points').addEventListener('change', async e => {
   pointsObj.visible = e.target.checked;
 });
 
-document.getElementById('room-mode').addEventListener('change', e => {
-  if (!roomMesh) return;
-  const mode = e.target.value;
-  roomMesh.visible = mode !== 'hidden';
-  roomMesh.material.opacity = mode === 'ghost' ? 0.35 : 1.0;
-  roomMesh.material.needsUpdate = true;
+document.getElementById('room-mode').addEventListener('change', e => setRoomMode(e.target.value));
+document.getElementById('toggle-relief').addEventListener('change', e => {
+  reliefMeshes.forEach(m => m.visible = e.target.checked);
 });
 document.getElementById('info').addEventListener('change', e => {
   if (e.target.tagName !== 'INPUT' || !e.target.dataset.t) return;
@@ -297,10 +327,14 @@ def generate_viewer(output_dir: Path, results: List[Dict], room_file: Optional[s
             layout = None
     if room_file and not (output_dir / room_file).exists():
         room_file = None
+    room_glb = None
+    if room_file and (output_dir / room_file).with_suffix(".glb").exists():
+        room_glb = str(Path(room_file).with_suffix(".glb").as_posix())
     points = _points_sidecar(output_dir)
     html = (_TEMPLATE.replace("__OBJECTS_JSON__", json.dumps(entries))
             .replace("__FAILED_JSON__", json.dumps(failed or []))
             .replace("__ROOM_FILE__", json.dumps(room_file) if room_file else "null")
+            .replace("__ROOM_GLB__", json.dumps(room_glb) if room_glb else "null")
             .replace("__LAYOUT_JSON__", json.dumps(layout) if layout else "null")
             .replace("__POINTS_FILE__", json.dumps(points) if points else "null"))
     vpath = output_dir / "viewer.html"

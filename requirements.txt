@@ -7,7 +7,7 @@
 #
 # Versions are what the pipeline is known to run against.
 
-numpy==1.26.4          # 2.x breaks open3d and kaolin — do not upgrade
+numpy==1.26.4          # original pin ("2.x breaks open3d and kaolin"); the dev env currently runs 2.4.1 fine — see ROADMAP CODE-11
 pillow==10.3.0
 scipy>=1.10            # mask clean-up, layout texturing
 requests==2.32.5
@@ -23,3 +23,11 @@ trimesh==4.10.1
 # webapp
 Flask==3.0.3
 flask-cors==6.0.2
+
+# stage 4c + lite export (CPU): plane textures, decimation, texture baking
+opencv-python-headless>=4.8
+fast-simplification>=0.1.7
+xatlas>=0.0.9
+
+# optional: robotics export and headless renders
+# mujoco>=3.2  gymnasium>=1.0  coacd>=1.0  pyrender>=0.1.45

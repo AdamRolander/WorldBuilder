@@ -79,7 +79,8 @@ class RoomLayout:
     bounds_max: List[float]
     wall_sources: Dict[str, str] = field(default_factory=dict)  # side -> evidence
     camera_height: float = 0.0
-    estimated_metric_scale: float = 1.0      # multiply scene units by this for metres (prior: camera at 1.5 m)
+    estimated_metric_scale: float = 1.0      # multiply scene units by this for metres
+    metric_scale_source: str = "camera-height prior (1.5 m)"
     notes: List[str] = field(default_factory=list)
 
     def to_json(self) -> Dict:
@@ -322,6 +323,86 @@ def gravity_rotation(floor_normal: Sequence[float]) -> np.ndarray:
     return rotation_between(np.asarray(floor_normal, float), UP)
 
 
+def refine_gravity(normals: np.ndarray, valid: np.ndarray, up0: Sequence[float],
+                   tol_deg: float = 15.0, iterations: int = 10) -> Tuple[np.ndarray, float]:
+    """Up direction that the *whole* scene agrees on.
+
+    A floor plane fitted to the floor mask alone is fragile: the mask often
+    includes a rug, a step or a shower tray at another height, and a plane
+    through two levels comes out tilted (3-4° in practice, enough to make
+    every object look like it stands on a ramp). But rooms are full of
+    surfaces that are either horizontal (floor, ceiling, table tops) or
+    vertical (walls, cabinet fronts). Starting from ``up0`` we alternate
+    between classifying normals as parallel / perpendicular to the current
+    up (within ``tol_deg``) and solving for the direction that is most
+    parallel to the first set and most perpendicular to the second: the top
+    eigenvector of  Σ_par n nᵀ − Σ_perp n nᵀ.
+
+    Returns ``(up, support)`` where support is the fraction of normals in
+    either set.
+    """
+    n = normals[valid]
+    n = n[np.linalg.norm(n, axis=1) > 0.5]
+    u = np.asarray(up0, float) / np.linalg.norm(up0)
+    if len(n) < 500:
+        return u, 0.0
+    if len(n) > 400_000:
+        n = n[np.random.default_rng(0).choice(len(n), 400_000, replace=False)]
+    c_par, s_perp = math.cos(math.radians(tol_deg)), math.sin(math.radians(tol_deg))
+    support = 0.0
+    for _ in range(iterations):
+        d = n @ u
+        par, perp = np.abs(d) > c_par, np.abs(d) < s_perp
+        support = float((par.sum() + perp.sum()) / len(n))
+        if par.sum() + perp.sum() < 200:
+            break
+        M = n[par].T @ n[par] - n[perp].T @ n[perp]
+        _, vec = np.linalg.eigh(M)
+        new = vec[:, -1]
+        if new @ u < 0:
+            new = -new
+        if float(new @ u) > 1 - 1e-10:
+            u = new
+            break
+        u = new
+    return u, support
+
+
+def floor_offset(points: np.ndarray, valid: np.ndarray, normals: np.ndarray, up: np.ndarray,
+                 floor_mask: Optional[np.ndarray] = None) -> Optional[Tuple[float, int]]:
+    """Signed distance from the camera down to the floor along ``up``.
+
+    Candidates are upward-facing points (on the floor mask when there is
+    one). Their heights are histogrammed and the *lowest* well-supported
+    level wins, so a rug, a platform or a shower tray inside the mask does
+    not raise the floor. Returns ``(offset, support)`` with the floor at
+    ``p·up = -offset``.
+    """
+    H, W = valid.shape
+    facing = (normals @ up) > 0.9
+    cand = valid & facing
+    if floor_mask is not None and floor_mask.any():
+        masked = cand & _resize_mask(floor_mask, (H, W))
+        if masked.sum() >= 200:
+            cand = masked
+    else:
+        cand &= (np.arange(H)[:, None] >= int(0.35 * H))
+    y = points[cand] @ up
+    y = y[y < 0]                                   # the floor is below the camera
+    if len(y) < 100:
+        return None
+    scale = _scene_scale(points, valid)
+    bin_w = 0.01 * scale
+    lo, hi = np.percentile(y, [0.5, 99.5])
+    nb = int(min(400, max(8, (hi - lo) / bin_w + 1)))
+    hist, edges = np.histogram(y, bins=nb, range=(lo, hi + 1e-9))
+    hist = np.convolve(hist, [1, 1, 1], mode="same")          # a level may straddle two bins
+    level = int(np.flatnonzero(hist >= 0.3 * hist.max())[0])
+    centre = 0.5 * (edges[level] + edges[level + 1])
+    sel = np.abs(y - centre) < 1.5 * bin_w
+    return -float(np.median(y[sel])), int(sel.sum())
+
+
 def rotate_pose(pose: Dict, R_world: np.ndarray) -> Dict:
     """Apply a world rotation (column-vector matrix) to a SAM 3D pose dict
     so that ``world_vertices(v, new_pose) == world_vertices(v, pose) @ R.T``.
@@ -474,7 +555,8 @@ def textured_plane(origin: np.ndarray, axis_u: np.ndarray, axis_v: np.ndarray,
     if inside.any():
         ui = np.clip(np.round(u[inside]).astype(int), 0, Wi - 1)
         vi = np.clip(np.round(v[inside]).astype(int), 0, Hi - 1)
-        z_obs = depth_map[vi, ui]
+        Hd, Wd = depth_map.shape[:2]         # the depth map may be smaller than the photo
+        z_obs = depth_map[np.clip((vi * Hd) // Hi, 0, Hd - 1), np.clip((ui * Wd) // Wi, 0, Wd - 1)]
         # Surface-consistency test, not just an occlusion test: a vertex is
         # textured only if the point map actually observed a surface there.
         # A prior-placed ceiling floating in front of the far wall must NOT
@@ -553,13 +635,16 @@ def estimate_layout(points_world: np.ndarray, valid: np.ndarray,
                     structural_masks: Optional[Dict[str, np.ndarray]] = None,
                     padding_frac: float = 0.05,
                     camera_height_prior_m: float = 1.5,
-                    rng: Optional[np.random.Generator] = None) -> RoomLayout:
+                    rng: Optional[np.random.Generator] = None,
+                    metric_scale: Optional[float] = None) -> RoomLayout:
     """Fit floor, gravity, yaw, walls and ceiling.
 
     ``points_world`` (H,W,3) in SAM 3D's camera-frame world; ``valid`` (H,W).
     ``object_aabbs_world`` are (min, max) pairs in the same frame, used to
     make sure the room contains every object. ``structural_masks`` may hold
-    "floor", "wall", "ceiling" boolean masks from SAM 3.
+    "floor", "wall", "ceiling" boolean masks from SAM 3. ``metric_scale``
+    (metres per scene unit, e.g. from ``scripts/estimate_metric_scale.py``)
+    replaces the camera-height prior.
     """
     structural_masks = structural_masks or {}
     notes: List[str] = []
@@ -585,6 +670,29 @@ def estimate_layout(points_world: np.ndarray, valid: np.ndarray,
         tilt = math.degrees(math.acos(min(1.0, max(-1.0, float(np.asarray(floor.normal) @ UP)))))
         notes.append(f"floor from {floor.source}: tilt {tilt:.1f}°, inliers {floor.inlier_fraction:.0%}")
 
+    # Gravity from every horizontal and vertical surface in the scene, not
+    # just the floor patch; then the floor height along that direction.
+    up0 = np.asarray(floor.normal, float)
+    up, g_support = refine_gravity(normals, valid, up0)
+    delta = math.degrees(math.acos(min(1.0, float(up @ up0))))
+    if g_support >= 0.4 and delta <= 15.0:
+        G = gravity_rotation(up)
+        notes.append(f"gravity refined on all surfaces: {delta:.1f}° from the floor fit "
+                     f"(support {g_support:.0%})")
+        fo = floor_offset(points_world, valid, normals, up, structural_masks.get("floor"))
+        if fo is not None and not floor.source.startswith("fallback"):
+            floor = Plane(normal=up.tolist(), offset=fo[0], inliers=fo[1],
+                          inlier_fraction=floor.inlier_fraction, source=floor.source)
+        elif not floor.source.startswith("fallback"):
+            # keep the fitted plane's height under the camera, new direction
+            floor = Plane(normal=up.tolist(), offset=float(floor.offset / max(1e-6, up @ up0)),
+                          inliers=floor.inliers, inlier_fraction=floor.inlier_fraction, source=floor.source)
+        else:
+            floor = Plane(normal=up.tolist(), offset=0.0, inliers=floor.inliers,
+                          inlier_fraction=floor.inlier_fraction, source=floor.source)
+    else:
+        notes.append(f"gravity refinement skipped (support {g_support:.0%}, {delta:.1f}° away)")
+
     # Gravity-align, then yaw.
     N_g = normals @ G.T
     yaw, support = dominant_yaw_deg(N_g[valid])
@@ -609,7 +717,13 @@ def estimate_layout(points_world: np.ndarray, valid: np.ndarray,
     else:
         floor_y = -float(floor.offset)          # camera at origin, normal is +Y after G
     camera_height = -floor_y
-    metric_scale = camera_height_prior_m / camera_height if camera_height > 1e-6 else 1.0
+    scale_source = "camera-height prior (1.5 m)"
+    if metric_scale is not None and metric_scale > 0:
+        scale_source = "MoGe-2 metric point map"
+        notes.append(f"metric scale ×{metric_scale:.3f} from MoGe-2 (camera {camera_height * metric_scale:.2f} m "
+                     f"above the floor)")
+    else:
+        metric_scale = camera_height_prior_m / camera_height if camera_height > 1e-6 else 1.0
 
     # Object bounds in the aligned frame.
     obj_min = np.full(3, np.inf); obj_max = np.full(3, -np.inf)
@@ -667,7 +781,8 @@ def estimate_layout(points_world: np.ndarray, valid: np.ndarray,
         gravity_rotation=G.tolist(), yaw_deg=float(yaw), floor=floor, floor_y=floor_y,
         ceiling_y=float(ceil_y), ceiling_source=ceil_src,
         bounds_min=bmin.tolist(), bounds_max=bmax.tolist(), wall_sources=sources,
-        camera_height=float(camera_height), estimated_metric_scale=float(metric_scale), notes=notes,
+        camera_height=float(camera_height), estimated_metric_scale=float(metric_scale),
+        metric_scale_source=scale_source, notes=notes,
     )
     return layout
 

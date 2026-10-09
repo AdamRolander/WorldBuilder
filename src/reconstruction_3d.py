@@ -22,7 +22,6 @@ What changed from the demo-era version (docs/AUDIT.md §3):
 """
 from __future__ import annotations
 
-import json
 import os
 import sys
 import time
@@ -32,7 +31,7 @@ from typing import Dict, List, Optional
 import numpy as np
 from PIL import Image
 
-from src.geometry import world_vertices
+from src import stage3_cache
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _SAM3D_REPO = _PROJECT_ROOT / "sam3d_objects_repo"
@@ -166,6 +165,24 @@ class SAM3DReconstructor:
             intr = intrinsics_from_pointmap(points.detach().float().cpu().numpy(), valid_np)
         return {"pointmap": points, "intrinsics": intr, "valid": valid_np}
 
+    # -- metric scale -----------------------------------------------------------
+    @staticmethod
+    def _estimate_metric_scale(models_dir: Path) -> None:
+        """Run ``scripts/estimate_metric_scale.py`` for this scene if MoGe-2
+        is installed (it needs a newer ``moge`` than SAM 3D pins, hence the
+        subprocess). Failure is not fatal: stage 4 falls back to the prior."""
+        import subprocess
+        script = _PROJECT_ROOT / "scripts" / "estimate_metric_scale.py"
+        if os.environ.get("WORLDBUILDER_METRIC", "1") == "0" or not (_PROJECT_ROOT / "third_party" / "moge2").exists():
+            return
+        try:
+            out = subprocess.run([sys.executable, str(script), str(Path(models_dir).parent)],
+                                 capture_output=True, text=True, timeout=300)
+            line = [ln for ln in out.stdout.splitlines() if "per scene unit" in ln]
+            print(f"✓ Metric scale: {line[-1]}" if line else f"⚠️  Metric scale not estimated: {out.stderr[-200:]}")
+        except Exception as e:
+            print(f"⚠️  Metric scale not estimated: {str(e)[:120]}")
+
     # -- per-object reconstruction -----------------------------------------
     def reconstruct_objects(self, image_path: str, segmentation_results: List[Dict],
                             output_dir: str = "outputs/3d_models", quality: str = 'high',
@@ -175,16 +192,22 @@ class SAM3DReconstructor:
 
         Returns one dict per *successful* object (``status == "ok"``); failed
         ones are appended with ``status`` set and no ``ply_path`` so callers
-        can report them. Writes ``room.ply``, ``layout.json``,
-        ``scene_pointmap.npz`` and ``scene_combined.ply`` next to the objects.
+        can report them. Raw output goes to ``<output_dir>/stage3/``
+        (``src/stage3_cache.py``); ``src/scene_assembly.py`` then writes the
+        placed scene next to it.
         """
         import torch
         from inference import load_image
 
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
+        stage3_cache.cache_dir(output_path).mkdir(parents=True, exist_ok=True)
         print(f"\nLoading image: {image_path}")
-        image = load_image(str(image_path))          # HxWx3 uint8 (RGB)
+        image = load_image(str(image_path))          # HxWx3 uint8 (RGB) for ordinary photos
+        # Greyscale, palette and RGBA files come back with another shape and
+        # every object then fails inside SAM 3D; normalise once here.
+        if image.ndim != 3 or image.shape[2] != 3:
+            image = np.asarray(Image.open(image_path).convert("RGB"))
         H, W = image.shape[:2]
 
         use_shared = os.environ.get("WORLDBUILDER_SHARED_POINTMAP", "1") != "0"
@@ -228,11 +251,11 @@ class SAM3DReconstructor:
                 rotation = output['rotation'].cpu().numpy()[0]
                 scale = output['scale'].cpu().numpy()[0]
                 safe_label = label.replace(' ', '_').replace('/', '_')
-                ply_path = output_path / f"{obj_id:03d}_{safe_label}.ply"
-                save_glb_as_ply(output, ply_path)
+                model_path = stage3_cache.cache_dir(output_path) / f"{obj_id:03d}_{safe_label}.ply"
+                save_glb_as_ply(output, model_path)
                 results.append({
                     'id': obj_id, 'label': label, 'status': 'ok',
-                    'ply_path': str(ply_path),
+                    'model_path': str(model_path),
                     'translation': translation.tolist(),
                     'rotation_quaternion': rotation.tolist(),
                     'scale': scale.tolist(),
@@ -257,149 +280,26 @@ class SAM3DReconstructor:
         print(f"✓ Reconstructed {len(results)}/{len(segmentation_results)} objects")
 
         # ------------------------------------------------------------------
-        # Scene assembly (CPU). Keep the model-space PLYs until the very end:
-        # the layout/assembly steps only change poses.
+        # Persist the raw stage-3 output, then assemble on the CPU from it.
+        # Assembly never mutates the cache, so it can be replayed later
+        # (scripts/replay_assembly.py) without touching the GPU.
         # ------------------------------------------------------------------
+        stage3_cache.save_raw(output_path, results, failed, str(image_path))
+        if scene_pm is not None:
+            stage3_cache.save_pointmap(
+                output_path, scene_pm["pointmap"].detach().float().cpu().numpy(),
+                scene_pm["valid"], scene_pm["intrinsics"], (H, W))
+        self._estimate_metric_scale(output_path)
         if results:
+            from src.scene_assembly import assemble_from_cache
             try:
-                self._assemble(results, scene_pm, image, structural_masks, output_path,
-                                        build_room=build_room)
+                results, failed = assemble_from_cache(output_path, image, structural_masks,
+                                                      build_room=build_room)
             except Exception as e:
                 import traceback
                 traceback.print_exc()
                 print(f"⚠️  Scene assembly failed: {e}")
-
-        if results:
-            self._save_combined_scene(results, output_path / "scene_combined.ply")
-            self._bake_world_space_plys(results)
-
         return results + failed
-
-    # -- assembly -------------------------------------------------------------
-    def _assemble(self, results: List[Dict], scene_pm: Optional[Dict], image: np.ndarray,
-                  structural_masks: Optional[Dict[str, np.ndarray]], output_path: Path,
-                  build_room: bool = True):
-        from src import room_layout as rl
-        from src.room_generator import (
-            assemble_scene,
-            compute_per_object_aabb,
-            compute_scene_bounds,
-            make_box_room,
-        )
-
-        print("\nAssembling scene...")
-        layout = None
-        floor_y = None
-        if scene_pm is not None:
-            P = scene_pm["pointmap"].detach().float().cpu().numpy().astype(np.float64)
-            valid = scene_pm["valid"]
-            aabbs = compute_per_object_aabb(results)
-            pairs = [(np.array(b['min']), np.array(b['max'])) for b in aabbs.values()]
-            layout = rl.estimate_layout(P, valid, pairs, structural_masks)
-            for n in layout.notes:
-                print(f"  layout: {n}")
-            # Rotate every object pose into the gravity/wall-aligned frame.
-            R = layout.R_total
-            for r in results:
-                r.update(rl.rotate_pose(r, R))
-            floor_y = layout.floor_y
-            # Point cloud for debugging / future viewers (downsampled).
-            step = max(1, int(np.sqrt(P.shape[0] * P.shape[1] / 120_000)))
-            Pd = (P[::step, ::step] @ R.T).astype(np.float32)
-            Cd = np.array(Image.fromarray(image).resize((Pd.shape[1], Pd.shape[0]), Image.BILINEAR))
-            Vd = valid[::step, ::step]
-            np.savez_compressed(output_path / "scene_pointmap.npz",
-                                points=Pd[Vd], colors=Cd[Vd], intrinsics=scene_pm["intrinsics"],
-                                R_total=R.astype(np.float32), image_hw=np.array(image.shape[:2]))
-
-        diag = assemble_scene(results, floor_y=floor_y,
-                              stretch_structural=os.environ.get("WORLDBUILDER_STRETCH_STRUCTURAL") == "1")
-
-        if build_room:
-            bounds = diag.get('bounds') or compute_scene_bounds(compute_per_object_aabb(results))
-            room = None
-            if layout is not None and scene_pm is not None:
-                try:
-                    # Objects poking through *detected* walls are nudged back
-                    # in; the room only grows toward sides with no wall evidence.
-                    from src.room_generator import clamp_to_room
-                    aabbs = compute_per_object_aabb(results)
-                    enforce = dict(layout.wall_sources)
-                    floor_fitted = not str(layout.floor.source).startswith("fallback")
-                    if floor_fitted:
-                        enforce["y_min"] = "floor"
-                        layout.bounds_min[1] = layout.floor_y
-                    n_clamped = clamp_to_room(results, aabbs, layout.bounds_min, layout.bounds_max, enforce)
-                    if n_clamped:
-                        print(f"  nudged {n_clamped} object(s) back inside detected walls")
-                        bounds = compute_scene_bounds(aabbs)
-                    bmin, bmax = list(layout.bounds_min), list(layout.bounds_max)
-                    for side, src in layout.wall_sources.items():
-                        axis = 0 if side.startswith("x") else 2
-                        if str(src).startswith("wall"):
-                            continue
-                        if side.endswith("min"):
-                            bmin[axis] = min(bmin[axis], bounds['min'][axis] - 0.02)
-                        else:
-                            bmax[axis] = max(bmax[axis], bounds['max'][axis] + 0.02)
-                    # A fitted floor is evidence; never lower it to a sunk object.
-                    bmin[1] = layout.floor_y if floor_fitted else min(layout.floor_y, bounds['min'][1])
-                    bmax[1] = max(layout.ceiling_y, bounds['max'][1] + 0.02)
-                    layout.bounds_min, layout.bounds_max = bmin, bmax
-                    P_cv = scene_pm["pointmap"].detach().float().cpu().numpy() @ rl.OPENCV_TO_WORLD.T
-                    depth = P_cv[..., 2].astype(np.float64)
-                    room, stats = rl.build_textured_room(layout, scene_pm["intrinsics"], image, depth)
-                    for k, v in stats.items():
-                        print(f"  room {k}: {v['visible_fraction']:.0%} textured from photo")
-                    rl.save_layout(layout, output_path / "layout.json",
-                                   extra={"plane_texture_stats": stats, "assembly": _jsonable(diag)})
-                except Exception as e:
-                    import traceback
-                    traceback.print_exc()
-                    print(f"⚠️  Textured room failed ({e}); using box room")
-                    room = None
-            if room is None and bounds is not None:
-                room = make_box_room(bounds)
-                (output_path / "layout.json").write_text(json.dumps(
-                    {"source": "box-fallback", "bounds": bounds, "assembly": _jsonable(diag)}, indent=2))
-            if room is not None:
-                room_path = output_path / "room.ply"
-                room.export(str(room_path), file_type='ply')
-                print(f"✓ room.ply saved ({room_path.stat().st_size / 1024:.0f} KB)")
-        return layout
-
-    # -- exports -----------------------------------------------------------------
-    @staticmethod
-    def _world_mesh(result: Dict):
-        import trimesh
-        mesh = trimesh.load(result['ply_path'], process=False)
-        wv = world_vertices(np.asarray(mesh.vertices), result)
-        colors = mesh.visual.vertex_colors if mesh.visual.kind == 'vertex' else None
-        return trimesh.Trimesh(vertices=wv, faces=mesh.faces, vertex_colors=colors, process=False)
-
-    def _save_combined_scene(self, results: List[Dict], output_path: Path):
-        import trimesh
-        meshes = [self._world_mesh(r) for r in results
-                  if r.get('ply_path') and Path(r['ply_path']).exists()]
-        if not meshes:
-            return
-        combined = trimesh.util.concatenate(meshes)
-        combined.export(str(output_path), file_type='ply')
-        mb = output_path.stat().st_size / (1024 * 1024)
-        print(f"✓ scene_combined.ply: {len(combined.faces):,} triangles ({mb:.2f} MB)")
-
-    def _bake_world_space_plys(self, results: List[Dict]):
-        """Overwrite each object PLY with world-space vertices so viewers and
-        DCC importers need no pose math. Runs last: everything above consumes
-        model-space PLYs plus poses."""
-        baked = 0
-        for r in results:
-            if not r.get('ply_path') or not Path(r['ply_path']).exists():
-                continue
-            self._world_mesh(r).export(str(r['ply_path']), file_type='ply')
-            r['ply_space'] = 'world'
-            baked += 1
-        print(f"✓ Baked {baked}/{len(results)} PLYs to world space")
 
 
 def _jsonable(d):

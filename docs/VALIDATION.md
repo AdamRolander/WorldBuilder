@@ -31,7 +31,7 @@ demo-day code (`MigrateSAM @ a47ffff`).
 | Detection | `scripts/bench_detectors.py --live demo_day --save bench.json` | mean recall vs Gemini not lower than the last recorded run |
 | Segmentation | count instances in `segmentation_results.json`; open `masks/` | no label lost that was found before; no mask > 60 % of frame |
 | Layout | `3d_models/layout.json` → `notes`, `wall_sources`, `plane_texture_stats` | floor from mask/geometric (not fallback) on indoor photos; ≥1 wall detected when a wall is visible; textured fraction of the far wall > 0.4 |
-| Assembly | console: `support relations`, `snapped`, `collision resolution`, `nudged … inside detected walls` | no hanging object snapped; supports look physical; pushes < number of objects |
+| Assembly | `python scripts/audit_scene.py outputs/<scene>` (+ `render_scene.py` for a contact sheet); console lines `contact:`, `removed:` | mean silhouette IoU not lower than the last recorded run (§4.1); nothing removed that is plainly a good object |
 | Timing | `reconstruction_results.json → metadata.timings_sec` | per-object reconstruction time not worse than baseline |
 | Exports | `scene.glb` opens in <https://gltf-viewer.donmccurdy.com>; `viewer.html` loads | — |
 
@@ -145,7 +145,262 @@ Still to do: a 5–6 photo sweep including a dark scene
 (`demo_day/lib2.webp`), an outdoor one (`demo_day/o2.webp`) and a
 portrait-orientation phone photo, with screenshots of each viewer.
 
-## 4. Known limitations seen in these runs
+## 4. Results recorded 2026-10-08 (evidence-based placement, textured room)
+
+Same six photos as §3.7 (`9-17-validation/`), same detections and masks
+(copied over, `main.py --resume`), SAM 3D rerun once to fill the stage-3
+cache, then stage 4 replayed on the CPU. "Before" is the September output
+as it was on disk; "after" is this branch. Numbers from
+`scripts/audit_scene.py`:
+
+* **silhouette IoU** — each placed mesh projected back through the photo's
+  camera, compared with its SAM 3 mask (mean over objects; 1.0 = the object
+  is exactly where and how big the photo shows it);
+* **< 0.3** — objects that are badly off;
+* **offset** — distance between the object's visible surface and the point
+  map under its mask, in units of the object's own size.
+
+### 4.1 Placement
+
+| scene | objects | silhouette IoU | objects < 0.3 | offset |
+| --- | ---: | ---: | ---: | ---: |
+| bathroom3 | 36 → 34 | 0.35 → **0.51** | 18 → 6 | 0.55 → 0.30 |
+| cl5 (classroom) | 30 → 24 | 0.35 → **0.49** | 16 → 6 | 0.35 → 0.21 |
+| k1 (kitchen) | 38 → 35 | 0.29 → **0.50** | 20 → 6 | 0.47 → 0.30 |
+| lib2 (library) | 44 → 38 | 0.28 → **0.58** | 22 → 2 | 0.61 → 0.17 |
+| lr2 (living room) | 35 → 32 | 0.23 → **0.48** | 22 → 8 | 0.47 → 0.34 |
+| ucsd-basement lab | 18 → 17 | 0.28 → **0.58** | 11 → 2 | 0.52 → 0.24 |
+| **mean** | | **0.30 → 0.52** | 109 → 30 of ~200 | 0.50 → 0.26 |
+
+For reference, SAM 3D's poses with *no* placement at all score 0.48 on the
+bathroom: the September placement (0.35) was making scenes worse than
+leaving them alone, mostly through box-based "support" relations (the
+shower tray's box carried the sink, the rug and a side table) and a floor
+plane tilted 3.3° by a mask that spanned two floor levels.
+
+What the three reported problems turned out to be:
+
+* **Bathroom "standing on a ramp".** Floor mask = carpet + raised shower
+  tray; one plane through both is tilted 4.2° from the camera's up. Gravity
+  from every horizontal and vertical surface in the point map
+  (`room_layout.refine_gravity`, 81 % of normals agree) differs from that
+  fit by 3.3° and is right. The floor height is now the lowest
+  well-supported level, not the plane's average.
+* **Classroom desks inside each other.** SAM 3 returned a two-desk pod and
+  each desk top as separate "desk" masks (IoU < 0.5, so NMS kept all), and
+  two masks for one desk further back. `placement.contained_parts` removes
+  masks that are ≥ 85 % inside a larger same-label mask;
+  `find_duplicates` removes same-label objects sharing a volume. Four
+  duplicates went (two desk tops, one doubled desk, and a "presentation
+  screen" that was the picture area of the other one), plus two meshes
+  that did not match their masks.
+* **Kitchen items off the counter.** Three causes: (1) support assigned by
+  box overlap ("knife block on appliance", "pot on stove on oven") moved
+  items up to a metre; (2) depth errors per object, now refit against the
+  point map (10 objects, factors 0.91–1.35; 5–10 objects in every scene); (3) there was no counter — the
+  detector is told not to list countertops, so correctly placed fruit
+  floated over nothing. The relief (§4.2) is what they stand on now.
+
+Other removals per scene are listed in `reconstruction_results.json →
+failed` with a reason (`structural: floor`, `part or group of #20`,
+`removed: mesh does not match its mask (IoU 0.03)`, `duplicate of #23`).
+
+### 4.2 Room
+
+| | September | October |
+| --- | --- | --- |
+| representation | 96×96 vertex-coloured grid per plane | one UV-textured quad per plane, texture long side 1.5× the photo's (512–2048 px), in `room.glb` |
+| hidden areas | nearest visible colour dragged sideways, blended with the median | largest visible rectangle tiled with mirror symmetry and feathered in; median colour when the visible part is not texture-like; unseen walls take the seen walls' colour |
+| objects baked into the room | yes (a second rug on the floor) | no (object pixels are excluded) |
+| built-ins (counters, cabinets, beams, sloped ceilings) | absent | photo relief from the point map: 3k–73k triangles, 3–42 % of the frame (most in the kitchen, least in the living room) |
+
+Fill mode chosen per plane on the six scenes: floors 2× tiled / 4× median;
+far walls 1× tiled / 5× median. So the material-continuing fill fires on a
+minority of planes today (bathroom carpet, classroom wood floor); the rest
+are either too occluded to offer a large enough visible rectangle or not
+texture-like (walls with windows, screens, shelving) and get the median
+colour, which is flat but clean. Never-seen planes take the seen walls'
+colour.
+
+### 4.3 Exports
+
+| scene | `scene.glb` | `scene_lite.glb` | triangles full → lite |
+| --- | ---: | ---: | --- |
+| k1 | 394 MB | 16.6 MB | 19.4 M → ~0.35 M |
+| lib2 | 491 MB | 15.0 MB | |
+| lr2 | 381 MB | 14.3 MB | |
+| ucsd lab | 209 MB | 7.5 MB | |
+| bathroom3 | 462 MB | 22.8 MB | |
+| cl5 | 186 MB | 9.4 MB | |
+
+MuJoCo (`python -m src.mujoco_export outputs/10-08-validation/k1_q --stabilize --check`):
+35 bodies, 16 free; unstabilised, 6 of them drift > 5 cm in 2 s (faucet,
+a bottle, bowl, cutting board, a fruit, rolling pin); after `--stabilize`
+10 remain free with ≤ 4 cm drift. The `--mjx` variant loads and steps in
+`mujoco.mjx` (CPU JAX, 100 steps in 1.4 s after compile).
+
+### 4.4 End to end from Blender, on a photo not used for tuning
+
+`blender --background --python scripts/test_blender_addon.py -- --photo test_images/bedroom.jpeg`
+against a local server with the local VLM (Blender 5.0.1):
+
+| | |
+| --- | --- |
+| pipeline | 348 s: detect 34 s, segment 13 s, reconstruct + assemble 275 s (40 instances → 34 objects kept) |
+| removed | "wooden floor" (structural: floor), 4 nested "window shutter" masks, 1 pillow (part of another mask) |
+| placement | silhouette IoU 0.57 (median 0.63), 4 objects < 0.3, 11 on the floor |
+| peak VRAM (allocated) | segment 3.9 GB, reconstruct 19.2 GB |
+| import | 13.7 MB lite GLB, 0.4 s, 34 objects + 7 room parts, 41/41 meshes textured, 277k polygons |
+
+`blender --command extension validate` passes; it failed before on two
+over-long manifest strings. The viewer was checked in headless Chrome
+(textured room, relief toggle, object list).
+
+### 4.5 Reproducing
+
+```bash
+# once per scene, GPU: fills 3d_models/stage3/
+python main.py --input-dir 9-17-validation --output outputs/10-08-validation --detector qwen --resume
+# afterwards, CPU only:
+python scripts/replay_assembly.py outputs/10-08-validation/k1_q                      # this branch
+python scripts/replay_assembly.py outputs/10-08-validation/k1_q --placement legacy   # September rules
+python scripts/replay_assembly.py outputs/10-08-validation/k1_q --placement raw      # SAM 3D untouched
+python scripts/audit_scene.py outputs/10-08-validation/k1_q                          # table + overlay
+python scripts/render_scene.py outputs/10-08-validation/k1_q                         # contact sheet
+```
+
+## 5. Second pass, 2026-10-08 (settling, pose search, predictive textures, built-ins, metric scale)
+
+Same six photos, stage 4 replayed on the CPU from the same stage-3 caches;
+"before" is §4's result (kept in `outputs/10-08-pass1/`), "after" is
+`outputs/10-08-validation/`. Then four photos that were not used for any
+tuning (§5.3). Gallery pages: `outputs/10-08-validation/index.html`,
+`outputs/10-08-newphotos/index.html`.
+
+### 5.1 Placement and scale
+
+| scene | objects | silhouette IoU | objects < 0.3 | settled | pose-searched | instances shared | built-in boxes | metres per unit (was prior) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| bathroom3 | 34 → 34 | 0.51 → **0.64** | 6 → 1 | 0 | 14 | 2 | 6 | 1.48 (2.11) |
+| cl5 | 24 → 23 | 0.49 → **0.51** | 6 → 6 | 1 | 7 | 3 | 1 | 2.95 (4.12) |
+| k1 | 35 → 35 | 0.50 → **0.54** | 6 → 3 | 3 | 14 | 2 | 7 | 1.35 (2.05) |
+| lib2 | 38 → 40 | 0.58 → **0.62** | 2 → 3 | 3 | 10 | 7 | 3 | 2.55 (4.30) |
+| lr2 | 32 → 32 | 0.48 → **0.54** | 8 → 6 | 2 | 14 | 1 | 0 | 3.06 (4.30) |
+| ucsd-basement-prototype-lab | 17 → 17 | 0.58 → **0.62** | 2 → 1 | 2 | 5 | 1 | 9 | 1.72 (2.19) |
+| **mean** | | **0.52 → 0.58** | | | | | | |
+
+Silhouette IoU here is the plain one of §4 (no allowance for occlusion),
+so replacing a visible chair fragment by a whole chair that is half hidden
+behind a desk *lowers* it; the classroom's flat number hides its largest
+visual change. What each column means:
+
+* **settled** — free-standing objects with no visible contact, put on what
+  is under them (straight down, along the rays, or stretched downward when
+  the mesh is short because its lower part was never seen). Objects the
+  photo shows mounted on a surface or hanging from the ceiling are left
+  alone (`placement.attachment`).
+* **pose-searched** — objects whose occlusion-aware score was under 0.5 and
+  improved by at least 0.05 under a size / position search.
+* **instances shared** — objects that took the mesh of the best-observed
+  instance of the same model.
+* **metres per unit** — MoGe-2's metric depth against the scale-free point
+  map, median over pixels (spread ±1–5 %); in brackets the old
+  camera-at-1.5 m prior, which overestimated every one of these scenes by
+  27–69 %. Measured ceilings are now 2.0–3.2 m across the ten scenes
+  (two at 2.0–2.1 m look some 10–15 % low for a real room: the scale is
+  plausible, not verified).
+
+Reported issues and what the logs show now: living-room pillows are slid
+in front of the sofa mesh that hid them (5 pillows and a throw, factors
+0.86–0.93) and the corner plant is back inside the observed wall; the kitchen island (a
+short mesh cut by the bottom of the frame) is stretched to the floor; three
+of eleven classroom chairs are replaced by the best-observed chair, the
+rest keep their own meshes.
+
+### 5.2 Room
+
+| scene | floor | ceiling | far wall | side walls | wall behind camera |
+| --- | --- | --- | --- | --- | --- |
+| bathroom3 | tiled (9% seen) | tiled (17% seen) | tiled (38% seen) | like wall_z_max (0% seen); tiled (6% seen) | like wall_z_max (0% seen) |
+| cl5 | tiled (20% seen) | tiled (4% seen) | tiled (78% seen) | tiled (22% seen); tiled (11% seen) | like wall_z_max (0% seen) |
+| k1 | median (14% seen) | tiled (23% seen) | banded (2% seen) | like wall_x_max (0% seen); tiled (6% seen) | like wall_x_max (0% seen) |
+| lib2 | tiled (17% seen) | fallback (0% seen) | tiled (45% seen) | banded (11% seen); tiled (5% seen) | like wall_z_max (0% seen) |
+| lr2 | tiled (4% seen) | tiled (22% seen) | tiled (64% seen) | like wall_z_max (0% seen); banded (11% seen) | like wall_z_max (0% seen) |
+| ucsd-basement-prototype-lab | tiled (7% seen) | tiled (28% seen) | tiled (13% seen) | banded (1% seen); like wall_z_max (0% seen) | like wall_z_max (0% seen) |
+
+`tiled`: predicted from the seen part with detail (walls: per-row dominant
+colour + sideways-tiled detail; floors/ceilings: lighting-free mirrored
+tiling). `banded`: per-row colours only. `like wall_…`: nothing of this
+wall was seen, so it takes the named wall's predicted make-up. `median` /
+`fallback`: flat colour. In §4 the same twelve floor and far-wall planes
+were 3× tiled, 9× flat; walls behind the camera and unseen side walls were
+all flat.
+
+Built-ins: 0–9 solid boxes per scene behind the relief (kitchen 7,
+including the cabinet runs under both counters and the wall-cabinet
+block; none in the two living rooms, which have no built-ins in view);
+each is exported to MuJoCo as a static collision box.
+
+### 5.3 Photos not used for tuning
+
+`demo_day/lr3.jpg`, `demo_day/cl2.jpg`, `demo_day/k3.png`,
+`test_images/bathroom1.jpg`, full pipeline with the local VLM:
+
+| photo | instances → objects | silhouette IoU (median) | objects < 0.3 | metres per unit | ceiling | wall-clock |
+| --- | ---: | ---: | ---: | ---: | --- | ---: |
+| bathroom1 | 22 → 22 | 0.63 (0.72) | 2 | 1.25 | 2.01 m (geometric) | 285 s |
+| cl2 | 89 → 79 | 0.55 (0.59) | 6 | 2.74 | 2.80 m (geometric) | 984 s |
+| k3 | 66 → 61 | 0.58 (0.58) | 2 | 2.12 | 2.84 m (geometric) | 755 s |
+| lr3 | 32 → 29 | 0.56 (0.58) | 5 | 2.90 | 3.17 m (geometric) | 367 s |
+
+`k3.png` is a palette PNG; every object failed in stage 3 until the image
+was converted to RGB on load (fixed, rerun). In the same kitchen the layout
+stage took a tall cabinet front for the left wall and 47 of 61 objects
+stood "beyond" it; a fitted wall that a quarter of the objects are beyond
+is now treated as not a wall (offset 1.75 → 0.25). Both were found only
+because the photo was new. The 89-instance classroom spent 16 minutes in
+stage 3–4, of which roughly 12 are SAM 3D.
+
+MuJoCo, all ten scenes, `--stabilize`: 2–22 objects welded per scene,
+1–12 left free, residual drift ≤ 5 cm over 2 s.
+
+### 5.4 Cost
+
+Stage 4 went from ~10 s to 20–100 s per scene (pose search and instance
+search splat each candidate pose into the photo); the lite GLB adds ~25 s.
+MoGe-2 adds under a second on the GPU.
+
+## 6. Known limitations seen in these runs
+
+* **Instance sharing is conservative**: it would rather keep eight
+  slightly different chairs than merge two different objects, and its
+  same-model test (hue plus a 16×16 crop correlation) is crude.
+* **Wall prediction assumes an ordinary wall**: uniform along its length,
+  layered over its height. A wall never seen gets no windows or doors, and
+  one odd region can be continued along the whole wall.
+* **Built-in boxes are coarse**: flat-coloured on unseen sides, one box
+  per seen face, none where no face was seen.
+* **The visibility rule moves the smaller object**, also when the larger
+  mesh is the wrong one.
+* **Plain silhouette IoU under-rates occluded objects**; an
+  occlusion-aware score exists in `src/pose_fit.py` and should become the
+  audit's headline number.
+
+Earlier limitations (first pass), most still true:
+
+
+* **Partially visible objects stay partial.** A chair seen as a seat back
+  behind a desk becomes a small floating slab: SAM 3D reconstructed what
+  the mask showed. Placement leaves it where the photo has it. `PIPE-19`.
+* **The relief is 2.5D** and raw: wavy counter tops, no back sides, holes
+  where large objects stood in front. `PIPE-22`.
+* **Tiling shows on strongly lit floors** (bathroom: mirrored shadow
+  blobs). `PIPE-10`.
+* **Faint object ghosts on walls** where a mask was a few pixels too small
+  (lr2's pendant lamps). Dilating blocked pixels further trades this
+  against losing real wall.
+* **Six of 16 free kitchen objects do not rest** in MuJoCo without
+  `--stabilize`: their supporter's convex hull is not under them.
 
 * Ceiling height is "measured" when a downward-facing plane is visible,
   otherwise a prior (2.6 m at the camera-height scale). Both living-room

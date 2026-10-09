@@ -5,6 +5,57 @@ versions follow SemVer once `v0.2.0` is tagged.
 
 ## [Unreleased] — branch `audit-and-roadmap`
 
+### Added (October 2026, second pass)
+- Silhouette pose search with an occlusion- and depth-aware score (`src/pose_fit.py`);
+  gravity settling of free-standing objects (shift / ray slide / downward stretch);
+  ray-slide wall clamp; visibility ordering that ignores transparent objects.
+- Instance sharing: fragments and look-alike repeats take the best-observed
+  instance's mesh at its true size.
+- Predictive room textures: walls row by row from the dominant seen material,
+  lighting-free tiling, grazing-angle texels predicted, flush objects kept in the
+  wall, unseen walls borrow the best-seen wall's make-up.
+- Solid built-ins behind the relief (`src/builtin_boxes.py`), exported as MuJoCo
+  collision boxes.
+- Metric scale from MoGe-2 (`scripts/estimate_metric_scale.py`, isolated under
+  `third_party/`); `layout.metric_scale_source`.
+- `scripts/make_gallery.py`; 70 CPU tests.
+
+### Fixed (October 2026, second pass)
+- Room box trimmed 1 % of object extents on undetected sides (objects on the boundary).
+- A tall object raised an observed ceiling and blanked its texture.
+- Audit read the original scene's meshes when run on a copied scene.
+
+### Added (October 2026)
+- Evidence-based placement (`src/placement.py`): depth refit along viewing rays
+  against the point map, support from the surface under each mask (floor / object /
+  unmodelled surface), axis-agnostic upright correction, every move kept only if the
+  silhouette still matches the mask; removal of part/group masks, structural
+  duplicates, same-volume duplicates and meshes that miss their mask.
+- Gravity from all horizontal and vertical surfaces (`room_layout.refine_gravity`)
+  and floor height from the lowest supported level (`floor_offset`).
+- Textured room shell and photo relief of built-ins (`src/room_texture.py`,
+  `3d_models/room.glb`); viewer loads it, with a relief toggle.
+- Stage-3 cache (`3d_models/stage3/`) and CPU replay of stage 4
+  (`scripts/replay_assembly.py`, `--placement evidence|legacy|raw`); `main.py --resume`.
+- `scripts/audit_scene.py` (placement scored against masks and point map) and
+  `scripts/render_scene.py` (headless contact sheets).
+- `scene_lite.glb`: decimated objects with baked textures (`src/mesh_bake.py`).
+- MuJoCo / MJX export (`src/mujoco_export.py`), Gymnasium wrapper and robot
+  attachment (`integrations/mujoco/`), `GET /api/scenes/<id>/mujoco`.
+- `GET /api/scenes`, `GET /api/scenes/<id>/glb?lite=1`; peak VRAM per stage in the
+  results metadata.
+- Blender add-on 0.2.0: lite download, import existing scene, metric-scale option;
+  `scripts/test_blender_addon.py` end-to-end test.
+- Docs: `HARDWARE.md`, `CONTRIBUTOR_TASKS.md`, `integrations/mujoco/README.md`;
+  60 CPU tests.
+
+### Fixed (October 2026)
+- Scenes tilted by a floor mask spanning two levels (bathroom: 3.3°).
+- Objects lifted or moved by box-overlap "support" relations; countertop items
+  displaced by up to a metre; duplicate desks from part masks.
+- Blender extension manifest failed validation (tagline and permission strings
+  over 64 characters).
+
 ### Added
 - Structural layout stage (`src/room_layout.py`): floor plane, gravity alignment,
   Manhattan yaw, wall/ceiling detection and photo-projected room textures from a
