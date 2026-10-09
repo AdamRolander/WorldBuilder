@@ -86,17 +86,19 @@ def audit_scene(scene: Path, max_side: int = 720) -> Dict:
     sil_all, mask_all = {}, {}
     boxes = {}
     for o in objects:
-        p = Path(o["ply_path"])
+        # Prefer the file inside this scene directory: a copied scene keeps the
+        # original's paths in its JSON and must not be audited against them.
+        p = scene / "3d_models" / Path(o["ply_path"]).name
         if not p.exists():
-            p = scene / "3d_models" / p.name
+            p = Path(o["ply_path"])
         if not p.exists():
             continue
         V = np.asarray(trimesh.load(str(p), process=False).vertices, dtype=np.float64)
         u, v, z = rl.project_world_to_pixels(V @ R, K, w, h)
         sil = _silhouette(np.stack([u, v], 1), z, (h, w))
-        mp = Path(o.get("mask_path") or "")
+        mp = scene / "masks" / Path(o.get("mask_path") or "x").name
         if not mp.exists():
-            mp = scene / "masks" / mp.name
+            mp = Path(o.get("mask_path") or "")
         mask = None
         if mp.exists():
             mask = np.asarray(Image.open(mp).convert("L").resize((w, h), Image.NEAREST)) > 127

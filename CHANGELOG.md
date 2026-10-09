@@ -5,6 +5,26 @@ versions follow SemVer once `v0.2.0` is tagged.
 
 ## [Unreleased] — branch `audit-and-roadmap`
 
+### Added (October 2026, second pass)
+- Silhouette pose search with an occlusion- and depth-aware score (`src/pose_fit.py`);
+  gravity settling of free-standing objects (shift / ray slide / downward stretch);
+  ray-slide wall clamp; visibility ordering that ignores transparent objects.
+- Instance sharing: fragments and look-alike repeats take the best-observed
+  instance's mesh at its true size.
+- Predictive room textures: walls row by row from the dominant seen material,
+  lighting-free tiling, grazing-angle texels predicted, flush objects kept in the
+  wall, unseen walls borrow the best-seen wall's make-up.
+- Solid built-ins behind the relief (`src/builtin_boxes.py`), exported as MuJoCo
+  collision boxes.
+- Metric scale from MoGe-2 (`scripts/estimate_metric_scale.py`, isolated under
+  `third_party/`); `layout.metric_scale_source`.
+- `scripts/make_gallery.py`; 70 CPU tests.
+
+### Fixed (October 2026, second pass)
+- Room box trimmed 1 % of object extents on undetected sides (objects on the boundary).
+- A tall object raised an observed ceiling and blanked its texture.
+- Audit read the original scene's meshes when run on a copied scene.
+
 ### Added (October 2026)
 - Evidence-based placement (`src/placement.py`): depth refit along viewing rays
   against the point map, support from the surface under each mask (floor / object /

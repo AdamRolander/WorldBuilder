@@ -286,3 +286,13 @@ def test_placement_with_room_and_image_runs_all_steps(scene):
     for key in ("pose_refined", "settled", "instances", "moved_in_front"):
         assert key in diag
     assert len(results) == 3 and not diag["removed"]
+
+
+def test_attachment_tells_mounted_from_free_standing(scene):
+    ev, results, verts = scene
+    o = _objs(results, verts)
+    assert pl.attachment(ev, o[3]) == "mounted"       # picture: the wall is right behind it
+    assert pl.attachment(ev, o[1]) is None            # table: the wall is a metre behind it
+    o[3].translate([0, 0.1, 0])
+    o[3].r["support"] = None
+    assert 3 not in pl.settle_unsupported(ev, [o[3]], ROOM)

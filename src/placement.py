@@ -489,6 +489,60 @@ def _quality(o: PlacedObject, ev: Optional[SceneEvidence]) -> float:
 # Settling, walls, visibility
 # ---------------------------------------------------------------------------
 
+def attachment(ev: SceneEvidence, obj: "PlacedObject", ring_frac: float = 0.02) -> Optional[str]:
+    """How the photo shows an object to be held, if not from below.
+
+    ``"mounted"``: the background just beside and above the object is at the
+    object's own depth, i.e. it sits against a surface (a towel on a ring, a
+    whiteboard, a wall cabinet). Around a free-standing object the
+    background is far behind.
+    ``"hanging"``: the surface directly above its top edge faces down at its
+    depth: it touches the ceiling (a pendant with its cord, a ceiling fan).
+    Returns None for neither.
+    """
+    from scipy import ndimage
+    m = ev.masks.get(obj.id)
+    if m is None or not m.any():
+        return None
+    h, w = ev.hw
+    own = ev.depth[m & ev.valid]
+    if len(own) < 5:
+        return None
+    z_obj = float(np.median(own))
+    rows = np.flatnonzero(m.any(axis=1))
+    y0, y1 = int(rows[0]), int(rows[-1])
+    r = max(2, int(round(ring_frac * h)))
+    ring = ndimage.binary_dilation(m, iterations=r) & ~m & ev.valid
+    ring[int(y1 - 0.25 * max(1, y1 - y0)):] = False          # ignore what it may be standing on
+    if ev.owner is not None:
+        # Things smaller than the object cannot be what holds it (a tap on a
+        # kitchen island); the background or a larger object can (a towel on
+        # an oven door).
+        ids, counts = np.unique(ev.owner[ring], return_counts=True)
+        area = int(m.sum())
+        small = [int(i) for i in ids if i > 0 and i != obj.id
+                 and i in ev.masks and int(ev.masks[i].sum()) < area]
+        if small:
+            ring &= ~np.isin(ev.owner, small)
+    if int(ring.sum()) >= 12:
+        z = ev.depth[ring]
+        if float(np.mean(np.abs(z - z_obj) <= 0.07 * z_obj)) >= 0.5:
+            return "mounted"
+    above = np.zeros_like(m)
+    cols = np.flatnonzero(m.any(axis=0))
+    top = np.argmax(m[:, cols], axis=0)
+    near_top = top <= y0 + 0.25 * max(1, y1 - y0)
+    for c, t in zip(cols[near_top], top[near_top], strict=True):
+        above[max(0, t - r):t, c] = True
+    above &= ev.valid & ~m
+    if int(above.sum()) >= 8:
+        down = ev.normals[above][:, 1] < -0.8
+        close = np.abs(ev.depth[above] - z_obj) <= 0.15 * z_obj
+        if float(np.mean(down & close)) >= 0.3:
+            return "hanging"
+    return None
+
+
 def settle_unsupported(ev: SceneEvidence, objs: List[PlacedObject], room: Optional[Dict] = None,
                        max_iou_loss: float = 0.25) -> Dict[int, str]:
     """Give every free-standing object something to stand on.
@@ -507,9 +561,10 @@ def settle_unsupported(ev: SceneEvidence, objs: List[PlacedObject], room: Option
                    seen (allowed up to +35 %, up to +100 % when the mask is
                    cut by the bottom of the frame).
 
-    The one that keeps the best silhouette match wins. Objects whose gap is
-    large compared with their own size are left alone: a pendant lamp is
-    not a floor lamp.
+    The one that keeps the best silhouette match wins. Left alone: objects
+    the photo shows mounted on a surface or hanging from the ceiling
+    (``attachment``), and objects whose gap is large compared with their
+    own size — a pendant lamp is not a floor lamp.
     """
     out: Dict[int, str] = {}
     if ev.floor_y is None:
@@ -537,12 +592,16 @@ def settle_unsupported(ev: SceneEvidence, objs: List[PlacedObject], room: Option
             if top is not None and top > target:
                 target, sup_id = top, b.id
         gap = float(lo[1] - target)
-        if gap <= 1e-6 or gap > max(0.75 * h, 0.10 * H):
+        mask = ev.masks.get(o.id)
+        cut = mask is not None and bool(mask[-2:].any())      # bottom of the object is outside the photo
+        if gap <= 1e-6 or gap > max((1.0 if cut else 0.5) * h, 0.10 * H):
+            continue
+        held = attachment(ev, o)
+        if held is not None:
+            o.r['attachment'] = held                   # the photo shows what holds it; not gravity's business
             continue
         if room and gap > 0.3 * h and _near_detected_wall(lo, hi, room, 0.03 * H):
             continue                                   # small thing high on a wall: mounted
-        mask = ev.masks.get(o.id)
-        cut = mask is not None and bool(mask[-2:].any())
         snap = o.snapshot()
         before = fit_iou(ev, o)
         options = []

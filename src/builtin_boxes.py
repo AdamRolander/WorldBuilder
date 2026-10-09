@@ -184,8 +184,9 @@ def build_builtins(points_aligned: np.ndarray, keep: np.ndarray, valid: np.ndarr
         # inset quad: seen at a grazing angle, a centimetre of inset is
         # several centimetres along the ray and would fail the depth test.
         seen_plane = dict(plane, o=origin + (f["coord"] - front) * AXES[axis])
+        # keep_flush stays off: what lies flat on a counter is an object on it, not its surface
         tex, vis, qual, clean = rt.project_plane_texture(seen_plane, R, K, image_rgb, depth, blocked, long_side,
-                                                         keep_flush=True, return_quality=True)
+                                                         keep_flush=False, return_quality=True)
         seen = float(vis.mean())
         if seen < 0.05:
             continue                                            # nothing of this face is actually in the photo
