@@ -49,11 +49,15 @@ viewer and to DCC plugins.
 ## Requirements
 
 - Linux x86-64 (upstream SAM 3D Objects is linux-64 only).
-- One NVIDIA GPU with **≥32 GB VRAM**. Developed on an RTX 5090 (32 GB,
-  driver 580.x, CUDA 12.8). 32 GB is the floor, not comfortable headroom —
-  see [the VRAM dance](#the-vram-dance) below for why.
-- ~60 GB free disk: ~15 GB of model checkpoints, and outputs run 100 MB–1 GB
-  per scene.
+- One NVIDIA GPU. Developed on an RTX 5090 (32 GB, driver 580.x, CUDA
+  12.8). Measured peak is 19 GB allocated for SAM 3D and ~21 GB for the
+  local VLM, one at a time, so a **24 GB card (RTX 3090/4090) should work
+  but is untested**; 16 GB is not enough. Details, measurements and what
+  to do on a borderline card: [docs/HARDWARE.md](docs/HARDWARE.md).
+  Everything after reconstruction (placement, room, viewer, exports,
+  Blender/MuJoCo) runs without a GPU.
+- ~60 GB free disk: ~15 GB of model checkpoints, and outputs run 0.5–1.5 GB
+  per scene (the shareable `scene_lite.glb` is 7–23 MB).
 - Conda or mamba.
 - A Hugging Face account, because **both** SAM checkpoint repos are gated and
   need manual access approval (can take a day — request these first).
@@ -62,8 +66,8 @@ viewer and to DCC plugins.
 
 ### The VRAM dance
 
-Three large models (Qwen3-VL 8B, SAM 3, SAM 3D Objects) cannot fit in 32 GB
-at once, so the pipeline keeps exactly one of them on the GPU at a time and
+Three large models (Qwen3-VL 8B, SAM 3, SAM 3D Objects) cannot fit on one
+card at once, so the pipeline keeps exactly one of them on the GPU at a time and
 parks the others in CPU RAM between stages. You'll see `Moving model: cuda →
 cpu` in the logs — that's working as intended, and it costs a few seconds per
 stage transition. This is why the VLM lives in a separate process behind an
@@ -327,6 +331,12 @@ python -m src.scene_export outputs/scene_a                       # just the GLB
 python -m src.debug_masks --image photo.jpg --output-dir outputs/scene_a   # overlay masks on the photo
 python scripts/bench_detectors.py --offline outputs outputs_og2  # local-VLM recall vs Gemini on past runs
 python scripts/replay_layout.py demo_day/lr2.webp --masks outputs/lr2_q/masks   # layout stage only, CPU, seconds
+python scripts/replay_assembly.py outputs/scene_a                # redo placement + room + exports on CPU (no GPU run)
+python scripts/audit_scene.py outputs/scene_a                    # score placement against the photo, write audit.png
+python scripts/render_scene.py outputs/scene_a                   # headless contact sheet: photo view, orbit, top, side
+python -m src.scene_export outputs/scene_a --lite                # decimated GLB with baked textures
+python -m src.mujoco_export outputs/scene_a --stabilize --check  # MuJoCo model (see integrations/mujoco)
+python main.py --image photo.jpg --resume                        # reuse detection + masks already in the scene dir
 python scripts/bench_detectors.py --live demo_day --save bench.json        # same, live against the VLM server
 ```
 
@@ -372,14 +382,18 @@ outputs/<scene>/
 ├── detected_objects.json          # stage 1 after clean-up (detected_objects_raw.json = as returned)
 ├── segmentation_results.json      # stage 2: per-instance masks, scores, boxes, prompt used
 ├── masks/                         # stage 2: mask PNGs (+ structural_floor/wall/ceiling.png)
-├── reconstruction_results.json    # stage 3/4: objects (pose, ply, supported_by), failed, metadata + timings
+├── reconstruction_results.json    # objects (pose, support, fit to the photo), removed/failed with reasons, timings, peak VRAM
 ├── 3d_models/
+│   ├── stage3/                    # SAM 3D's raw output: model-space meshes, raw.json poses, pointmap.npz (replay input)
 │   ├── <id>_<label>.ply           # one world-space mesh per object instance (vertex colours)
-│   ├── room.ply                   # floor/walls/ceiling textured from the photo (box fallback)
-│   ├── layout.json                # floor plane, gravity rotation, yaw, ceiling, wall evidence, scale estimate
+│   ├── room.glb                   # textured floor/walls/ceiling quads + photo relief of built-ins (named nodes)
+│   ├── room.ply                   # the same shell as vertex colours (fallback for PLY-only consumers)
+│   ├── layout.json                # floor, gravity, yaw, ceiling, wall evidence, scale estimate, placement diagnostics
 │   ├── scene_pointmap.npz         # MoGe scene points (aligned frame) for debugging / viewers
-│   └── scene_combined.ply         # everything composed into one mesh
-├── scene.glb                      # the scene as one glTF binary (named nodes) for Blender/Unreal/web
+│   └── scene_combined.ply         # all objects composed into one mesh
+├── scene.glb                      # full-resolution scene (hundreds of MB): named nodes, vertex colours
+├── scene_lite.glb                 # same scene, 8k triangles per object with baked textures (7–23 MB) — use this one
+├── mujoco/                        # optional: scene.xml + assets (python -m src.mujoco_export)
 ├── scene_points.json              # small point-cloud sidecar the viewer can toggle on
 └── viewer.html                    # self-contained Three.js / WebXR viewer
 ```
@@ -392,14 +406,24 @@ metres (camera at ~1.5 m); proper metric scale is roadmap item `PIPE-6`.
 
 ---
 
-## Blender / Unreal
+## Blender / Unreal / MuJoCo
 
 `integrations/blender_worldbuilder/` is a Blender 4.2+ extension (also
 installs as a legacy add-on) and `integrations/unreal/WorldBuilderBridge/`
 an Unreal 5.4+ editor plugin. Both are thin HTTP clients: pick a photo, the
 running web app does the work, the scene comes back as a GLB and is imported
 with named objects. Setup, publishing requirements (extensions.blender.org,
-Fab) and status are in [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md).
+Fab) and status are in [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md). The
+Blender add-on passes Blender's extension validation and a headless
+end-to-end test (`scripts/test_blender_addon.py`); the Unreal plugin is
+still an untested scaffold.
+
+For robotics, `python -m src.mujoco_export outputs/<scene> --stabilize`
+(or `GET /api/scenes/<scene>/mujoco`) writes a MuJoCo model: metric, Z-up,
+textured, with collision geometry, free joints on movable objects and the
+photo's camera. `integrations/mujoco/` has a Gymnasium wrapper and a
+one-call way to stand a robot in the room; `--mjx` targets MJX. See
+[integrations/mujoco/README.md](integrations/mujoco/README.md).
 
 ---
 
@@ -458,9 +482,15 @@ src/
   local_vlm_detection.py    stage 1b: HTTP client for the local VLM server
   detection_postprocess.py  stage 1c: normalise, dedupe, drop people/architecture/parts
   segmentation.py           stage 2:  SAM 3 text + box prompts, NMS, mask hygiene
-  reconstruction_3d.py      stage 3:  SAM 3D Objects with a shared point map; drives stage 4
-  room_layout.py            stage 4a: floor, gravity, yaw, walls, ceiling, textured room from the point map
-  room_generator.py         stage 4b: upright, support graph, snapping, collisions (numpy)
+  reconstruction_3d.py      stage 3:  SAM 3D Objects with a shared point map; writes the stage-3 cache
+  stage3_cache.py           what stage 3 leaves behind so stage 4 can be replayed on a CPU
+  scene_assembly.py         stage 4:  layout → placement → room → exports, from the cache
+  room_layout.py            stage 4a: floor, gravity, yaw, walls, ceiling from the point map
+  placement.py              stage 4b: depth refit, contact support, IoU-checked moves, duplicate removal
+  room_texture.py           stage 4c: textured shell quads + photo relief of built-ins
+  room_generator.py         legacy box/label placement (fallback when there is no point map)
+  mesh_bake.py              decimation + vertex-colour → texture baking (scene_lite.glb)
+  mujoco_export.py          MuJoCo / MJX model export with a stability check
   geometry.py               pose math shared by stage 4 (checked against pytorch3d)
   scene_export.py           GLB scene export
   viewer_generator.py       emit the Three.js / WebXR viewer
@@ -473,13 +503,18 @@ webapp/
 integrations/
   blender_worldbuilder/     Blender extension (manifest + add-on)
   unreal/WorldBuilderBridge Unreal editor plugin (uplugin, C++ stub, Python bridge)
+  mujoco/                   Gymnasium wrapper + robot attachment for exported scenes
 scripts/
   regen_viewer.py           rebuild viewer.html + scene.glb for existing output dirs
   bench_detectors.py        local-VLM recall benchmark vs Gemini
   replay_layout.py          layout stage only (CPU MoGe) for fast tuning
   plot_scene.py             plan-view diagnostic PNG of a finished scene
+  replay_assembly.py        re-run stage 4 on a finished scene (CPU, seconds)
+  audit_scene.py            score placement against the photo's masks and point map
+  render_scene.py           headless contact-sheet renders (pyrender + EGL)
+  test_blender_addon.py     end-to-end add-on test, run inside `blender --background`
 tests/                      CPU-only pytest suite
-docs/                       ARCHITECTURE, AUDIT, ROADMAP, VALIDATION, INTEGRATIONS
+docs/                       ARCHITECTURE, AUDIT, ROADMAP, VALIDATION, INTEGRATIONS, HARDWARE, CONTRIBUTOR_TASKS
 
 checkpoints/                SAM 3 weights            (gitignored)
 sam3_repo/                  upstream clone           (gitignored)
@@ -537,6 +572,9 @@ the `mv` step in setup §4 is easy to miss.
 | [docs/ROADMAP.md](docs/ROADMAP.md) | every planned item with ids, blockers and a suggested order |
 | [docs/VALIDATION.md](docs/VALIDATION.md) | GPU validation procedure and before/after measurements |
 | [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md) | Blender extension and Unreal plugin: setup, publishing rules, status |
+| [integrations/mujoco/README.md](integrations/mujoco/README.md) | MuJoCo / MJX export, Gymnasium wrapper, limits |
+| [docs/HARDWARE.md](docs/HARDWARE.md) | measured VRAM per stage, which cards work, what runs without a GPU |
+| [docs/CONTRIBUTOR_TASKS.md](docs/CONTRIBUTOR_TASKS.md) | a menu of tasks that need no GPU, with setup |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | how to work on the repo |
 
 ## Licence
