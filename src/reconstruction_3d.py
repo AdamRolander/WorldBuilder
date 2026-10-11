@@ -5,7 +5,7 @@ back a textured mesh (as a GLB) and a pose (translation, quaternion, scale)
 in the camera frame. Then ``src/room_layout.py`` recovers the room from the
 scene point map and ``src/room_generator.py`` places the objects.
 
-What changed from the demo-era version (docs/AUDIT.md §3):
+What changed from the demo-era version:
 
 * **One point map per scene, not per object.** SAM 3D runs MoGe on the whole
   image inside every call. We compute it once via the pipeline's own

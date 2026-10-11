@@ -58,7 +58,7 @@ submitting.)
 | No bundled binaries without wheels; wheels must be declared and platform-tagged | not needed (stdlib only) |
 | Must not download executable code at runtime | complies (downloads a GLB, data) |
 | Works offline or fails gracefully when the network is missing | error path reports "server unreachable" |
-| Account on extensions.blender.org, `blender --command extension validate` passes, moderation review (days–weeks) | **todo** (DCC-2) |
+| Account on extensions.blender.org, `blender --command extension validate` passes, moderation review (days–weeks) | **todo** |
 | Extensions must be self-contained: the add-on cannot *require* a paid or external service to be useful | Grey area — it requires *your own* server. State this prominently in the listing; free/open server code satisfies reviewers in comparable cases (render-farm and LLM-bridge add-ons exist on the platform). |
 
 Nuances worth knowing:
@@ -72,7 +72,7 @@ Nuances worth knowing:
   new objects into a collection named after the scene id.
 * Units: scene coordinates are scale-invariant. `layout.json` carries
   `estimated_metric_scale` (camera-height prior). Apply it as a collection
-  scale if you want metres (DCC-3 adds a checkbox).
+  scale if you want metres (the add-on has a checkbox for this).
 
 ---
 
@@ -106,7 +106,7 @@ From the [Fab publishing docs](https://dev.epicgames.com/documentation/en-us/fab
 
 | requirement | status |
 | --- | --- |
-| Epic publisher account (Fab seller onboarding, tax/payout even for free listings) | **todo** (DCC-5) |
+| Epic publisher account (Fab seller onboarding, tax/payout even for free listings) | **todo** |
 | *Code plugins* must contain ≥1 code module and be submitted per supported engine version; a new `.uplugin`/source zip per version | module scaffolded; target 5.4 + 5.5 first |
 | Epic compiles the plugin with their toolchain; must build warning-clean on Win64 (Linux/Mac if listed). Test with *Package…* in the Plugins window | **todo** |
 | Fab Terms of Service + Epic Content Guidelines (no bundled third-party assets you don't own the rights to) | complies: no models/weights bundled |
@@ -118,11 +118,11 @@ Nuances:
 
 * Interchange's glTF importer handles vertex colours (`COLOR_0`) but
   materials will be plain; a *Vertex Color* material instance is worth
-  shipping in `Content/` (DCC-6).
+  shipping in `Content/`.
 * Y-up → Z-up and metres → centimetres are handled by Interchange; the
   Python applies `estimated_metric_scale` on top.
 * `generate_and_import` blocks the editor for the pipeline's duration.
-  The proper version is an Editor Utility Widget with a timer (DCC-4).
+  The proper version is an Editor Utility Widget with a timer.
 
 ---
 
@@ -132,15 +132,14 @@ Nuances:
   `blender --command extension build --source-dir integrations/blender_worldbuilder`
   produces the installable zip. `scripts/test_blender_addon.py` runs the
   whole flow inside `blender --background` (register → upload → poll →
-  download → import → render) and passed on Blender 5.0.1 (VALIDATION
-  §4.4). New in add-on 0.2.0: lite GLB by default (tens of MB, baked
+  download → import → render) and passed on Blender 5.0.1. New in add-on 0.2.0: lite GLB by default (tens of MB, baked
   textures), "Import existing scene", metric-scale checkbox, every room
   surface and the relief as separate named objects under one scene empty.
   Not yet exercised: the UI panel by a human, and Blender 4.2 LTS.
 * **Unreal**: unchanged scaffold, untested. When you try it, import
   `GET /api/scenes/<id>/glb?lite=1` rather than the full GLB: the lite file
   has ordinary textured materials, which Interchange imports without the
-  vertex-colour material the full file needs (`DCC-6`).
+  vertex-colour material the full file needs.
 * **MuJoCo / MJX**: new, see `integrations/mujoco/README.md`.
 * **Server endpoints for clients**: `GET /api/scenes` (newest first),
   `GET /api/scenes/<id>/glb?lite=1`, `GET /api/scenes/<id>/mujoco[?mjx=1]`.
@@ -166,12 +165,12 @@ The server reads scenes from `outputs/` directly under the project root
 (`WORLDBUILDER_OUTPUTS` overrides); scenes in sub-folders such as
 `outputs/10-08-validation/` are not listed unless you point it there.
 
-## Roadmap items (see ROADMAP.md)
+## Planned
 
-* DCC-1 Test the Blender add-on end to end (needs Blender on a machine that can reach the server).
-* DCC-2 Register on extensions.blender.org; run `blender --command extension validate`; submit.
-* DCC-3 Metric-scale option + material presets in both bridges.
-* DCC-4 Non-blocking Unreal UI (Editor Utility Widget) with progress.
-* DCC-5 Fab publisher onboarding; build the plugin on 5.4/5.5 Win64.
-* DCC-6 Ship a vertex-colour material and a LOD/decimation option (SAM 3D meshes are dense).
-* DCC-7 Streaming: import objects as they finish instead of waiting for the whole scene (needs `/api/jobs/<id>/objects`).
+* Test the Blender add-on end to end (needs Blender on a machine that can reach the server).
+* Register on extensions.blender.org; run `blender --command extension validate`; submit.
+* Metric-scale option + material presets in both bridges.
+* Non-blocking Unreal UI (Editor Utility Widget) with progress.
+* Fab publisher onboarding; build the plugin on 5.4/5.5 Win64.
+* Ship a vertex-colour material and a LOD/decimation option (SAM 3D meshes are dense).
+* Streaming: import objects as they finish instead of waiting for the whole scene (needs `/api/jobs/<id>/objects`).

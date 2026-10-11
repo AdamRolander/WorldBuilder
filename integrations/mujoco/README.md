@@ -23,7 +23,7 @@ curl -OJ "http://<server>:5174/api/scenes/<scene>/mujoco?mjx=1"      # MJX varia
 | | |
 | --- | --- |
 | Frame | X forward (the photo's viewing direction), Y left, Z up; floor at `z = 0`; the photo's camera above the origin |
-| Units | metres, via `layout.estimated_metric_scale` (a camera-height prior until roadmap `PIPE-6`); override with `--scale` |
+| Units | metres, via `layout.estimated_metric_scale` (MoGe-2 estimate; a camera-height prior without it); override with `--scale` |
 | Objects | one body each, named `obj_<id>_<label>`; visual geom = decimated mesh with a baked texture; collision geoms in group 3 |
 | Collision | `--collision hull` (default, one convex hull per object), `coacd` (convex decomposition: chairs, bowls and shelves keep their concavities), `box` |
 | Movable | objects for which placement found a support (floor, another object, a counter) get a free joint; wall-mounted and hanging things and anything over `--static-above` metres are welded. `--dynamic all|none` overrides |
@@ -89,7 +89,7 @@ objects the task manipulates.
   see; an object's hidden half is plausible, not measured.
 * **The relief has no collision.** It is a visual shell of built-ins;
   pads carry what stands on it. A robot arm can pass through a cabinet
-  front. Roadmap `ROB-2` (plane-fitted collision for built-ins).
+  front. Planned (plane-fitted collision for built-ins).
 * **Rendering.** `--check --render out.png` needs a working MuJoCo GL
   backend; with the PyOpenGL version pinned by `pyrender` in the main env,
   `MUJOCO_GL=egl` fails to import — leave `MUJOCO_GL` unset on a desktop,
@@ -100,5 +100,4 @@ objects the task manipulates.
 Isaac Sim / Isaac Lab and Genesis import MJCF directly, so `scene.xml` is
 the interchange format for now; `scene_lite.glb` works anywhere glTF does
 (Unity, Godot, three.js, Blender, Unreal). Native USD and URDF/SDF exports
-are on the roadmap (`ROB-3`, `ROB-4`) and are good no-GPU tasks
-(`docs/CONTRIBUTOR_TASKS.md` T17, T18).
+are planned and are good no-GPU tasks.

@@ -34,7 +34,7 @@ and 0.8–2 GB per scene with the full-resolution meshes.
 | --- | --- | --- |
 | 32 GB+ | RTX 5090, A6000 (48), L40S (48), A100 | Works. This is the tested configuration. |
 | 24 GB | RTX 3090 / 3090 Ti, RTX 4090, A5000, L4 (cloud), A10G (cloud, 22.3 GB usable) | **Should work, untested.** SAM 3D's 19.2 GB allocated peak fits; the local VLM at ~21 GB is tight, so close other GPU apps or use the Gemini detector. Expect it to be slower than a 5090 (a 3090 maybe 2×). The first person to run this owes the table a row (task T23). |
-| 16 GB | RTX 4080, 4060 Ti 16 GB, 5070 Ti, A4000 | **Not as is.** SAM 3D does not fit. Would need half-precision or offloading inside SAM 3D (unexplored, roadmap `PIPE-15`), plus the Gemini detector or a 4-bit VLM. |
+| 16 GB | RTX 4080, 4060 Ti 16 GB, 5070 Ti, A4000 | **Not as is.** SAM 3D does not fit. Would need half-precision or offloading inside SAM 3D (unexplored), plus the Gemini detector or a 4-bit VLM. |
 | ≤ 12 GB | RTX 3060, 4070, laptops | No for the models. Fine for everything downstream of them. |
 
 **It has to be NVIDIA.** SAM 3 hard-codes CUDA tensors, and SAM 3D depends
@@ -71,8 +71,7 @@ python -m src.mujoco_export outputs/<scene> --stabilize
 ```
 
 and the viewer, the Blender add-on and the MuJoCo environment only need the
-files a server produced. See [CONTRIBUTOR_TASKS.md](CONTRIBUTOR_TASKS.md)
-for work that fits this setup, and rent-a-GPU options are a few dollars for
+files a server produced. Issues labelled `no-gpu` in the tracker fit this setup, and rent-a-GPU options are a few dollars for
 an afternoon if you want to run the models once.
 
 ## Reports from other machines

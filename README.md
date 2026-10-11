@@ -22,11 +22,10 @@ Two ways to run it: a CLI (`main.py`) for batch/single images, and a web app
 (`webapp/`) that takes an upload, streams progress, and serves scenes to the
 viewer and to DCC plugins.
 
-> **State of the project (Sept 2026).** The `audit-and-roadmap` branch is a
-> substantial clean-up and extension of the demo-day pipeline. Start with
-> [docs/AUDIT.md](docs/AUDIT.md) (what changed and why),
-> [docs/ROADMAP.md](docs/ROADMAP.md) (what's next, with ticket ids) and
-> [docs/VALIDATION.md](docs/VALIDATION.md) (how to verify on the GPU).
+> **State of the project.** Alpha, under active development; see
+> [CHANGELOG.md](CHANGELOG.md) for what changed in each release and the
+> [issue tracker](https://github.com/AdamRolander/WorldBuilder/issues) for
+> what is planned.
 
 ---
 
@@ -127,7 +126,6 @@ and assembly stages, the viewer, and the web app.
 > `environments/default.yml` pins torch 2.5.1 + CUDA 12.1. That does **not**
 > work on an RTX 5090 (sm_120 requires CUDA 12.8), so this env runs
 > **torch 2.8.0+cu128** with `pytorch3d` built from source against it.
-> `docs/torch_versions_cu121_backup.txt` records the old cu121 pin set.
 > If your GPU is Ada or older, the upstream cu121 path is likely smoother —
 > follow `sam3d_objects_repo/doc/setup.md` verbatim instead of the versions
 > below.
@@ -483,8 +481,9 @@ ruff check .                # lint (config in pyproject.toml)
 ```
 
 The geometry and heuristics are unit-tested without any model weights;
-anything that touches SAM 3 / SAM 3D is verified manually per
-[docs/VALIDATION.md](docs/VALIDATION.md) with before/after numbers.
+anything that touches SAM 3 / SAM 3D is verified on a GPU by re-running
+a fixed set of photos and comparing `scripts/audit_scene.py` scores before
+and after.
 See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
@@ -538,7 +537,7 @@ scripts/
   render_scene.py           headless contact-sheet renders (pyrender + EGL)
   test_blender_addon.py     end-to-end add-on test, run inside `blender --background`
 tests/                      CPU-only pytest suite
-docs/                       ARCHITECTURE, AUDIT, ROADMAP, VALIDATION, INTEGRATIONS, HARDWARE, CONTRIBUTOR_TASKS
+docs/                       ARCHITECTURE, INTEGRATIONS, HARDWARE
 
 checkpoints/                SAM 3 weights            (gitignored)
 sam3_repo/                  upstream clone           (gitignored)
@@ -592,13 +591,9 @@ the `mv` step in setup §4 is easy to miss.
 | document | what it is for |
 | --- | --- |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | data flow, file formats, frames/units, extension points |
-| [docs/AUDIT.md](docs/AUDIT.md) | the September 2026 code audit: findings, fixes, evidence |
-| [docs/ROADMAP.md](docs/ROADMAP.md) | every planned item with ids, blockers and a suggested order |
-| [docs/VALIDATION.md](docs/VALIDATION.md) | GPU validation procedure and before/after measurements |
 | [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md) | Blender extension and Unreal plugin: setup, publishing rules, status |
 | [integrations/mujoco/README.md](integrations/mujoco/README.md) | MuJoCo / MJX export, Gymnasium wrapper, limits |
 | [docs/HARDWARE.md](docs/HARDWARE.md) | measured VRAM per stage, which cards work, what runs without a GPU |
-| [docs/CONTRIBUTOR_TASKS.md](docs/CONTRIBUTOR_TASKS.md) | a menu of tasks that need no GPU, with setup |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | how to work on the repo |
 
 ## Licence

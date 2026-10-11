@@ -265,9 +265,8 @@ ngrok
 .claude/*.tmp.*
 .claude/
 
-# --- Private notes (publishing strategy, business docs) and local validation sets ---
+# --- Local-only working files ---
 private/
-9-17-validation/
 
 # --- Isolated third-party installs (MoGe-2 for metric scale) ---
 third_party/

@@ -8,7 +8,7 @@ hands VRAM back on ``/unload`` so SAM 3 / SAM 3D can use it.
     python vlm_server/server.py                       # Qwen3-VL-8B-Instruct
     python vlm_server/server.py --model Qwen/Qwen3-VL-32B-Instruct-AWQ
 
-Fixes relative to the demo-era server (docs/AUDIT.md §1):
+Fixes relative to the demo-era server:
 
 * the prompt is the shared one in ``src/prompts.py`` (was a drifted copy);
 * ``repetition_penalty`` + a lower ``max_new_tokens`` stop the degenerate

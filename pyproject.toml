@@ -35,7 +35,7 @@ gemini = ["google-genai>=1.0"]
 webapp = ["Flask>=3", "flask-cors>=4"]
 dev = ["pytest>=8", "ruff>=0.5"]
 # Everything stage 4 and the exports need; enough to replay, audit and export
-# finished scenes on a machine without a GPU (docs/CONTRIBUTOR_TASKS.md).
+# finished scenes on a machine without a GPU.
 cpu = ["opencv-python-headless>=4.8", "fast-simplification>=0.1.7", "xatlas>=0.0.9", "matplotlib>=3.8"]
 render = ["pyrender>=0.1.45"]
 robotics = ["mujoco>=3.2", "gymnasium>=1.0", "coacd>=1.0"]

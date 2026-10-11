@@ -2,17 +2,19 @@ name: ci
 
 on:
   push:
-    branches: [main, audit-and-roadmap]
+    branches: [main]
   pull_request:
 
 jobs:
   cpu-tests:
     # The pipeline itself needs a 24 GB+ GPU; CI covers the CPU-only logic
     # (geometry, layout, placement, room textures, exports, parsing) plus lint. GPU validation is
-    # a documented manual step (docs/VALIDATION.md).
+    # a manual step (see CONTRIBUTING.md).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: No local-only files in the tree
+        run: test -z "$(git ls-files private third_party outputs)"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
