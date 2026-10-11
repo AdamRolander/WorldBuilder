@@ -304,14 +304,21 @@ Terminal 2 — the web app:
 
 ```bash
 conda activate worldbuilder-main
-python -m webapp.server                # binds 0.0.0.0:5174
+python -m webapp.server                # binds 127.0.0.1:5174 (this machine only)
 # → http://localhost:5174/
+python -m webapp.server --host 0.0.0.0 # also reachable from other devices on your network
 ```
+
+The server has no login: anyone who can reach it can upload photos and
+start GPU jobs. It therefore listens on localhost unless you pass
+`--host 0.0.0.0` (or set `WORLDBUILDER_HOST`), which you need for a headset,
+or for Blender / Unreal running on another computer. Only do that on a
+network you trust.
 
 Reach it from:
 
 - **this machine:** http://localhost:5174
-- **a headset/phone on the same LAN:** `http://<lan-ip>:5174` — find the IP with
+- **a headset/phone on the same LAN** (with `--host 0.0.0.0`): `http://<lan-ip>:5174` — find the IP with
   `hostname -I | awk '{print $1}'`. (Off-LAN? See
   [ngrok](#remote-access-via-ngrok-for-a-vr-headset-off-lan).)
 

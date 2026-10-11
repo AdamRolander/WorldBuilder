@@ -424,7 +424,7 @@ def shell_vertex_color_mesh(meshes: Dict, cells: int = 128):
     import trimesh
     V_all, F_all, C_all, off = [], [], [], 0
     for name, m in meshes.items():
-        if name == "room_relief" or name.startswith("room_builtin"):
+        if name.startswith("room_relief") or name.startswith("room_builtin"):
             continue
         v = np.asarray(m.vertices)
         o, e_u, e_v = v[0], v[1] - v[0], v[3] - v[0]
@@ -452,16 +452,75 @@ def shell_vertex_color_mesh(meshes: Dict, cells: int = 128):
 # Relief
 # ---------------------------------------------------------------------------
 
+def _fill_holes(P: np.ndarray, hole: np.ndarray, known: np.ndarray, rays_ok: np.ndarray,
+                plane_rms_frac: float = 0.012) -> Tuple[np.ndarray, np.ndarray]:
+    """Geometry behind small objects that were cut out of the background.
+
+    A hole whose surroundings lie on one plane (a bowl on a counter, a
+    picture on a wall) is filled with that plane, each pixel placed where
+    its own viewing ray meets it. A hole whose surroundings do not (a vase
+    in front of both a shelf and the wall behind it) has no single surface
+    to continue; interpolating across it draws a sheet from the near surface
+    to the far one, which from any other viewpoint is a spike pointing at
+    the camera. Those holes are left open.
+
+    Returns ``(P_filled, filled_mask)``.
+    """
+    from scipy import ndimage
+    out = P.copy()
+    filled = np.zeros(hole.shape, bool)
+    lab, n = ndimage.label(hole)
+    h, w = hole.shape
+    for i, sl in enumerate(ndimage.find_objects(lab), 1):
+        if sl is None:
+            continue
+        pad = max(4, int(0.25 * max(sl[0].stop - sl[0].start, sl[1].stop - sl[1].start)))
+        ys = slice(max(0, sl[0].start - pad), min(h, sl[0].stop + pad))
+        xs = slice(max(0, sl[1].start - pad), min(w, sl[1].stop + pad))
+        comp = lab[ys, xs] == i
+        ring = ndimage.binary_dilation(comp, iterations=3) & known[ys, xs]
+        if ring.sum() < 12:
+            continue
+        B = P[ys, xs][ring].astype(np.float64)
+        c = B.mean(0)
+        _, sv, vt = np.linalg.svd(B - c, full_matrices=False)
+        nrm = vt[2]
+        rms = sv[2] / np.sqrt(len(B))
+        d_med = float(np.median(np.linalg.norm(B, axis=1)))
+        if rms > plane_rms_frac * d_med:
+            continue
+        sel = comp & rays_ok[ys, xs]
+        if not sel.any():
+            continue
+        Q = P[ys, xs][sel].astype(np.float64)                  # the object's own surface: same rays
+        r_obj = np.linalg.norm(Q, axis=1)
+        ray = Q / r_obj[:, None]
+        den = ray @ nrm
+        with np.errstate(divide="ignore", invalid="ignore"):
+            t = (c @ nrm) / den
+        # the background is behind the object, and near the ring's own depth
+        ok = np.isfinite(t) & (t > 0.97 * r_obj) & (t < 1.6 * d_med) & (t > 0.6 * d_med)
+        if ok.mean() < 0.8:
+            continue
+        yy, xx = np.nonzero(sel)
+        yy, xx = yy[ok] + ys.start, xx[ok] + xs.start
+        out[yy, xx] = (ray[ok] * t[ok, None]).astype(out.dtype)
+        filled[yy, xx] = True
+    return out, filled
+
+
 def build_relief(points_aligned: np.ndarray, valid: np.ndarray, owner: np.ndarray,
                  layout: rl.RoomLayout, image_rgb: np.ndarray, max_vertices: int = 200_000,
                  plane_tol_frac: float = 0.03, small_object_frac: float = 0.015,
                  max_view_angle_deg: float = 80.0, min_component_frac: float = 0.003,
-                 max_texture_side: int = 2048):
-    """Mesh of the built-in structure that is neither object nor shell.
+                 max_texture_side: int = 2048, thin_steep_deg: float = 62.0, max_pieces: int = 16):
+    """Meshes of the built-in structure that is neither object nor shell.
 
     ``points_aligned`` (h,w,3) is the point map in the aligned frame (camera
     at the origin), ``owner`` (h,w) the object id per pixel (0 = none).
-    Returns ``(trimesh | None, stats)``.
+    Returns ``({name: trimesh}, stats)``: one mesh per connected piece of
+    background surface (``room_relief_00`` is the largest), so a viewer or
+    an importer can hide the cabinet run without losing the window recess.
     """
     import cv2
     import trimesh
@@ -472,30 +531,25 @@ def build_relief(points_aligned: np.ndarray, valid: np.ndarray, owner: np.ndarra
     bg = valid & (owner == 0)
     img = np.asarray(Image.fromarray(image_rgb).resize((w, h), Image.BILINEAR))
 
-    # Close the holes small objects leave in the surface they stand on, in
-    # both geometry and colour, by interpolating from the hole's surroundings.
+    # Close the holes small objects leave in the surface they stand on.
     ids, counts = np.unique(owner[owner > 0], return_counts=True)
     small = np.isin(owner, ids[counts < small_object_frac * h * w])
     hole = ndimage.binary_dilation(small, iterations=2) & ~(valid & (owner > 0) & ~small)
     filled = 0
+    hole_filled = np.zeros((h, w), bool)
     if hole.any():
         known = bg & ~hole
-        # only fill where there is known background close by on at least two sides
-        near = ndimage.binary_dilation(known, iterations=max(4, int(0.04 * max(h, w))))
-        hole &= near
-        hm = hole.astype(np.uint8)
-        src = np.where(known[..., None], P, 0).astype(np.float32)
-        # cv2.inpaint needs the unknown area to be exactly the mask: treat
-        # every not-known pixel as unknown, then keep only the hole's result.
-        unk = (~known).astype(np.uint8)
-        for c in range(3):
-            P[..., c] = np.where(hole, cv2.inpaint(src[..., c], unk, 3, cv2.INPAINT_NS), P[..., c])
-        img = cv2.inpaint(img, hm, 3, cv2.INPAINT_TELEA)
-        bg = bg | hole
-        filled = int(hole.sum())
+        P, hole_filled = _fill_holes(P, hole, known, valid)
+        if hole_filled.any():
+            img = cv2.inpaint(img, hole_filled.astype(np.uint8), 3, cv2.INPAINT_TELEA)
+            bg = (bg & ~hole) | hole_filled
+            filled = int(hole_filled.sum())
+        else:
+            bg = bg & ~hole
     # Mask edges are a pixel or two off; keep object colours out of the relief.
     big = (owner > 0) & ~small
     bg &= ~ndimage.binary_dilation(big, iterations=2)
+    bg &= ~(ndimage.binary_dilation(small, iterations=2) & ~hole_filled)
 
     # Drop what the shell already represents, and what lies outside the room.
     mn, mx = np.asarray(layout.bounds_min, float), np.asarray(layout.bounds_max, float)
@@ -516,8 +570,9 @@ def build_relief(points_aligned: np.ndarray, valid: np.ndarray, owner: np.ndarra
     ii, jj = np.arange(0, h, s), np.arange(0, w, s)
     Pg, Kg = P[ii][:, jj], keep[ii][:, jj]
     gh, gw = Kg.shape
+    empty = ({}, {"vertices": 0, "faces": 0, "pieces": 0})
     if gh < 2 or gw < 2 or Kg.sum() < 50:
-        return None, {"vertices": 0, "faces": 0}
+        return empty
     cell = Kg[:-1, :-1] & Kg[:-1, 1:] & Kg[1:, :-1] & Kg[1:, 1:]
     idx = np.arange(gh * gw).reshape(gh, gw)
     a, b, c, d = idx[:-1, :-1], idx[:-1, 1:], idx[1:, 1:], idx[1:, :-1]
@@ -532,42 +587,86 @@ def build_relief(points_aligned: np.ndarray, valid: np.ndarray, owner: np.ndarra
         with np.errstate(invalid="ignore", divide="ignore"):
             return np.abs(np.sum(n * cen, axis=-1)) / (nn * cn)
 
-    cos_min = np.cos(np.radians(max_view_angle_deg))
     t1 = np.stack([a, b, c], -1)
     t2 = np.stack([a, c, d], -1)
     with np.errstate(invalid="ignore"):
-        cell &= (_facing(t1) > cos_min) & (_facing(t2) > cos_min)
+        face = np.minimum(_facing(t1), _facing(t2))
+    face = np.nan_to_num(face, nan=0.0)
+    cell &= face > np.cos(np.radians(max_view_angle_deg))
+    # A depth edge in the point map is not a clean step: the pixels along it
+    # are blends of the two surfaces and form a narrow ramp between them.
+    # Each of its triangles can pass the angle test above, and together they
+    # are a sheet along the viewing rays. A real surface seen obliquely (a
+    # counter top from standing height) is just as steep but many cells
+    # wide, so only steep cells that form a *thin* band are cut.
+    steep = cell & (face < np.cos(np.radians(thin_steep_deg)))
+    if steep.any():
+        wide = ndimage.binary_opening(steep, structure=np.ones((5, 5), bool))
+        wide = ndimage.binary_dilation(wide, iterations=2) & steep
+        cell &= ~(steep & ~wide)
+    # what is left attached by a strip one or two cells wide is a sliver
+    cell &= ndimage.binary_opening(cell, structure=np.ones((3, 3), bool))
     lab, n = ndimage.label(cell)
     if n:
         sizes = ndimage.sum(cell, lab, index=np.arange(1, n + 1))
-        cell &= np.isin(lab, 1 + np.flatnonzero(sizes >= max(8, min_component_frac * cell.size)))
+        good = 1 + np.flatnonzero(sizes >= max(8, min_component_frac * cell.size))
+        cell &= np.isin(lab, good)
+        order = good[np.argsort(-sizes[good - 1])]
     if not cell.any():
-        return None, {"vertices": 0, "faces": 0}
-    F = np.concatenate([t1[cell], t2[cell]])
-    # Front faces must look at the camera (the origin).
-    p0, p1, p2 = V[F[:, 0]], V[F[:, 1]], V[F[:, 2]]
-    if float(np.sum(np.cross(p1 - p0, p2 - p0) * (p0 + p1 + p2))) > 0:
-        F = F[:, ::-1]
-    used = np.unique(F)
-    remap = -np.ones(gh * gw, int)
-    remap[used] = np.arange(len(used))
-    gi, gj = np.divmod(used, gw)
-    uv = np.stack([(jj[gj] + 0.5) / w, 1.0 - (ii[gi] + 0.5) / h], 1)
-    tex = Image.fromarray(image_rgb)
-    # the relief's own (inpainted, point-map-resolution) image where holes
-    # were filled, the full photo everywhere else
-    if filled:
-        big_hole = np.asarray(Image.fromarray(hole.astype(np.uint8) * 255).resize(tex.size, Image.BILINEAR)) > 40
-        up = np.asarray(Image.fromarray(img).resize(tex.size, Image.BICUBIC))
-        tex = Image.fromarray(np.where(big_hole[..., None], up, np.asarray(tex)))
-    if max(tex.size) > max_texture_side:
-        tex.thumbnail((max_texture_side, max_texture_side))
-    material = trimesh.visual.material.PBRMaterial(baseColorTexture=tex, metallicFactor=0.0,
-                                                   roughnessFactor=1.0, doubleSided=True, name="room_relief")
-    mesh = trimesh.Trimesh(vertices=V[used], faces=remap[F], process=False,
-                           visual=trimesh.visual.TextureVisuals(uv=uv, material=material))
-    return mesh, {"vertices": int(len(used)), "faces": int(len(F)), "stride": s,
-                  "filled_hole_px": filled, "frame_fraction": round(float(keep.mean()), 3)}
+        return empty
+
+    tex_full = np.asarray(Image.fromarray(image_rgb))
+    Hf, Wf = tex_full.shape[:2]
+    if filled:      # the inpainted image where holes were filled, the photo everywhere else
+        m = np.asarray(Image.fromarray(hole_filled.astype(np.uint8) * 255).resize((Wf, Hf), Image.BILINEAR)) > 40
+        up = np.asarray(Image.fromarray(img).resize((Wf, Hf), Image.BICUBIC))
+        tex_full = np.where(m[..., None], up, tex_full)
+    tex_scale = min(1.0, max_texture_side / float(max(Hf, Wf)))
+
+    meshes: Dict = {}
+    pieces: List[Dict] = []
+    total_v = total_f = 0
+    flip = None
+    for k, comp_id in enumerate(order):
+        # pieces beyond the cap are merged into the last one
+        sel = (lab == comp_id) if k < max_pieces - 1 else np.isin(lab, order[k:])
+        F = np.concatenate([t1[sel], t2[sel]])
+        if flip is None:                         # front faces look at the camera (the origin)
+            p0, p1, p2 = V[F[:, 0]], V[F[:, 1]], V[F[:, 2]]
+            flip = float(np.sum(np.cross(p1 - p0, p2 - p0) * (p0 + p1 + p2))) > 0
+        if flip:
+            F = F[:, ::-1]
+        used = np.unique(F)
+        remap = -np.ones(gh * gw, int)
+        remap[used] = np.arange(len(used))
+        gi, gj = np.divmod(used, gw)
+        py, px = ii[gi], jj[gj]                                   # point-map pixels
+        # crop the photo to this piece (one small texture each, not N copies of the photo)
+        y0, y1 = int(py.min() * Hf / h), int(np.ceil((py.max() + 1) * Hf / h))
+        x0, x1 = int(px.min() * Wf / w), int(np.ceil((px.max() + 1) * Wf / w))
+        y0, x0, y1, x1 = max(0, y0 - 2), max(0, x0 - 2), min(Hf, y1 + 2), min(Wf, x1 + 2)
+        crop = Image.fromarray(np.ascontiguousarray(tex_full[y0:y1, x0:x1]))
+        if tex_scale < 1.0:
+            crop = crop.resize((max(2, int(crop.width * tex_scale)), max(2, int(crop.height * tex_scale))),
+                               Image.LANCZOS)
+        fx, fy = (px + 0.5) * Wf / w, (py + 0.5) * Hf / h         # photo pixels
+        uv = np.stack([(fx - x0) / (x1 - x0), 1.0 - (fy - y0) / (y1 - y0)], 1)
+        name = f"room_relief_{k:02d}"
+        material = trimesh.visual.material.PBRMaterial(baseColorTexture=crop, metallicFactor=0.0,
+                                                       roughnessFactor=1.0, doubleSided=True, name=name)
+        meshes[name] = trimesh.Trimesh(vertices=V[used], faces=remap[F], process=False,
+                                       visual=trimesh.visual.TextureVisuals(uv=uv, material=material))
+        ext = V[used].max(0) - V[used].min(0)
+        pieces.append({"name": name, "faces": int(len(F)), "center": np.round(V[used].mean(0), 3).tolist(),
+                       "extent": np.round(ext, 3).tolist(),
+                       "bbox_px": [int(px.min()), int(py.min()), int(px.max()), int(py.max())]})
+        total_v += len(used)
+        total_f += len(F)
+        if k >= max_pieces - 1:
+            break
+    return meshes, {"vertices": int(total_v), "faces": int(total_f), "stride": s, "pieces": len(meshes),
+                    "piece_info": pieces, "filled_hole_px": filled,
+                    "frame_fraction": round(float(keep.mean()), 3)}
 
 
 def export_room(meshes: Dict, path) -> None:

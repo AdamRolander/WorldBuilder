@@ -67,9 +67,11 @@ def load_scene_meshes(scene: Path, include_room: bool = True):
     return out
 
 
-def render_views(scene: Path, views, size=640, include_room=True):
+def render_views(scene: Path, views, size=640, include_room=True, only=None):
     import pyrender
     meshes = load_scene_meshes(scene, include_room)
+    if only:        # e.g. --only room_relief: look at one part of the scene by itself
+        meshes = [(n, m) for n, m in meshes if any(n.startswith(p) for p in only)]
     npz = np.load(scene / "3d_models" / "scene_pointmap.npz")
     K, R = npz["intrinsics"], npz["R_total"].astype(np.float64)
     H, W = (int(x) for x in npz["image_hw"])
@@ -87,7 +89,7 @@ def render_views(scene: Path, views, size=640, include_room=True):
             prim.material.metallicFactor = 0.0
             prim.material.roughnessFactor = 1.0
         sc.add(pm)
-        if not is_room:
+        if not is_room or only:
             lo, hi = np.minimum(lo, m.bounds[0]), np.maximum(hi, m.bounds[1])
     c = 0.5 * (lo + hi)
     ext = float(np.linalg.norm(hi - lo))
@@ -156,8 +158,10 @@ def main():
     ap.add_argument("--views", default="photo,orbit,top,side")
     ap.add_argument("--size", type=int, default=640)
     ap.add_argument("--no-room", action="store_true")
+    ap.add_argument("--only", help="comma-separated node-name prefixes to render alone (e.g. room_relief)")
     a = ap.parse_args()
-    renders, hw = render_views(a.scene, a.views.split(","), a.size, not a.no_room)
+    renders, hw = render_views(a.scene, a.views.split(","), a.size, not a.no_room,
+                               a.only.split(",") if a.only else None)
     out = contact_sheet(a.scene, renders, hw, a.out or a.scene / "renders.png", a.size)
     print(f"✓ {out}")
 
