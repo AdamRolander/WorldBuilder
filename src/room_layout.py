@@ -23,7 +23,7 @@ whole scene and derives what SAM 3D itself is bad at — architecture:
    intrinsics and coloured by the pixel it lands on if it is not occluded
    (depth test against the point map). Hidden regions are filled from the
    nearest visible sample blended with the plane's median colour — a stand-in
-   for real inpainting (see docs/ROADMAP.md).
+   for real inpainting.
 
 Everything here is numpy/scipy/trimesh on the CPU; ``tests/test_room_layout.py``
 exercises it on synthetic rooms and, when the MoGe weights are cached, on a

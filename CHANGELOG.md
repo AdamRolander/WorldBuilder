@@ -1,9 +1,11 @@
 # Changelog
 
 All notable changes to WorldBuilder. Format follows [Keep a Changelog](https://keepachangelog.com/);
-versions follow SemVer once `v0.2.0` is tagged.
+versions follow [SemVer](https://semver.org/) (0.x: minor = features, patch = fixes).
 
-## [Unreleased] — branch `audit-and-roadmap`
+## [Unreleased]
+
+## [0.2.0] — 2026-10-08
 
 ### Added (October 2026, second pass)
 - Silhouette pose search with an occlusion- and depth-aware score (`src/pose_fit.py`);
@@ -46,7 +48,7 @@ versions follow SemVer once `v0.2.0` is tagged.
   results metadata.
 - Blender add-on 0.2.0: lite download, import existing scene, metric-scale option;
   `scripts/test_blender_addon.py` end-to-end test.
-- Docs: `HARDWARE.md`, `CONTRIBUTOR_TASKS.md`, `integrations/mujoco/README.md`;
+- Docs: `HARDWARE.md`, `integrations/mujoco/README.md`;
   60 CPU tests.
 
 ### Fixed (October 2026)
@@ -71,8 +73,7 @@ versions follow SemVer once `v0.2.0` is tagged.
   picker and GLB download; viewer shows textured room, supports, failures, point cloud.
 - Blender extension and Unreal plugin scaffolds (`integrations/`).
 - CPU test suite (39 tests), ruff config, CI workflow, `pyproject.toml`, LICENSE (MIT),
-  CITATION.cff, CONTRIBUTING.md, docs (architecture, audit, roadmap, validation,
-  integrations).
+  CITATION.cff, CONTRIBUTING.md, docs (architecture, integrations).
 - Scripts: `bench_detectors.py`, `plot_scene.py`, `regen_viewer.py` (moved).
 
 ### Changed

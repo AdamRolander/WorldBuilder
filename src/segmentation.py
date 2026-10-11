@@ -3,8 +3,7 @@
 Given the cleaned stage-1 object list, produce one binary mask per physical
 object instance. This is the hand-off that decides what SAM 3D gets to
 reconstruct, so most of the "the local VLM misses objects" complaints land
-here rather than in the VLM itself. Design notes (see docs/AUDIT.md §2 for
-the measurements behind them):
+here rather than in the VLM itself. Design notes:
 
 * ``Sam3Processor`` pre-filters detections at its own ``confidence_threshold``
   (default 0.5) *before* we ever see them. The old code then applied a 0.35

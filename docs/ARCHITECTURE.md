@@ -64,12 +64,12 @@ scenes, and can be re-run on any finished scene with
 
 | decision | why |
 | --- | --- |
-| One prompt file for all detectors | the label becomes SAM 3's text prompt; backends must be steered identically (AUDIT §1.2) |
+| One prompt file for all detectors | the label becomes SAM 3's text prompt; backends must be steered identically |
 | Detector output is treated as untrusted | local models loop, invent parts, bake counts into labels; `clean_detections` is the safety net |
-| Our threshold is pushed into `Sam3Processor` | its default 0.5 pre-filter made every lower threshold dead code (AUDIT §2.1) |
+| Our threshold is pushed into `Sam3Processor` | its default 0.5 pre-filter made every lower threshold dead code |
 | Point map computed once, passed to every SAM 3D call | saves N−1 MoGe passes and is the input to the layout stage |
 | Layout before placement | gravity alignment must precede any "up"-based heuristic; the floor plane replaces "lowest object" as the floor |
-| Placement asks the photo, not the boxes | per object: depth from the point map under its mask, support from the surface under the mask's bottom edge, and every move kept only if the silhouette still matches the mask. Box-overlap and label-list rules (the September version, still in `room_generator.py` as the no-point-map fallback) moved more objects wrong than right (VALIDATION §4.1) |
+| Placement asks the photo, not the boxes | per object: depth from the point map under its mask, support from the surface under the mask's bottom edge, and every move kept only if the silhouette still matches the mask. Box-overlap and label-list rules (the September version, still in `room_generator.py` as the no-point-map fallback) moved more objects wrong than right |
 | Gravity from all surfaces | a floor mask that spans a rug, a step or a shower tray tilts a fitted plane; walls and table tops outvote it |
 | Strong walls override object bounds | thousands of point-map votes beat one noisy per-object depth; objects are nudged back inside (capped) |
 | Room = textured shell + relief | planes get real textures at photo resolution (unseen parts continue the visible material); what is neither object nor plane (counters, cabinets, beams) is meshed from the point map. A prior-placed plane never inherits pixels from geometry behind it; an observed wall does (windows) |
@@ -95,7 +95,7 @@ scenes, and can be re-run on any finished scene with
   (`scripts/estimate_metric_scale.py` does, with MoGe-2) sets it;
   everything else reads it from `layout.json`.
 * **Progress hooks**: the webapp polls the filesystem; a callback in
-  `process_image` (CODE-3) would remove that.
+  `process_image` would remove that.
 
 ## 5. Files that matter when debugging
 
