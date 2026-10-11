@@ -74,6 +74,12 @@ def find_faces(points: np.ndarray, keep: np.ndarray, layout: rl.RoomLayout,
                 used[max(0, b - 1):b + 2] = True
                 near = sel & (np.abs(c - 0.5 * (edges[b] + edges[b + 1])) < 1.5 * bin_w)
                 coord = float(np.median(c[near]))
+                if sign * coord >= 0:
+                    # The camera is at the origin: a plane on this side of it
+                    # with this normal faces away and cannot have been seen.
+                    # Such pixels are noisy normals on a thin edge (the lip of
+                    # a counter seen almost edge-on), not a surface to extrude.
+                    continue
                 lab, n = ndimage.label(ndimage.binary_closing(near, iterations=2))
                 for i in range(1, n + 1):
                     comp = (lab == i) & near
@@ -143,6 +149,23 @@ def face_to_box(face: Dict, layout: rl.RoomLayout, points: np.ndarray, valid: np
             "pixels": face["pixels"]}
 
 
+def occupied_fraction(box: Dict, object_boxes: List[Tuple[np.ndarray, np.ndarray]], tol: float, n: int = 6) -> float:
+    """Share of a box's volume that lies inside the bounding box of a placed
+    object. Where a reconstructed object already stands (a vanity, a toilet),
+    the background surfaces around it are parts of that object the mask
+    missed, and a solid block there would bury it."""
+    if not object_boxes:
+        return 0.0
+    lo, hi = np.asarray(box["min"], float), np.asarray(box["max"], float)
+    t = (np.arange(n) + 0.5) / n
+    g = np.stack(np.meshgrid(t, t, t, indexing="ij"), axis=-1).reshape(-1, 3)
+    pts = lo + g * (hi - lo)
+    inside = np.zeros(len(pts), bool)
+    for omn, omx in object_boxes:
+        inside |= np.all((pts >= omn - tol) & (pts <= omx + tol), axis=1)
+    return float(inside.mean())
+
+
 def _contained(a: Dict, b: Dict, tol: float) -> bool:
     return bool(np.all(np.asarray(a["min"]) >= np.asarray(b["min"]) - tol)
                 and np.all(np.asarray(a["max"]) <= np.asarray(b["max"]) + tol))
@@ -150,8 +173,9 @@ def _contained(a: Dict, b: Dict, tol: float) -> bool:
 
 def build_builtins(points_aligned: np.ndarray, keep: np.ndarray, valid: np.ndarray, layout: rl.RoomLayout,
                    K: np.ndarray, image_rgb: np.ndarray, depth: np.ndarray,
-                   blocked: Optional[np.ndarray] = None, texel_density: Optional[float] = None
-                   ) -> Tuple[Dict, List[Dict]]:
+                   blocked: Optional[np.ndarray] = None, texel_density: Optional[float] = None,
+                   object_boxes: Optional[List[Tuple[np.ndarray, np.ndarray]]] = None,
+                   max_occupied: float = 0.5) -> Tuple[Dict, List[Dict]]:
     """Meshes (``room_builtin_<i>_face`` textured, ``room_builtin_<i>_body``
     flat) and the list of boxes (for ``layout.json`` and physics export)."""
     import trimesh
@@ -164,6 +188,8 @@ def build_builtins(points_aligned: np.ndarray, keep: np.ndarray, valid: np.ndarr
     for f, b in zip(faces, boxes, strict=True):                 # larger faces first
         if any(_contained(b, kb, 0.01 * room) for _, kb in kept):
             continue
+        if occupied_fraction(b, object_boxes or [], 0.02 * room) > max_occupied:
+            continue                                            # a placed object is already the solid here
         kept.append((f, b))
     if texel_density is None:
         texel_density = 1024.0 / room
