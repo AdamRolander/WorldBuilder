@@ -21,12 +21,33 @@ which includes PyTorch's cache and ~0.4 GB of desktop.
 | 4 assemble + exports | none | 0 | 0 | CPU, 20–100 s (pose search and instance sharing dominate) + ~25 s for the lite GLB |
 
 Only one large model is on the GPU at a time (the README's "VRAM dance").
-Wall-clock on the 5090: 175–430 s per photo for 18–44 objects — about 8 s
-per object in stage 3, 35 s for local detection, 5–13 s for segmentation.
 System RAM: 62 GB on the dev box; the parked models take roughly 30 GB of
 it, so treat 48 GB as the practical minimum and 64 GB as comfortable.
 Disk: ~15 GB of weights plus the Hugging Face cache for the VLM (~18 GB),
-and 0.8–2 GB per scene with the full-resolution meshes.
+and 0.8–4 GB per scene with the full-resolution meshes.
+
+### Per phase, twelve photos (2026-10-10)
+
+Every run now writes `metrics.json` (seconds per phase, time to the first
+object, seconds per object, device-wide and per-process memory peaks; see
+[BENCHMARKS.md](BENCHMARKS.md)). On twelve photos with 4–77 object
+instances each (industrial halls, rooms, outdoor scenes):
+
+| phase | seconds | device peak | notes |
+| --- | ---: | ---: | --- |
+| detect (local VLM) | 11–35, typically 30 | 18–22.5 GB | independent of scene size |
+| segment (SAM 3) | 1–10 | 6–10 GB | includes the first load when cold |
+| reconstruct (SAM 3D) | **4.5–6.7 per object** (median), 5–11 at the 90th percentile | 22–26.4 GB (17.8–20.2 GB allocated) | linear in the number of objects: 26 s for 4, 503 s for 77. This is the bottleneck |
+| metric scale (MoGe-2) | 4–13 | — | subprocess |
+| stage 4: layout, placement, room, world export | 4–90 | 0 | CPU; placement dominates, then photo re-projection |
+| exports: viewer, GLB, lite GLB | 4–45 | 0 | CPU; the lite GLB bake dominates |
+| **time to first object** | 23–85, typically 40 | | detection + segmentation + model wake-up |
+| **total** | 70 s (4 objects) to 870 s (77 objects) | **26.4 GB** | |
+
+The device peak during SAM 3D is higher than in the table above because it
+includes PyTorch's cache, which grows into whatever memory is free on a
+32 GB card; the allocated figure (≤ 20.2 GB) is what a smaller card has to
+fit.
 
 ## What that means for cards
 

@@ -583,6 +583,7 @@ def build_relief(points_aligned: np.ndarray, valid: np.ndarray, owner: np.ndarra
     if gh < 2 or gw < 2 or Kg.sum() < 50:
         return empty
     cell = Kg[:-1, :-1] & Kg[:-1, 1:] & Kg[1:, :-1] & Kg[1:, 1:]
+    have_points = cell.copy()
     idx = np.arange(gh * gw).reshape(gh, gw)
     a, b, c, d = idx[:-1, :-1], idx[:-1, 1:], idx[1:, 1:], idx[1:, :-1]
     V = Pg.reshape(-1, 3).astype(np.float64)
@@ -615,6 +616,10 @@ def build_relief(points_aligned: np.ndarray, valid: np.ndarray, owner: np.ndarra
         cell &= ~(steep & ~wide)
     # what is left attached by a strip one or two cells wide is a sliver
     cell &= ndimage.binary_opening(cell, structure=np.ones((3, 3), bool))
+    if terrain:
+        # Ground seen at a shallow angle passes and fails the angle test row by
+        # row; close those gaps so the terrain is a surface and not stripes.
+        cell |= ndimage.binary_closing(cell, structure=np.ones((3, 3), bool), iterations=2) & have_points
     lab, n = ndimage.label(cell)
     if n:
         sizes = ndimage.sum(cell, lab, index=np.arange(1, n + 1))

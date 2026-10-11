@@ -269,6 +269,13 @@ def assemble_from_cache(models_dir: Path, image_rgb: np.ndarray,
                         small = np.asarray(Image.fromarray(image_rgb).resize(sky.shape[::-1], Image.BILINEAR))
                         sky_rgb = [int(c) for c in np.median(small[sky], axis=0)]
                 room_meshes, stats = rt.build_shell(shell_layout, pm["intrinsics"], image_rgb, depth, blocked)
+                if terrain and stats.get("floor", {}).get("fill") in ("fallback", "median"):
+                    # nothing of the lowered base was seen: give it the ground's own colour
+                    small = np.asarray(Image.fromarray(image_rgb).resize(ground.shape[::-1], Image.BILINEAR))
+                    rgb = np.median(small[ground], axis=0).astype(np.uint8)
+                    room_meshes["room_floor"].visual.material.baseColorTexture = Image.fromarray(
+                        np.tile(rgb, (8, 8, 1)))
+                    stats["floor"]["fill"] = "ground colour"
                 m = room_meshes.get("room_floor")
                 for k, v in stats.items():
                     log(f"  room {k}: {v['visible_fraction']:.0%} seen in the photo, rest {v['fill']}")
