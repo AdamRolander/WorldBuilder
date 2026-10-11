@@ -297,7 +297,9 @@ def assemble_from_cache(models_dir: Path, image_rgb: np.ndarray,
                         max(np.asarray(layout.bounds_max) - np.asarray(layout.bounds_min))) \
                         if "room_floor" in room_meshes else None
                     bi_meshes, builtins = build_builtins(P_bg.astype(np.float64), keep_bg, pm["valid"], layout,
-                                                         pm["intrinsics"], image_rgb, depth, blocked, density)
+                                                         pm["intrinsics"], image_rgb, depth, blocked, density,
+                                                         object_boxes=[(np.asarray(b["min"]), np.asarray(b["max"]))
+                                                                       for b in aabbs.values()])
                     room_meshes.update(bi_meshes)
                     if builtins:
                         log(f"  built-ins: {len(builtins)} solid boxes behind the relief "
