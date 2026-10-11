@@ -103,11 +103,12 @@ def appearance_metrics(scene: Path, size: int = 512) -> Dict:
     src = Path(rec["metadata"]["source_image"])
     if not src.exists():
         return {}
-    renders, _ = render_views(scene, ["photo"], size=size)
+    depth: Dict = {}
+    renders, _ = render_views(scene, ["photo"], size=size, depth_out=depth)
     r = renders["photo"][..., :3].astype(np.float32)
     h, w = r.shape[:2]
     photo = np.asarray(Image.open(src).convert("RGB").resize((w, h), Image.LANCZOS)).astype(np.float32)
-    covered = np.abs(r - 30.0).max(-1) > 3.0                       # the renderer's background is (30, 30, 30)
+    covered = depth["photo"] > 0                                   # some geometry along the pixel's ray
     obj = np.zeros((h, w), bool)
     for o in rec["objects"]:
         mp = scene / "masks" / Path(o.get("mask_path") or "x").name
