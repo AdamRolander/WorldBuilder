@@ -67,7 +67,7 @@ def load_scene_meshes(scene: Path, include_room: bool = True):
     return out
 
 
-def render_views(scene: Path, views, size=640, include_room=True, only=None):
+def render_views(scene: Path, views, size=640, include_room=True, only=None, depth_out=None):
     import pyrender
     meshes = load_scene_meshes(scene, include_room)
     if only:        # e.g. --only room_relief: look at one part of the scene by itself
@@ -123,7 +123,10 @@ def render_views(scene: Path, views, size=640, include_room=True, only=None):
                 pose = _look_at(eye, c)
         node = sc.add(cam, pose=pose)
         r = pyrender.OffscreenRenderer(w, h)
-        color, _ = r.render(sc)
+        # unlit, like the browser viewer: lighting washes out vertex-coloured meshes
+        color, depth = r.render(sc, flags=pyrender.RenderFlags.FLAT)
+        if depth_out is not None:
+            depth_out[v] = depth
         r.delete()
         sc.remove_node(node)
         out[v] = color

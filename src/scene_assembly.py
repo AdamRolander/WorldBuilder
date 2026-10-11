@@ -262,25 +262,43 @@ def assemble_from_cache(models_dir: Path, image_rgb: np.ndarray,
 
     profiling.add("assemble.room", time.time() - t_phase)
     t_phase = time.time()
-    export_world(results, models_dir, verbose=verbose)
+    photo_ctx = None
+    if (layout is not None and pm is not None and object_pixels is not None
+            and os.environ.get("WORLDBUILDER_PHOTO_TEXTURE", "1") != "0"):
+        from src.object_texture import make_context
+        cam_z = np.where(pm["valid"], (pm["points"] @ rl.OPENCV_TO_WORLD.T)[..., 2], np.nan)
+        photo_ctx = make_context(image_rgb, pm["intrinsics"], layout.R_total, cam_z, object_pixels)
+    export_world(results, models_dir, verbose=verbose, photo_ctx=photo_ctx)
     profiling.add("assemble.export_world", time.time() - t_phase)
     return results, failed
 
 
-def export_world(results: List[Dict], models_dir: Path, verbose: bool = True):
+def export_world(results: List[Dict], models_dir: Path, verbose: bool = True, photo_ctx=None):
     """World-space PLY per object (so viewers and importers need no pose
     math) and one merged ``scene_combined.ply``. Stale PLYs from a previous
-    assembly of the same scene are removed."""
+    assembly of the same scene are removed. With ``photo_ctx`` the side of
+    each object the photo saw is re-coloured from the photo
+    (``src/object_texture.py``)."""
     import trimesh
     log = print if verbose else (lambda *a, **k: None)
     models_dir = Path(models_dir)
     keep = {"room.ply", "scene_combined.ply"}
     meshes = []
+    painted: List[float] = []
     for r in results:
         src = r.get('model_path')
         if not src or not Path(src).exists():
             continue
         m = world_mesh(r)
+        if photo_ctx is not None:
+            try:
+                from src.object_texture import repaint
+                st = repaint(m, int(r['id']), photo_ctx)
+                if st is not None:
+                    r['photo_painted'] = st['painted']
+                    painted.append(st['painted'])
+            except Exception as e:                     # appearance only: never lose the object over it
+                log(f"  ⚠️  photo texture skipped for {r['label']} #{r['id']}: {str(e)[:80]}")
         # named by instance, not by mesh: shared instances reuse one model file
         out = models_dir / f"{int(r['id']):03d}_{str(r['label']).replace(' ', '_').replace('/', '_')}.ply"
         m.export(str(out), file_type='ply')
@@ -295,6 +313,9 @@ def export_world(results: List[Dict], models_dir: Path, verbose: bool = True):
         combined = trimesh.util.concatenate(meshes)
         combined.export(str(models_dir / "scene_combined.ply"), file_type='ply')
         log(f"✓ {len(meshes)} world-space PLYs + scene_combined.ply ({len(combined.faces):,} triangles)")
+    if painted:
+        log(f"✓ photo re-projected onto {sum(1 for x in painted if x > 0.02)}/{len(painted)} objects "
+            f"(mean {100 * float(np.mean(painted)):.0f}% of each mesh's vertices)")
 
 
 def finalize_scene(output_path: Path, results: List[Dict], failed: List[Dict], metadata: Dict,
