@@ -82,6 +82,8 @@ class RoomLayout:
     estimated_metric_scale: float = 1.0      # multiply scene units by this for metres
     metric_scale_source: str = "camera-height prior (1.5 m)"
     notes: List[str] = field(default_factory=list)
+    scene_type: str = "room"                 # "room": a box of walls; "open": ground only (outdoors, halls)
+    sky_fraction: float = 0.0                # share of the top third of the frame with no geometry (sky)
 
     def to_json(self) -> Dict:
         d = asdict(self)
@@ -777,14 +779,44 @@ def estimate_layout(points_world: np.ndarray, valid: np.ndarray,
     # with a little slack behind it, unless a wall was actually observed there.
     if sources["z_min"] == "extent":
         bmin[2] = min(bmin[2], -0.05 * camera_height)
+    scene_type, sky = classify_scene(valid, ceil_src, sources)
+    if scene_type == "open":
+        notes.append(f"open scene ({sky:.0%} of the upper frame is sky, ceiling {ceil_src}, "
+                     f"{sum(str(v).startswith('wall') for v in sources.values())} walls seen): "
+                     "no walls or ceiling are drawn, the ground is meshed as terrain")
     layout = RoomLayout(
         gravity_rotation=G.tolist(), yaw_deg=float(yaw), floor=floor, floor_y=floor_y,
         ceiling_y=float(ceil_y), ceiling_source=ceil_src,
         bounds_min=bmin.tolist(), bounds_max=bmax.tolist(), wall_sources=sources,
         camera_height=float(camera_height), estimated_metric_scale=float(metric_scale),
-        metric_scale_source=scale_source, notes=notes,
+        metric_scale_source=scale_source, notes=notes, scene_type=scene_type, sky_fraction=float(sky),
     )
     return layout
+
+
+def classify_scene(valid: np.ndarray, ceiling_source: str, wall_sources: Dict[str, str],
+                   sky_threshold: float = 0.25) -> Tuple[str, float]:
+    """"room" or "open", from what the photo shows rather than from labels.
+
+    A room is drawn as a box, and sides nobody saw are predicted from the
+    ones that were seen. That is only reasonable when there is a room:
+
+    * the depth model returns no geometry for sky, so a large share of the
+      upper frame without points means the photo was taken outdoors;
+    * with no ceiling observed *and* no wall observed there is nothing to
+      predict a box from (a forest path, a hedge maze from above, the middle
+      of a hall), and four invented walls would be the least true thing in
+      the scene.
+
+    In both cases the scene is "open": only the ground is kept, as terrain.
+    Returns ``(scene_type, sky_fraction)``.
+    """
+    h = valid.shape[0]
+    sky = 1.0 - float(valid[: max(1, h // 3)].mean())
+    walls_seen = any(str(v).startswith("wall") for v in wall_sources.values())
+    if sky >= sky_threshold or (ceiling_source != "geometric" and not walls_seen):
+        return "open", sky
+    return "room", sky
 
 
 def save_layout(layout: RoomLayout, path: Path, extra: Optional[Dict] = None):

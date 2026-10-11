@@ -66,10 +66,12 @@ def room_planes(layout: rl.RoomLayout, include_ceiling: bool = True,
     for k in list(P):
         if k.startswith("wall_"):
             P[k]["evidence"] = str(ws.get(k[5:], "")).startswith("wall")
+    if getattr(layout, "scene_type", "room") == "open":      # ground only
+        P = {"floor": P["floor"]}
     if not include_ceiling:
-        P.pop("ceiling")
+        P.pop("ceiling", None)
     if not include_front_wall:
-        P.pop("wall_z_min")
+        P.pop("wall_z_min", None)
     return P
 
 
@@ -513,7 +515,8 @@ def build_relief(points_aligned: np.ndarray, valid: np.ndarray, owner: np.ndarra
                  layout: rl.RoomLayout, image_rgb: np.ndarray, max_vertices: int = 200_000,
                  plane_tol_frac: float = 0.03, small_object_frac: float = 0.015,
                  max_view_angle_deg: float = 80.0, min_component_frac: float = 0.003,
-                 max_texture_side: int = 2048, thin_steep_deg: float = 62.0, max_pieces: int = 16):
+                 max_texture_side: int = 2048, thin_steep_deg: float = 62.0, max_pieces: int = 16,
+                 terrain: bool = False):
     """Meshes of the built-in structure that is neither object nor shell.
 
     ``points_aligned`` (h,w,3) is the point map in the aligned frame (camera
@@ -521,6 +524,10 @@ def build_relief(points_aligned: np.ndarray, valid: np.ndarray, owner: np.ndarra
     Returns ``({name: trimesh}, stats)``: one mesh per connected piece of
     background surface (``room_relief_00`` is the largest), so a viewer or
     an importer can hide the cabinet run without losing the window recess.
+
+    With ``terrain`` the ground itself is kept (an open scene has no flat
+    floor to stand in for it): the relief is then the terrain, textured by
+    the photo, and nothing is dropped for being on or below the floor plane.
     """
     import cv2
     import trimesh
@@ -557,7 +564,9 @@ def build_relief(points_aligned: np.ndarray, valid: np.ndarray, owner: np.ndarra
     tol = plane_tol_frac * float(max(dims))
     on_shell = np.zeros((h, w), bool)
     planes = room_planes(layout)
-    for pl in planes.values():
+    for pname, pl in planes.items():
+        if terrain and pname == "floor":
+            continue
         d = (P - pl["o"].astype(np.float32)) @ pl["n"].astype(np.float32)     # >0 inside the room
         if pl.get("evidence"):
             on_shell |= d < tol                 # on the plane, or beyond it (painted onto the wall)

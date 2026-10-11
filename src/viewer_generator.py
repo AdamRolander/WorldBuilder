@@ -131,6 +131,8 @@ const ORIGIN = [0, (LAYOUT && typeof LAYOUT.floor_y === 'number') ? LAYOUT.floor
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x1a1a1a);
+if (LAYOUT && LAYOUT.scene_type === 'open' && LAYOUT.sky_rgb)      // outdoors: the photo's sky colour
+  scene.background = new THREE.Color(LAYOUT.sky_rgb[0] / 255, LAYOUT.sky_rgb[1] / 255, LAYOUT.sky_rgb[2] / 255);
 const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.01, 1000);
 camera.position.set(3, 3, 3);
 const renderer = new THREE.WebGLRenderer({ antialias:true });
@@ -328,7 +330,8 @@ function buildBuiltinList() {
   keys.forEach(k => {
     const b = builtins[k];
     const row = document.createElement('div'); row.className = 'row';
-    const title = b.kind === 'relief' ? `Surface ${b.idx + 1}` : `Solid block ${b.idx + 1}`;
+    const terrain = LAYOUT && LAYOUT.scene_type === 'open';
+    const title = b.kind === 'relief' ? `${terrain ? 'Ground / backdrop' : 'Surface'} ${b.idx + 1}` : `Solid block ${b.idx + 1}`;
     row.innerHTML = `<input type="checkbox" checked><span class="name">${title}</span><span class="conf">${b.kind}</span>`;
     el.appendChild(row); b.row = row;
     row.addEventListener('mouseenter', () => tint(b.nodes, true));
