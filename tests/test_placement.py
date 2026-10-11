@@ -312,3 +312,16 @@ def test_fast_splat_matches_the_whole_frame_definition(scene):
         s0, z0 = pl._splat_reference(ev, cloud)
         assert np.array_equal(s1, s0), k
         assert np.array_equal(z1, z0), k
+
+
+def test_large_flat_mask_at_ground_level_is_ground_but_a_small_one_is_not():
+    h, w = 60, 80
+    valid = np.ones((h, w), bool)
+    P = np.zeros((h, w, 3)); N = np.zeros((h, w, 3))
+    P[..., 1] = -1.5; N[..., 1] = 1.0                       # everything is ground 1.5 below the camera
+    N[:20] = (0, 0, -1.0); P[:20, :, 1] = 0.5               # except a vertical backdrop on top
+    path = np.zeros((h, w), bool); path[30:, 10:60] = True  # big, on the ground
+    mat = np.zeros((h, w), bool); mat[50:54, 62:70] = True  # small, on the ground
+    hedge = np.zeros((h, w), bool); hedge[:20, :] = True    # big, vertical
+    got = pl.ground_masks({1: path, 2: mat, 3: hedge}, P, N, valid, floor_y=-1.5, camera_height=1.5)
+    assert got == {1: "ground"}

@@ -135,9 +135,22 @@ def assemble_from_cache(models_dir: Path, image_rgb: np.ndarray,
         for rid in sorted(masks, key=lambda i: -int(masks[i].sum())):
             object_pixels[rl._resize_mask(masks[rid], pm["valid"].shape)] = rid
     if mode == "evidence":
-        from src.placement import build_evidence, contained_parts, place_objects, structural_duplicates
+        from src.placement import (
+            build_evidence,
+            contained_parts,
+            ground_masks,
+            place_objects,
+            structural_duplicates,
+        )
         from src.room_generator import model_vertices
         structural = structural_duplicates(masks, structural_masks)
+        if layout.scene_type == "open" and "floor" not in (structural_masks or {}):
+            P_al = pm["points"] @ layout.R_total.T
+            N_al = rl.compute_normals(pm["points"], pm["valid"]) @ layout.R_total.T
+            for rid, what in ground_masks({k: v for k, v in masks.items() if k not in structural}, P_al,
+                                          np.nan_to_num(N_al), pm["valid"], layout.floor_y,
+                                          layout.camera_height).items():
+                structural[rid] = what
         parts = contained_parts({k: v for k, v in masks.items() if k not in structural},
                                 {r["id"]: r["label"] for r in results})
         if parts:

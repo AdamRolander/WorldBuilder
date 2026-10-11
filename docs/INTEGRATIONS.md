@@ -163,7 +163,7 @@ blender --background --python scripts/test_blender_addon.py -- \
     --scene <an existing scene id> --render /tmp/wb.png        # no GPU work, ~5 s
 # then by hand: build and install the extension
 blender --command extension build --source-dir integrations/blender_worldbuilder --output-dir /tmp
-#   Blender > Edit > Preferences > Get Extensions > ▾ > Install from Disk… > /tmp/worldbuilder-0.2.0.zip
+#   Blender > Edit > Preferences > Get Extensions > ▾ > Install from Disk… > /tmp/worldbuilder-0.3.0.zip
 #   3D Viewport > N > WorldBuilder > "Import existing scene" (leave the id empty for the newest)
 #   then "Generate scene from photo"
 ```
