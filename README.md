@@ -247,6 +247,9 @@ TORCH_HUB_OFFLINE=1                 # optional: avoid hub checks on every run
 | `WORLDBUILDER_SHARED_POINTMAP` | `1`                     | `0` recomputes MoGe per object (old behaviour).       |
 | `WORLDBUILDER_STRETCH_STRUCTURAL` | unset                | `1` stretches pillars/beams to ceiling height (opt-in). |
 | `WORLDBUILDER_OUTPUTS`         | `outputs/`              | Where the webapp reads/writes scenes.                 |
+| `WORLDBUILDER_HOST`            | `127.0.0.1`             | Interface the webapp listens on (`0.0.0.0` for the LAN). |
+| `WORLDBUILDER_PHOTO_TEXTURE`   | `1`                     | `0` keeps SAM 3D's own colours on the side the photo saw. |
+| `WORLDBUILDER_RELIEF`, `WORLDBUILDER_BUILTINS`, `WORLDBUILDER_SHARE_INSTANCES`, `WORLDBUILDER_LITE`, `WORLDBUILDER_METRIC` | `1` | `0` switches the feature off (for comparisons). |
 
 ### 6. Smoke test
 
@@ -338,16 +341,41 @@ API surface (`webapp/server.py`):
 | `POST /api/upload`             | form fields `image` (+ optional `detector`) → `{job_id, scene_id}` |
 | `GET  /api/jobs/<id>`          | `{status, stage 1–5, scene_id, error}`                          |
 | `GET  /api/scenes/<id>`        | manifest: objects, layout, failures, file URLs                  |
-| `GET  /api/scenes/<id>/glb`    | the whole scene as one GLB (built on demand)                    |
+| `GET  /api/scenes/<id>/glb`    | the whole scene as one GLB (`?lite=1`: decimated, baked textures); manual edits applied unless `?raw=1` |
+| `GET/POST /api/scenes/<id>/edits` | manual corrections saved from the viewer (`edits.json`)      |
+| `GET  /api/scenes/<id>/mujoco` | zip with a MuJoCo model of the scene                            |
 | `GET  /outputs/<path>`         | static access to generated scenes                               |
 
 Passing a known `scene_id` as a `job_id` returns `complete` immediately —
 that's the demo fallback seam for showing a pre-baked scene
 (`http://localhost:5174/?demo=your_scene_g`).
 
+### Reviewing and correcting a scene in the viewer
+
+`viewer.html` loads `scene_lite.glb` (tens of MB; add `?full=1` for the
+dense meshes). Move the mouse over the object list, or over the scene, and
+the matching object lights up; untick it to remove it. Click an object or
+its name to type its position, rotation and scale (position is the object's
+centre: Y is height above the floor, X and Z are relative to where the
+photo was taken, in metres when the scale is known). Every piece of
+built-in structure (relief surfaces, solid blocks; outdoors, the ground) has
+its own checkbox.
+
+**Save edits** writes `edits.json` next to the scene. Served by the web app
+it is saved through the API, and every GLB the server hands out (the
+download button, the Blender add-on, the Unreal bridge) and the MuJoCo
+export has the edits applied. Opened from a plain file server the file is
+downloaded instead: put it in the scene folder and run
+`python -m src.scene_edits outputs/<scene>` to write `scene_lite.edited.glb`.
+The pipeline's own output is never modified; delete `edits.json` to undo
+everything.
+
 ### Utilities
 
 ```bash
+python scripts/benchmark.py outputs/run_b --baseline outputs/run_a --appearance   # quality, speed, memory, size; exit 1 on a regression
+python scripts/clone_scene.py outputs/run_a/* --into outputs/run_b    # light copy (meshes symlinked) to replay with other code or settings
+python -m src.scene_edits outputs/scene_a                         # apply edits.json to the GLBs
 python scripts/regen_viewer.py outputs/scene_a outputs/scene_b   # rebuild viewer.html + scene.glb after viewer edits
 python -m src.scene_export outputs/scene_a                       # just the GLB
 python -m src.debug_masks --image photo.jpg --output-dir outputs/scene_a   # overlay masks on the photo
@@ -406,17 +434,19 @@ outputs/<scene>/
 ├── detected_objects.json          # stage 1 after clean-up (detected_objects_raw.json = as returned)
 ├── segmentation_results.json      # stage 2: per-instance masks, scores, boxes, prompt used
 ├── masks/                         # stage 2: mask PNGs (+ structural_floor/wall/ceiling.png)
-├── reconstruction_results.json    # objects (pose, support, fit to the photo), removed/failed with reasons, timings, peak VRAM
+├── reconstruction_results.json    # objects (pose, support, fit to the photo), removed/failed with reasons
+├── metrics.json                   # seconds per phase, time to first object, seconds per object, peak GPU memory, output sizes
+├── edits.json                     # optional: manual corrections saved from the viewer (applied by the GLB endpoints)
 ├── 3d_models/
 │   ├── stage3/                    # SAM 3D's raw output: model-space meshes, raw.json poses, pointmap.npz, metric_scale.json
-│   ├── <id>_<label>.ply           # one world-space mesh per object instance (vertex colours)
-│   ├── room.glb                   # textured floor/walls/ceiling + photo relief + solid built-in boxes (named nodes)
+│   ├── <id>_<label>.ply           # one world-space mesh per object instance (vertex colours; the side the photo saw is re-coloured from the photo)
+│   ├── room.glb                   # textured floor/walls/ceiling + photo relief in separate pieces + solid built-in boxes (named nodes); open scenes: ground or terrain only
 │   ├── room.ply                   # the same shell as vertex colours (fallback for PLY-only consumers)
 │   ├── layout.json                # floor, gravity, yaw, ceiling, wall evidence, scale estimate, placement diagnostics
 │   ├── scene_pointmap.npz         # MoGe scene points (aligned frame) for debugging / viewers
 │   └── scene_combined.ply         # all objects composed into one mesh
 ├── scene.glb                      # full-resolution scene (hundreds of MB): named nodes, vertex colours
-├── scene_lite.glb                 # same scene, 8k triangles per object with baked textures (7–23 MB) — use this one
+├── scene_lite.glb                 # same scene, 8k triangles per object with baked textures (7–30 MB): what the viewer and DCC tools load
 ├── mujoco/                        # optional: scene.xml + assets (python -m src.mujoco_export)
 ├── scene_points.json              # small point-cloud sidecar the viewer can toggle on
 └── viewer.html                    # self-contained Three.js / WebXR viewer
@@ -428,6 +458,13 @@ by MoGe-2 when §4b is installed, otherwise a camera-height prior
 (`metric_scale_source` says which).
 `viewer.html` loads Three.js from a CDN, so viewing needs network access
 (not the GPU).
+
+**Open scenes.** When the upper part of the photo is sky, or neither a
+ceiling nor a wall was observed, the scene is treated as open
+(`layout.json → scene_type: "open"`): no walls or ceiling are invented, and
+ground that is not flat is meshed from the point map as terrain. Outdoor
+photos are an early use case: objects and the nearby ground come out, the
+distance does not.
 
 ---
 
@@ -489,8 +526,8 @@ ruff check .                # lint (config in pyproject.toml)
 
 The geometry and heuristics are unit-tested without any model weights;
 anything that touches SAM 3 / SAM 3D is verified on a GPU by re-running
-a fixed set of photos and comparing `scripts/audit_scene.py` scores before
-and after.
+a fixed set of photos and comparing the runs with `scripts/benchmark.py`
+([docs/BENCHMARKS.md](docs/BENCHMARKS.md)).
 See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
@@ -517,7 +554,10 @@ src/
   room_texture.py           stage 4c: textured shell quads (unseen parts predicted) + photo relief
   builtin_boxes.py          stage 4c: solid boxes for counters/cabinets behind the relief
   room_generator.py         legacy box/label placement (fallback when there is no point map)
+  object_texture.py         stage 4d: re-project the photo onto the visible side of each object
   mesh_bake.py              decimation + vertex-colour → texture baking (scene_lite.glb)
+  scene_edits.py            manual corrections from the viewer (edits.json) applied to the GLB exports
+  profiling.py              seconds and GPU memory per phase → metrics.json
   mujoco_export.py          MuJoCo / MJX model export with a stability check
   geometry.py               pose math shared by stage 4 (checked against pytorch3d)
   scene_export.py           GLB scene export
@@ -542,9 +582,11 @@ scripts/
   replay_assembly.py        re-run stage 4 on a finished scene (CPU, seconds)
   audit_scene.py            score placement against the photo's masks and point map
   render_scene.py           headless contact-sheet renders (pyrender + EGL)
+  benchmark.py              one table per run: placement, speed, memory, size, appearance; compares two runs
+  clone_scene.py            light copy of scenes for replaying stage 4 without touching the originals
   test_blender_addon.py     end-to-end add-on test, run inside `blender --background`
 tests/                      CPU-only pytest suite
-docs/                       ARCHITECTURE, INTEGRATIONS, HARDWARE
+docs/                       ARCHITECTURE, BENCHMARKS, INTEGRATIONS, HARDWARE
 
 checkpoints/                SAM 3 weights            (gitignored)
 sam3_repo/                  upstream clone           (gitignored)
@@ -598,6 +640,7 @@ the `mv` step in setup §4 is easy to miss.
 | document | what it is for |
 | --- | --- |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | data flow, file formats, frames/units, extension points |
+| [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | what is measured (placement, speed, memory, size, appearance) and how two runs are compared |
 | [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md) | Blender extension and Unreal plugin: setup, publishing rules, status |
 | [integrations/mujoco/README.md](integrations/mujoco/README.md) | MuJoCo / MJX export, Gymnasium wrapper, limits |
 | [docs/HARDWARE.md](docs/HARDWARE.md) | measured VRAM per stage, which cards work, what runs without a GPU |

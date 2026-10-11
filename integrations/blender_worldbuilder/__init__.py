@@ -31,7 +31,7 @@ from bpy.types import AddonPreferences, Operator, Panel
 bl_info = {
     "name": "WorldBuilder",
     "author": "Adam Rolander",
-    "version": (0, 2, 0),
+    "version": (0, 3, 0),
     "blender": (3, 6, 0),
     "location": "3D Viewport > Sidebar > WorldBuilder",
     "description": "Turn a photo of a room into a 3D scene via a local WorldBuilder server",

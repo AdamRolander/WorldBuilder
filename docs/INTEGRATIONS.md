@@ -144,7 +144,14 @@ Nuances:
 * **Server endpoints for clients**: `GET /api/scenes` (newest first),
   `GET /api/scenes/<id>/glb?lite=1`, `GET /api/scenes/<id>/mujoco[?mjx=1]`.
 
-### Testing the Blender add-on this weekend (10 minutes)
+Add-on 0.3.0 adds **Review in browser**: it opens the scene in the web
+viewer, where objects can be removed, moved, turned and resized by typing
+values. After *Save edits* there, *Import existing scene* brings the
+corrected scene into Blender (the server applies the edits to the GLB it
+serves). If Blender runs on another computer than the server, start the
+server with `--host 0.0.0.0`.
+
+### Testing the Blender add-on (10 minutes)
 
 ```bash
 # terminal 1 (worldbuilder-vlm env), only for the local detector
