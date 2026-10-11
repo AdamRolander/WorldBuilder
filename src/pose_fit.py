@@ -25,18 +25,39 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from src.placement import PlacedObject, SceneEvidence, mask_iou, splat
+from src.placement import PlacedObject, SceneEvidence, mask_box, mask_iou, splat, splat_box
+
+_BOX_CACHE: Dict[int, Tuple] = {}
+
+
+def _mask_box(mask: np.ndarray):
+    """Bounding box of a mask, remembered per array (the searches score one
+    mask against thousands of poses)."""
+    key = id(mask)
+    hit = _BOX_CACHE.get(key)
+    if hit is None or hit[0] is not mask:
+        if len(_BOX_CACHE) > 4096:
+            _BOX_CACHE.clear()
+        hit = (mask, mask_box(mask))
+        _BOX_CACHE[key] = hit
+    return hit[1]
 
 
 def fit_score(ev: SceneEvidence, verts: np.ndarray, mask: np.ndarray,
               depth_tol: float = 0.15, occl_margin: float = 0.05) -> float:
     """Occlusion- and depth-aware silhouette IoU in [0, 1]."""
-    sil, zbuf = splat(ev, verts)
-    if not sil.any():
+    sil, zbuf, sb = splat_box(ev, verts)
+    if sb is None:
         return 0.0
+    mb = _mask_box(mask)
+    if mb is not None:                           # everything below is zero outside the two boxes
+        sb = (min(sb[0], mb[0]), max(sb[1], mb[1]), min(sb[2], mb[2]), max(sb[3], mb[3]))
+    win = (slice(sb[0], sb[1]), slice(sb[2], sb[3]))
+    sil, zbuf, mask = sil[win], zbuf[win], mask[win]
+    valid, depth = ev.valid[win], ev.depth[win]
     with np.errstate(invalid="ignore"):
-        nearer = ev.valid & (ev.depth < zbuf * (1.0 - occl_margin))
-        agree = ~ev.valid | (np.abs(zbuf - ev.depth) <= depth_tol * ev.depth)
+        nearer = valid & (depth < zbuf * (1.0 - occl_margin))
+        agree = ~valid | (np.abs(zbuf - depth) <= depth_tol * depth)
     hidden = sil & nearer & ~mask
     visible = sil & ~hidden
     matched = sil & mask & agree

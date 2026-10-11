@@ -101,9 +101,65 @@ def build_evidence(points_world: np.ndarray, valid: np.ndarray, K: np.ndarray, R
 # ---------------------------------------------------------------------------
 
 def splat(ev: SceneEvidence, verts_aligned: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """(silhouette, z-buffer) of a dense mesh's vertices at point-map
+    return splat_box(ev, verts_aligned)[:2]
+
+
+def splat_box(ev: SceneEvidence, verts_aligned: np.ndarray):
+    """(silhouette, z-buffer, (y0, y1, x0, x1)) of a dense mesh's vertices at point-map
     resolution. Vertex splatting plus a small closing is within a pixel or
-    two of rasterising SAM 3D's meshes (10^4-10^5 vertices each)."""
+    two of rasterising SAM 3D's meshes (10^4-10^5 vertices each).
+
+    The pose searches call this thousands of times per scene, so the
+    morphology runs on the object's bounding box, not on the whole frame
+    (identical output; ``tests/test_placement.py`` checks that). The box
+    bounds everything that is set; it is ``None`` for an empty silhouette."""
+    from scipy import ndimage
+    h, w = ev.hw
+    u, v, z = ev.project(verts_aligned)
+    ok = (z > 1e-6) & np.isfinite(u) & np.isfinite(v)
+    ui = np.round(u[ok]).astype(np.int64)
+    vi = np.round(v[ok]).astype(np.int64)
+    inside = (ui >= 0) & (ui < w) & (vi >= 0) & (vi < h)
+    sil = np.zeros((h, w), bool)
+    zbuf = np.full((h, w), np.inf)
+    if not inside.any():
+        return sil, zbuf, None
+    ui, vi, zz = ui[inside], vi[inside], z[ok][inside]
+    pad = 6                                   # > closing radius + erosion window, so the crop's edge never matters
+    y0, y1 = max(0, int(vi.min()) - pad), min(h, int(vi.max()) + pad + 1)
+    x0, x1 = max(0, int(ui.min()) - pad), min(w, int(ui.max()) + pad + 1)
+    ch, cw = y1 - y0, x1 - x0
+    zc = np.full(ch * cw, np.inf)
+    np.minimum.at(zc, (vi - y0) * cw + (ui - x0), zz)
+    zc = zc.reshape(ch, cw)
+    hit = np.isfinite(zc)
+    # Sides of the crop that are the frame's own edge keep the frame's
+    # behaviour (closing erodes against the outside); interior sides are
+    # padded with empty pixels, which is what the frame has there.
+    top, left = pad if y0 > 0 else 0, pad if x0 > 0 else 0
+    bottom, right = pad if y1 < h else 0, pad if x1 < w else 0
+    hp = np.pad(hit, ((top, bottom), (left, right)))
+    sp = ndimage.binary_fill_holes(ndimage.binary_closing(hp, iterations=2))
+    zp = ndimage.grey_erosion(np.pad(zc, ((top, bottom), (left, right)), constant_values=np.inf), size=(5, 5))
+    cut = (slice(top, top + ch), slice(left, left + cw))
+    sc, zf = sp[cut], zp[cut]
+    sil[y0:y1, x0:x1] = sc
+    zbuf[y0:y1, x0:x1] = np.where(hit, zc, np.where(sc, zf, np.inf))
+    return sil, zbuf, (y0, y1, x0, x1)
+
+
+def mask_box(mask: np.ndarray):
+    """(y0, y1, x0, x1) of a mask's set pixels, or None."""
+    rows = np.flatnonzero(mask.any(1))
+    if not len(rows):
+        return None
+    cols = np.flatnonzero(mask.any(0))
+    return int(rows[0]), int(rows[-1]) + 1, int(cols[0]), int(cols[-1]) + 1
+
+
+def _splat_reference(ev: SceneEvidence, verts_aligned: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Whole-frame version of ``splat`` (slow); kept as the definition the
+    fast one is tested against."""
     from scipy import ndimage
     h, w = ev.hw
     u, v, z = ev.project(verts_aligned)
