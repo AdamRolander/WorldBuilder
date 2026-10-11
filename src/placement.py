@@ -462,6 +462,32 @@ def structural_duplicates(masks: Dict[int, np.ndarray], structural_masks: Option
     return out
 
 
+def ground_masks(masks: Dict[int, np.ndarray], points_aligned: np.ndarray, normals_aligned: np.ndarray,
+                 valid: np.ndarray, floor_y: float, camera_height: float, min_frame: float = 0.03,
+                 min_ground: float = 0.6) -> Dict[int, str]:
+    """Masks that are the ground itself, for open scenes without a floor mask.
+
+    A detector asked for "objects" in a forest lists the path and the lawn.
+    SAM 3D turns those into slabs; they are terrain. A mask is ground when
+    it is large and most of its pixels are an upward-facing surface near the
+    fitted ground level (within the camera's height of it, which allows for
+    slopes). Small flat things (a mat, a manhole cover) stay objects.
+    """
+    out: Dict[int, str] = {}
+    h, w = valid.shape
+    up = valid & (normals_aligned[..., 1] > 0.75) & (np.abs(points_aligned[..., 1] - floor_y) < camera_height)
+    for rid, m in masks.items():
+        if m.shape != (h, w):
+            from src.room_layout import _resize_mask
+            m = _resize_mask(m, (h, w))
+        n = int((m & valid).sum())
+        if n < min_frame * h * w:
+            continue
+        if float((m & up).sum()) / n >= min_ground:
+            out[rid] = "ground"
+    return out
+
+
 def contained_parts(masks: Dict[int, np.ndarray], labels: Dict[int, str], min_inside: float = 0.85,
                     group_cover: float = 0.7) -> Dict[int, int]:
     """Same-label masks that are a part of, or a group of, other masks.

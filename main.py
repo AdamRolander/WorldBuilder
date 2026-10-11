@@ -210,6 +210,18 @@ def segment_structural(segmenter, image_path: str, mask_dir: Path) -> Dict[str, 
         out[prompt] = union
         Image.fromarray(union.astype(np.uint8) * 255).save(mask_dir / f"structural_{prompt}.png")
         print(f"  structural '{prompt}': {len(scores)} mask(s), {100 * union.mean():.0f}% of frame")
+    if "floor" not in out:
+        # Outdoors nothing is called a floor. The layout stage needs the
+        # surface things stand on, whatever it is made of.
+        try:
+            masks, scores, _ = segmenter.query_text(state, "ground")
+            if len(scores):
+                union = np.any(masks, axis=0)
+                out["floor"] = union
+                Image.fromarray(union.astype(np.uint8) * 255).save(mask_dir / "structural_floor.png")
+                print(f"  structural 'ground' (no floor found): {len(scores)} mask(s), {100 * union.mean():.0f}% of frame")
+        except Exception as e:
+            print(f"  structural 'ground': error {str(e)[:80]}")
     return out
 
 
