@@ -26,7 +26,7 @@ segmentation_results.json + masks/*.png (+ masks/structural_{floor,wall,ceiling}
    │                                       support, settling, instance sharing, walls, visibility, duplicates
    │   4c room       src/room_texture.py   textured shell quads (predicted where unseen) + photo relief,
    │                 src/builtin_boxes.py  solid boxes behind the relief → room.glb (+ room.ply)
-   ▼  exports  reconstruction_results.json · world-space PLYs · scene_combined.ply
+   ▼  exports  reconstruction_results.json · world-space PLYs · metrics.json
               scene.glb / scene_lite.glb (src/scene_export.py, src/mesh_bake.py)
               viewer.html (src/viewer_generator.py) · mujoco/scene.xml (src/mujoco_export.py)
 ```
