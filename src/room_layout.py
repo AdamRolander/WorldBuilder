@@ -783,7 +783,7 @@ def estimate_layout(points_world: np.ndarray, valid: np.ndarray,
     if scene_type == "open":
         notes.append(f"open scene ({sky:.0%} of the upper frame is sky, ceiling {ceil_src}, "
                      f"{sum(str(v).startswith('wall') for v in sources.values())} walls seen): "
-                     "no walls or ceiling are drawn, the ground is meshed as terrain")
+                     "no walls or ceiling are drawn")
     layout = RoomLayout(
         gravity_rotation=G.tolist(), yaw_deg=float(yaw), floor=floor, floor_y=floor_y,
         ceiling_y=float(ceil_y), ceiling_source=ceil_src,

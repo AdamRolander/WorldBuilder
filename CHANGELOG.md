@@ -5,6 +5,32 @@ versions follow [SemVer](https://semver.org/) (0.x: minor = features, patch = fi
 
 ## [Unreleased]
 
+### Added
+- Photo re-projection onto objects (`src/object_texture.py`): the side of each mesh the
+  photo saw takes the photo's pixels (own mask, front surface, depth agreement).
+- Open scenes: sky in the upper frame, or no ceiling and no wall observed, means no
+  invented walls; uneven ground is meshed as terrain; the viewer uses the sky's colour.
+- `metrics.json` per scene (`src/profiling.py`): seconds per phase, time to first object,
+  seconds per object, device-wide and per-process GPU memory peaks, output sizes.
+- `scripts/benchmark.py` and `docs/BENCHMARKS.md`: one table per run and a baseline
+  comparison that fails on regressions; `scripts/clone_scene.py`.
+- Viewer: loads `scene_lite.glb` by default, hover highlighting, typed position /
+  rotation / scale, one checkbox per piece of built-in structure, edits saved to
+  `edits.json` (`src/scene_edits.py`) and applied by the GLB endpoints and MuJoCo export.
+- Blender add-on 0.3.0: "Review in browser".
+
+### Changed
+- The relief is exported as one mesh per connected piece (`room_relief_00`, …), each with
+  its own cropped texture.
+- Placement is 2–3× faster (silhouette scoring works on the object's bounding box);
+  results are identical.
+- The web server listens on `127.0.0.1` unless `--host` / `WORLDBUILDER_HOST` says otherwise.
+- Headless renders are unlit, matching the browser viewer.
+
+### Fixed
+- Spikes in the relief: sheets along the viewing rays at depth edges and across the holes
+  left by small objects.
+
 ## [0.2.0] — 2026-10-08
 
 ### Added (October 2026, second pass)

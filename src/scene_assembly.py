@@ -49,6 +49,12 @@ def load_structural_masks(mask_dir: Path) -> Dict[str, np.ndarray]:
     return out
 
 
+def ev_normals_up(pm: Dict, layout) -> np.ndarray:
+    """Per-pixel upward component of the surface normal in the aligned frame."""
+    N = rl.compute_normals(pm["points"], pm["valid"]) @ layout.R_total.T
+    return np.nan_to_num(N[..., 1], nan=0.0)
+
+
 def world_mesh(result: Dict):
     import trimesh
     mesh = trimesh.load(result.get('model_path') or result['ply_path'], process=False)
@@ -216,21 +222,30 @@ def assemble_from_cache(models_dir: Path, image_rgb: np.ndarray,
                 owner = object_pixels if object_pixels is not None else np.zeros(pm["valid"].shape, np.int32)
                 blocked = ndimage.binary_dilation(owner > 0, iterations=2)
                 is_open = layout.scene_type == "open"
-                shell_layout, sky_rgb = layout, None
+                shell_layout, sky_rgb, terrain = layout, None, False
                 if is_open:
-                    # The flat ground quad becomes a base under the terrain: lower
-                    # it to the terrain's low side so the two never interleave.
+                    # Is the ground a plane (a hall, a paved yard) or terrain? A flat
+                    # ground keeps its textured quad; uneven ground is meshed from the
+                    # point map instead and the quad drops below it as a base.
                     P_al = pm["points"] @ layout.R_total.T
                     ground = pm["valid"] & (owner == 0)
                     fm = (structural_masks or {}).get("floor")
-                    if fm is not None:
+                    if fm is not None and rl._resize_mask(fm, pm["valid"].shape).mean() > 0.02:
                         ground &= rl._resize_mask(fm, pm["valid"].shape)
                     else:
-                        ground &= np.abs(P_al[..., 1] - layout.floor_y) < 0.5 * layout.camera_height
-                    low = float(np.percentile(P_al[ground][:, 1], 3)) if ground.sum() > 100 else layout.floor_y
-                    shell_layout = copy.copy(layout)
-                    shell_layout.bounds_min = list(layout.bounds_min)
-                    shell_layout.bounds_min[1] = min(layout.floor_y, low) - 0.02 * layout.camera_height
+                        ground &= (np.abs(P_al[..., 1] - layout.floor_y) < 0.5 * layout.camera_height) \
+                            & (ev_normals_up(pm, layout) > 0.7)
+                    if ground.sum() > 100:
+                        gy = P_al[ground][:, 1]
+                        lo, hi = np.percentile(gy, [3, 97])
+                        rough = float(hi - lo) / max(layout.camera_height, 1e-6)
+                        terrain = rough > 0.08
+                        log(f"  ground: height varies by {rough:.0%} of the camera height: "
+                            + ("meshed as terrain" if terrain else "flat, kept as a plane"))
+                        if terrain:
+                            shell_layout = copy.copy(layout)
+                            shell_layout.bounds_min = list(layout.bounds_min)
+                            shell_layout.bounds_min[1] = min(layout.floor_y, float(lo)) - 0.02 * layout.camera_height
                     sky = ~pm["valid"]
                     sky[sky.shape[0] // 2:] = False
                     if sky.sum() > 200:
@@ -244,7 +259,7 @@ def assemble_from_cache(models_dir: Path, image_rgb: np.ndarray,
                 if os.environ.get("WORLDBUILDER_RELIEF", "1") != "0":
                     relief, relief_stats = rt.build_relief(
                         pm["points"] @ layout.R_total.T, pm["valid"], owner, layout, image_rgb,
-                        terrain=is_open, max_view_angle_deg=84.0 if is_open else 80.0)
+                        terrain=terrain, max_view_angle_deg=84.0 if terrain else 80.0)
                     if relief:
                         room_meshes.update(relief)
                         log(f"  relief (built-ins from the point map): {relief_stats['faces']:,} triangles in "
@@ -267,7 +282,7 @@ def assemble_from_cache(models_dir: Path, image_rgb: np.ndarray,
                 room = rt.shell_vertex_color_mesh(room_meshes)
                 rl.save_layout(layout, models_dir / "layout.json",
                                extra={"plane_texture_stats": stats, "relief": relief_stats, "builtins": builtins,
-                                      "sky_rgb": sky_rgb,
+                                      "sky_rgb": sky_rgb, "terrain": terrain,
                                       "assembly": _jsonable(diag)})
             except Exception as e:
                 import traceback
