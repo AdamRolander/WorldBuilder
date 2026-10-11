@@ -98,14 +98,44 @@ def test_relief_meshes_a_counter_but_not_the_shell_or_objects():
     owner = np.zeros(valid.shape, np.int32)
     obj = np.zeros_like(valid); obj[int(0.78 * Hh):int(0.82 * Hh), int(0.45 * Ww):int(0.5 * Ww)] = True
     owner[obj] = 7                                # a small object on the counter
-    mesh, stats = rt.build_relief(P_a, valid, owner, layout, colors)
-    assert mesh is not None and stats["faces"] > 50
+    meshes, stats = rt.build_relief(P_a, valid, owner, layout, colors)
+    assert meshes and stats["faces"] > 50 and stats["pieces"] == len(meshes)
+    assert all(n.startswith("room_relief_") for n in meshes)
+    mesh = meshes["room_relief_00"]
     V = np.asarray(mesh.vertices)
     assert np.all(V[:, 1] > layout.floor_y + 0.3)                  # only the counter, not the floor
     assert stats["filled_hole_px"] > 0                              # the object's hole was closed
     cen = mesh.triangles_center
     assert np.mean(np.sum(mesh.face_normals * -cen, axis=1) > 0) > 0.95   # faces look at the camera
     assert mesh.visual.uv.min() >= 0 and mesh.visual.uv.max() <= 1
+
+
+def test_relief_has_no_sheet_between_a_near_and_a_far_surface():
+    """A raised block whose rim pixels are blends of block and floor (as a
+    depth estimator produces them), and a small object straddling the rim.
+    Neither may produce triangles that run along the viewing rays."""
+    from scipy import ndimage
+    R, P_cam, valid, colors, depth, hit, layout = _layout()
+    P_a = (P_cam @ layout.R_total.T).copy()
+    Hh, Ww = valid.shape
+    block = np.zeros_like(valid)
+    block[int(0.70 * Hh):int(0.9 * Hh), int(0.3 * Ww):int(0.7 * Ww)] = True
+    block &= hit == "floor"
+    P_a[block, 1] += 0.5
+    w_blend = ndimage.gaussian_filter(block.astype(np.float32), 0.8)       # soft rim, 0..1
+    rim = (w_blend > 0.02) & (w_blend < 0.98) & (hit == "floor")
+    P_a[rim, 1] = (P_cam @ layout.R_total.T)[rim, 1] + 0.5 * w_blend[rim]
+    owner = np.zeros(valid.shape, np.int32)
+    obj = np.zeros_like(valid)
+    obj[int(0.67 * Hh):int(0.73 * Hh), int(0.45 * Ww):int(0.5 * Ww)] = True       # half on, half off
+    owner[obj] = 3
+    meshes, stats = rt.build_relief(P_a, valid, owner, layout, colors)
+    assert meshes
+    for m in meshes.values():
+        # nothing between the two levels: the ramp from the floor up to the block is gone
+        assert np.all(np.asarray(m.vertices)[:, 1] > layout.floor_y + 0.3)
+        tri = np.asarray(m.vertices)[np.asarray(m.faces)]
+        assert float((tri[:, :, 1].max(1) - tri[:, :, 1].min(1)).max()) < 0.15
 
 
 def test_wall_prediction_is_layered_and_ignores_a_minority_material():

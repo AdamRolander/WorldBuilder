@@ -14,14 +14,15 @@ from __future__ import annotations
 import copy
 import json
 import os
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from PIL import Image
 
+from src import profiling, stage3_cache
 from src import room_layout as rl
-from src import stage3_cache
 from src.geometry import world_vertices
 
 
@@ -89,6 +90,7 @@ def assemble_from_cache(models_dir: Path, image_rgb: np.ndarray,
         return results, failed
 
     log("\nAssembling scene...")
+    t_phase = time.time()
     layout = None
     floor_y = None
     if pm is not None:
@@ -111,6 +113,8 @@ def assemble_from_cache(models_dir: Path, image_rgb: np.ndarray,
                             points=Pd[Vd], colors=Cd[Vd], intrinsics=pm["intrinsics"],
                             R_total=R.astype(np.float32), image_hw=np.array(image_rgb.shape[:2]))
 
+    profiling.add("assemble.layout", time.time() - t_phase)
+    t_phase = time.time()
     mode = placement or os.environ.get("WORLDBUILDER_PLACEMENT", "evidence")
     if layout is None and mode == "evidence":
         mode = "legacy"                      # no point map, nothing to ask
@@ -170,6 +174,8 @@ def assemble_from_cache(models_dir: Path, image_rgb: np.ndarray,
         diag = assemble_scene(results, floor_y=floor_y, verbose=verbose,
                               stretch_structural=os.environ.get("WORLDBUILDER_STRETCH_STRUCTURAL") == "1")
     diag["placement"] = mode
+    profiling.add("assemble.placement", time.time() - t_phase)
+    t_phase = time.time()
 
     if build_room:
         bounds = diag.get('bounds') or compute_scene_bounds(compute_per_object_aabb(results))
@@ -217,10 +223,10 @@ def assemble_from_cache(models_dir: Path, image_rgb: np.ndarray,
                 if os.environ.get("WORLDBUILDER_RELIEF", "1") != "0":
                     relief, relief_stats = rt.build_relief(pm["points"] @ layout.R_total.T, pm["valid"], owner,
                                                            layout, image_rgb)
-                    if relief is not None:
-                        room_meshes["room_relief"] = relief
-                        log(f"  relief (built-ins from the point map): {relief_stats['faces']:,} triangles, "
-                            f"{relief_stats['frame_fraction']:.0%} of the frame")
+                    if relief:
+                        room_meshes.update(relief)
+                        log(f"  relief (built-ins from the point map): {relief_stats['faces']:,} triangles in "
+                            f"{relief_stats['pieces']} pieces, {relief_stats['frame_fraction']:.0%} of the frame")
                 builtins = []
                 if relief_stats and os.environ.get("WORLDBUILDER_BUILTINS", "1") != "0" \
                         and getattr(rt.build_relief, "last", None) is not None:
@@ -254,7 +260,10 @@ def assemble_from_cache(models_dir: Path, image_rgb: np.ndarray,
             room.export(str(room_path), file_type='ply')
             log(f"✓ room.ply saved ({room_path.stat().st_size / 1024:.0f} KB)")
 
+    profiling.add("assemble.room", time.time() - t_phase)
+    t_phase = time.time()
     export_world(results, models_dir, verbose=verbose)
+    profiling.add("assemble.export_world", time.time() - t_phase)
     return results, failed
 
 
@@ -296,19 +305,19 @@ def finalize_scene(output_path: Path, results: List[Dict], failed: List[Dict], m
     output_path = Path(output_path)
     (output_path / "reconstruction_results.json").write_text(json.dumps(
         {"objects": results, "failed": failed, "metadata": metadata}, indent=2))
-    try:
-        from src.viewer_generator import generate_viewer
-        viewer_path = generate_viewer(output_path, results, room_file="3d_models/room.ply",
-                                      layout_file="3d_models/layout.json", failed=failed)
-        log(f"✓ Viewer: {viewer_path}  (serve with: python -m http.server -d {output_path})")
-    except Exception as e:
-        log(f"⚠️  Viewer generation failed: {e}")
+    want_lite = lite and os.environ.get("WORLDBUILDER_LITE", "1") != "0"
+    for stale in ("scene_lite.edited.glb", "scene.edited.glb") + (() if want_lite else ("scene_lite.glb",)):
+        if (output_path / stale).exists():       # built from an earlier assembly of this scene
+            (output_path / stale).unlink()
     try:
         from src.scene_export import export_scene_glb, export_scene_lite
+        t_phase = time.time()
         glb = export_scene_glb(output_path, results)
+        profiling.add("finalize.glb", time.time() - t_phase)
+        t_phase = time.time()
         if glb:
             log(f"✓ GLB scene: {glb} ({glb.stat().st_size / 1e6:.0f} MB)")
-        if lite and os.environ.get("WORLDBUILDER_LITE", "1") != "0":
+        if want_lite:
             lite_glb = export_scene_lite(output_path, results)
             if lite_glb:
                 log(f"✓ Lite GLB (decimated, baked textures): {lite_glb} ({lite_glb.stat().st_size / 1e6:.1f} MB)")
@@ -316,3 +325,50 @@ def finalize_scene(output_path: Path, results: List[Dict], failed: List[Dict], m
         import traceback
         traceback.print_exc()
         log(f"⚠️  GLB export failed: {e}")
+    profiling.add("finalize.lite_glb", time.time() - t_phase)
+    t_phase = time.time()
+    try:
+        from src.viewer_generator import generate_viewer
+        viewer_path = generate_viewer(output_path, results, room_file="3d_models/room.ply",
+                                      layout_file="3d_models/layout.json", failed=failed)
+        log(f"✓ Viewer: {viewer_path}  (serve with: python -m http.server -d {output_path})")
+    except Exception as e:
+        log(f"⚠️  Viewer generation failed: {e}")
+    profiling.add("finalize.viewer", time.time() - t_phase)
+    write_metrics(output_path, results, failed)
+
+
+def write_metrics(output_path: Path, results: List[Dict], failed: List[Dict]) -> Optional[Path]:
+    """``metrics.json``: time per phase, GPU memory peaks, seconds per object,
+    output sizes. A replay keeps the GPU phases of the original run and
+    replaces only the phases it re-ran."""
+    prof = profiling.current()
+    if prof is None:
+        return None
+    output_path = Path(output_path)
+    path = output_path / "metrics.json"
+    new = prof.to_dict()
+    data = {}
+    if path.exists():
+        try:
+            data = json.loads(path.read_text())
+        except ValueError:
+            data = {}
+    gpu_run = any(k in new["seconds"] for k in ("segment", "reconstruct"))
+    if gpu_run or not data:
+        data = new
+    else:
+        data.setdefault("seconds", {}).update(new["seconds"])
+        data["replay_wall_sec"] = new["wall_sec"]
+    data["objects"] = {"placed": len(results), "failed_or_removed": len(failed)}
+    per_obj = profiling.summarize_objects(results)
+    if per_obj:
+        data["seconds_per_object"] = per_obj
+    sizes = {}
+    for name in ("scene.glb", "scene_lite.glb", "3d_models/room.glb"):
+        f = output_path / name
+        if f.exists():
+            sizes[Path(name).name] = round(f.stat().st_size / 1e6, 2)
+    data["size_mb"] = sizes
+    path.write_text(json.dumps(data, indent=2))
+    return path
