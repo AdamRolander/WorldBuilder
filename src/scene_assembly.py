@@ -248,6 +248,10 @@ def assemble_from_cache(models_dir: Path, image_rgb: np.ndarray,
                     else:
                         ground &= (np.abs(P_al[..., 1] - layout.floor_y) < 0.5 * layout.camera_height) \
                             & (ev_normals_up(pm, layout) > 0.7)
+                    # judged near the camera: far ground is noisy in depth, not rough
+                    near = np.hypot(P_al[..., 0], P_al[..., 2]) < 5.0 * layout.camera_height
+                    if (ground & near).sum() > 100:
+                        ground &= near
                     if ground.sum() > 100:
                         gy = P_al[ground][:, 1]
                         lo, hi = np.percentile(gy, [3, 97])
