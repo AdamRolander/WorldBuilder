@@ -296,3 +296,19 @@ def test_attachment_tells_mounted_from_free_standing(scene):
     o[3].translate([0, 0.1, 0])
     o[3].r["support"] = None
     assert 3 not in pl.settle_unsupported(ev, [o[3]], ROOM)
+
+
+def test_fast_splat_matches_the_whole_frame_definition(scene):
+    """Blobs in the middle, at every frame edge, tiny, and off-frame."""
+    ev = scene[0]
+    rng = np.random.default_rng(0)
+    lo, hi = ev.points[ev.valid].min(0), ev.points[ev.valid].max(0)
+    for k in range(40):
+        c = lo + rng.random(3) * (hi - lo)
+        if k % 5 == 0:                                   # push some far to one side so they cross the frame
+            c[0] += (hi[0] - lo[0]) * rng.choice([-0.6, 0.6])
+        cloud = c + rng.normal(size=(int(rng.choice([3, 60, 2500])), 3)) * rng.choice([0.01, 0.1, 0.4])
+        s1, z1 = pl.splat(ev, cloud)
+        s0, z0 = pl._splat_reference(ev, cloud)
+        assert np.array_equal(s1, s0), k
+        assert np.array_equal(z1, z0), k
