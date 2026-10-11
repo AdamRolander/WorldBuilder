@@ -248,6 +248,7 @@ TORCH_HUB_OFFLINE=1                 # optional: avoid hub checks on every run
 | `WORLDBUILDER_STRETCH_STRUCTURAL` | unset                | `1` stretches pillars/beams to ceiling height (opt-in). |
 | `WORLDBUILDER_OUTPUTS`         | `outputs/`              | Where the webapp reads/writes scenes.                 |
 | `WORLDBUILDER_HOST`            | `127.0.0.1`             | Interface the webapp listens on (`0.0.0.0` for the LAN). |
+| `WORLDBUILDER_COMBINED`        | unset                   | `1` also writes `3d_models/scene_combined.ply` (all objects merged). |
 | `WORLDBUILDER_PHOTO_TEXTURE`   | `1`                     | `0` keeps SAM 3D's own colours on the side the photo saw. |
 | `WORLDBUILDER_RELIEF`, `WORLDBUILDER_BUILTINS`, `WORLDBUILDER_SHARE_INSTANCES`, `WORLDBUILDER_LITE`, `WORLDBUILDER_METRIC` | `1` | `0` switches the feature off (for comparisons). |
 
@@ -443,8 +444,7 @@ outputs/<scene>/
 │   ├── room.glb                   # textured floor/walls/ceiling + photo relief in separate pieces + solid built-in boxes (named nodes); open scenes: ground or terrain only
 │   ├── room.ply                   # the same shell as vertex colours (fallback for PLY-only consumers)
 │   ├── layout.json                # floor, gravity, yaw, ceiling, wall evidence, scale estimate, placement diagnostics
-│   ├── scene_pointmap.npz         # MoGe scene points (aligned frame) for debugging / viewers
-│   └── scene_combined.ply         # all objects composed into one mesh
+│   └── scene_pointmap.npz         # MoGe scene points (aligned frame) for debugging / viewers
 ├── scene.glb                      # full-resolution scene (hundreds of MB): named nodes, vertex colours
 ├── scene_lite.glb                 # same scene, 8k triangles per object with baked textures (7–30 MB): what the viewer and DCC tools load
 ├── mujoco/                        # optional: scene.xml + assets (python -m src.mujoco_export)

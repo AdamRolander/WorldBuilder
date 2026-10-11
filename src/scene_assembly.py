@@ -4,7 +4,7 @@ Input is the stage-3 cache (``src/stage3_cache.py``): model-space meshes,
 raw camera-frame poses and the scene point map, plus the photo and the SAM 3
 masks. Output is everything a viewer or DCC importer reads: world-space
 PLYs, ``room.ply`` (+ ``room.glb`` with real textures), ``layout.json``,
-``scene_pointmap.npz`` and ``scene_combined.ply``.
+and ``scene_pointmap.npz``.
 
 Because nothing here touches a model, ``scripts/replay_assembly.py`` can
 rerun it on a finished scene in seconds.
@@ -337,7 +337,7 @@ def assemble_from_cache(models_dir: Path, image_rgb: np.ndarray,
 
 def export_world(results: List[Dict], models_dir: Path, verbose: bool = True, photo_ctx=None):
     """World-space PLY per object (so viewers and importers need no pose
-    math) and one merged ``scene_combined.ply``. Stale PLYs from a previous
+    math), optionally one merged ``scene_combined.ply``. Stale PLYs from a previous
     assembly of the same scene are removed. With ``photo_ctx`` the side of
     each object the photo saw is re-coloured from the photo
     (``src/object_texture.py``)."""
@@ -371,10 +371,16 @@ def export_world(results: List[Dict], models_dir: Path, verbose: bool = True, ph
     for p in models_dir.glob("*.ply"):
         if p.name not in keep:
             p.unlink()
-    if meshes:
+    if meshes and os.environ.get("WORLDBUILDER_COMBINED") == "1":
+        # One merged mesh of every object. Nothing in the project reads it and it
+        # doubles the scene's size on disk, so it is opt-in.
         combined = trimesh.util.concatenate(meshes)
         combined.export(str(models_dir / "scene_combined.ply"), file_type='ply')
-        log(f"✓ {len(meshes)} world-space PLYs + scene_combined.ply ({len(combined.faces):,} triangles)")
+        log(f"✓ scene_combined.ply ({len(combined.faces):,} triangles)")
+    elif (models_dir / "scene_combined.ply").exists():
+        (models_dir / "scene_combined.ply").unlink()         # stale, from an earlier assembly
+    if meshes:
+        log(f"✓ {len(meshes)} world-space PLYs")
     if painted:
         log(f"✓ photo re-projected onto {sum(1 for x in painted if x > 0.02)}/{len(painted)} objects "
             f"(mean {100 * float(np.mean(painted)):.0f}% of each mesh's vertices)")

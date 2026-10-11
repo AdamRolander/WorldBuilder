@@ -26,6 +26,8 @@ versions follow [SemVer](https://semver.org/) (0.x: minor = features, patch = fi
   results are identical.
 - The web server listens on `127.0.0.1` unless `--host` / `WORLDBUILDER_HOST` says otherwise.
 - Headless renders are unlit, matching the browser viewer.
+- `scene_combined.ply` is no longer written unless `WORLDBUILDER_COMBINED=1` (nothing read it;
+  it doubled each scene's size on disk).
 
 ### Fixed
 - Spikes in the relief: sheets along the viewing rays at depth edges and across the holes
