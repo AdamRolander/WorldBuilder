@@ -215,20 +215,42 @@ def assemble_from_cache(models_dir: Path, image_rgb: np.ndarray,
                 depth = np.where(pm["valid"], depth, np.nan)
                 owner = object_pixels if object_pixels is not None else np.zeros(pm["valid"].shape, np.int32)
                 blocked = ndimage.binary_dilation(owner > 0, iterations=2)
-                room_meshes, stats = rt.build_shell(layout, pm["intrinsics"], image_rgb, depth, blocked)
+                is_open = layout.scene_type == "open"
+                shell_layout, sky_rgb = layout, None
+                if is_open:
+                    # The flat ground quad becomes a base under the terrain: lower
+                    # it to the terrain's low side so the two never interleave.
+                    P_al = pm["points"] @ layout.R_total.T
+                    ground = pm["valid"] & (owner == 0)
+                    fm = (structural_masks or {}).get("floor")
+                    if fm is not None:
+                        ground &= rl._resize_mask(fm, pm["valid"].shape)
+                    else:
+                        ground &= np.abs(P_al[..., 1] - layout.floor_y) < 0.5 * layout.camera_height
+                    low = float(np.percentile(P_al[ground][:, 1], 3)) if ground.sum() > 100 else layout.floor_y
+                    shell_layout = copy.copy(layout)
+                    shell_layout.bounds_min = list(layout.bounds_min)
+                    shell_layout.bounds_min[1] = min(layout.floor_y, low) - 0.02 * layout.camera_height
+                    sky = ~pm["valid"]
+                    sky[sky.shape[0] // 2:] = False
+                    if sky.sum() > 200:
+                        small = np.asarray(Image.fromarray(image_rgb).resize(sky.shape[::-1], Image.BILINEAR))
+                        sky_rgb = [int(c) for c in np.median(small[sky], axis=0)]
+                room_meshes, stats = rt.build_shell(shell_layout, pm["intrinsics"], image_rgb, depth, blocked)
                 m = room_meshes.get("room_floor")
                 for k, v in stats.items():
                     log(f"  room {k}: {v['visible_fraction']:.0%} seen in the photo, rest {v['fill']}")
                 relief_stats = {}
                 if os.environ.get("WORLDBUILDER_RELIEF", "1") != "0":
-                    relief, relief_stats = rt.build_relief(pm["points"] @ layout.R_total.T, pm["valid"], owner,
-                                                           layout, image_rgb)
+                    relief, relief_stats = rt.build_relief(
+                        pm["points"] @ layout.R_total.T, pm["valid"], owner, layout, image_rgb,
+                        terrain=is_open, max_view_angle_deg=84.0 if is_open else 80.0)
                     if relief:
                         room_meshes.update(relief)
                         log(f"  relief (built-ins from the point map): {relief_stats['faces']:,} triangles in "
                             f"{relief_stats['pieces']} pieces, {relief_stats['frame_fraction']:.0%} of the frame")
                 builtins = []
-                if relief_stats and os.environ.get("WORLDBUILDER_BUILTINS", "1") != "0" \
+                if relief_stats and not is_open and os.environ.get("WORLDBUILDER_BUILTINS", "1") != "0" \
                         and getattr(rt.build_relief, "last", None) is not None:
                     from src.builtin_boxes import build_builtins
                     P_bg, keep_bg = rt.build_relief.last
@@ -245,6 +267,7 @@ def assemble_from_cache(models_dir: Path, image_rgb: np.ndarray,
                 room = rt.shell_vertex_color_mesh(room_meshes)
                 rl.save_layout(layout, models_dir / "layout.json",
                                extra={"plane_texture_stats": stats, "relief": relief_stats, "builtins": builtins,
+                                      "sky_rgb": sky_rgb,
                                       "assembly": _jsonable(diag)})
             except Exception as e:
                 import traceback

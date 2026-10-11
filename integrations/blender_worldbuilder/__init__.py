@@ -268,10 +268,33 @@ class WB_OT_import_existing(Operator):
             glb = download_glb(server, sid, tempfile.gettempdir(), lite=self.lite)
             scale = metric_scale(server, sid) if self.use_metric_scale else 1.0
             new = import_glb(context, glb, sid, self.import_room, scale)
+            _STATE["scene_id"] = sid
         except Exception as e:  # noqa: BLE001
             self.report({"ERROR"}, f"Import failed: {e}")
             return {"CANCELLED"}
         self.report({"INFO"}, f"WorldBuilder: imported {len(new)} objects from '{sid}'")
+        return {"FINISHED"}
+
+
+class WB_OT_review(Operator):
+    """Open the scene in the WorldBuilder web viewer to hide, move, turn or resize objects. Save there, then import again"""
+    bl_idname = "worldbuilder.review"
+    bl_label = "Review in browser"
+
+    def execute(self, context):
+        server = _prefs(context).server_url.rstrip("/")
+        sid = _STATE.get("scene_id")
+        try:
+            if not sid:
+                scenes = _get_json(f"{server}/api/scenes").get("scenes", [])
+                if not scenes:
+                    self.report({"ERROR"}, "The server has no finished scenes")
+                    return {"CANCELLED"}
+                sid = scenes[0]["scene_id"]
+        except Exception as e:  # noqa: BLE001
+            self.report({"ERROR"}, f"Server unreachable: {e}")
+            return {"CANCELLED"}
+        bpy.ops.wm.url_open(url=f"{server}/outputs/{urllib.parse.quote(sid)}/viewer.html")
         return {"FINISHED"}
 
 
@@ -306,6 +329,7 @@ class WB_PT_panel(Panel):
         col = self.layout.column(align=True)
         col.operator(WB_OT_generate.bl_idname, icon="IMAGE_DATA")
         col.operator(WB_OT_import_existing.bl_idname, icon="IMPORT")
+        col.operator(WB_OT_review.bl_idname, icon="WORLD")
         col.operator(WB_OT_check_server.bl_idname, icon="URL")
         if _STATE["status"]:
             col.label(text=_STATE["status"])
@@ -313,7 +337,7 @@ class WB_PT_panel(Panel):
         col.label(text=f"Server: {_prefs(context).server_url}")
 
 
-classes = (WB_Preferences, WB_OT_generate, WB_OT_import_existing, WB_OT_check_server, WB_PT_panel)
+classes = (WB_Preferences, WB_OT_generate, WB_OT_import_existing, WB_OT_review, WB_OT_check_server, WB_PT_panel)
 
 
 def register():

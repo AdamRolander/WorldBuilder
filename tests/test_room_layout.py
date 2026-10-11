@@ -215,3 +215,20 @@ def test_intrinsics_recovered_from_pointmap():
     valid = np.isfinite(P_cam).all(-1)
     K_est = rl.intrinsics_from_pointmap(P_cam, valid)
     np.testing.assert_allclose(K_est, K, atol=1e-6)
+
+
+def test_scene_is_open_when_sky_fills_the_upper_frame_or_no_structure_was_seen():
+    valid = np.ones((90, 120), bool)
+    walls = {"x_min": "wall(900)", "x_max": "extent", "z_min": "extent", "z_max": "extent"}
+    none = dict.fromkeys(walls, "extent")
+    assert rl.classify_scene(valid, "geometric", walls)[0] == "room"
+    assert rl.classify_scene(valid, "prior", walls)[0] == "room"          # a wall was seen: still a room
+    assert rl.classify_scene(valid, "geometric", none)[0] == "room"       # a ceiling was seen
+    assert rl.classify_scene(valid, "prior", none)[0] == "open"           # nothing to build a box from
+    sky = valid.copy()
+    sky[:20] = False                                                      # two thirds of the top third
+    kind, frac = rl.classify_scene(sky, "geometric", walls)
+    assert kind == "open" and 0.6 < frac < 0.7
+    window = valid.copy()
+    window[5:15, 10:30] = False                                           # sky through a window: 5.6 %
+    assert rl.classify_scene(window, "geometric", walls)[0] == "room"
