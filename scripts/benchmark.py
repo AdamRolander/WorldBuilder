@@ -167,7 +167,7 @@ def scene_row(scene: Path, appearance: bool = False, reaudit: bool = True) -> Di
         row.update(detect_sec=t.get("detect"), segment_sec=t.get("segment"))
         secs = sorted(o["seconds"] for o in rec["objects"] if o.get("seconds") is not None)
         if secs:
-            row.update(per_object_p50_sec=secs[len(secs) // 2], per_object_p90_sec=secs[int(0.9 * (len(secs) - 1))],
+            row.update(per_object_p50_sec=secs[len(secs) // 2], per_object_p90_sec=secs[min(len(secs) - 1, int(0.9 * len(secs)))],
                        reconstruct_sec=round(sum(secs), 1))
         v = rec.get("metadata", {}).get("vram_peak_gb", {})
         row["vram_process_peak_gb"] = max(v.values()) if v else None

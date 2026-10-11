@@ -1,12 +1,14 @@
 """One HTML page comparing two runs of the same photos, scene by scene.
 
     python scripts/make_gallery.py outputs/10-08-validation --before outputs/9-17-validation
+    python scripts/make_gallery.py outputs/run_c --before outputs/run_a --before outputs/run_b   # "before" spread over two folders
     python -m http.server -d outputs 8000      # then open http://localhost:8000/10-08-validation/
 
 For every scene directory it shows the contact sheet (``renders.png`` from
 ``scripts/render_scene.py``), the mask-vs-mesh overlay and summary numbers
 (``audit.png`` / ``audit.json`` from ``scripts/audit_scene.py``), what was
-removed and why, and a link to the interactive viewer. Missing pieces are
+removed and why, and a link to the interactive viewer; the table from
+``scripts/benchmark.py`` goes on top when the run has one. Missing pieces are
 skipped, so it works on a single run too. Serve the *parent* of both runs
 so the relative image links resolve.
 """
@@ -62,7 +64,8 @@ def _block(title: str, scene: Path, root: Path) -> str:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("run", type=Path)
-    ap.add_argument("--before", type=Path)
+    ap.add_argument("--before", type=Path, action="append", default=[],
+                    help="an earlier run of the same photos; repeat if the scenes are spread over several folders")
     a = ap.parse_args()
     root = a.run.resolve()
     parts = ["""<!doctype html><meta charset="utf-8"><title>WorldBuilder runs</title>
@@ -71,14 +74,27 @@ def main():
  h2{margin-top:40px;border-top:1px solid #333;padding-top:20px} h3 small{font-weight:400;color:#9aa}
  img{max-width:100%;display:block;margin:6px 0;border-radius:4px} img.audit{max-width:420px}
  a{color:#8cf} details{color:#bbb}
+ table{border-collapse:collapse;font-size:12px;display:block;overflow-x:auto} td,th{border:1px solid #333;padding:3px 7px;text-align:right;white-space:nowrap}
+ td:first-child,th:first-child{text-align:left}
 </style>
-<h1>WorldBuilder: """ + html.escape(a.run.name) + ("" if not a.before else " vs " + html.escape(a.before.name)) + """</h1>
+<h1>WorldBuilder: """ + html.escape(a.run.name) + ("" if not a.before else " vs " + html.escape(", ".join(b.name for b in a.before))) + """</h1>
 <p>Contact sheets: input photo · scene from the photo's camera · orbit · top · side.
 Overlays: SAM 3 masks in green, placed meshes in red.</p>"""]
+    bench = a.run / "benchmark.md"
+    if bench.exists():
+        rows = [[c.strip() for c in ln.strip().strip("|").split("|")] for ln in bench.read_text().splitlines()
+                if ln.startswith("|") and not ln.startswith("| ---")]
+        if rows:
+            parts.append("<h2>Benchmark</h2><p>Numbers in brackets are the change against the earlier run "
+                         "(<code>docs/BENCHMARKS.md</code> explains the columns).</p><table>"
+                         + "".join("<tr>" + "".join(f"<{'th' if i == 0 else 'td'}>{html.escape(c)}</{'th' if i == 0 else 'td'}>"
+                                                    for c in r) + "</tr>" for i, r in enumerate(rows)) + "</table>")
     for scene in sorted(p for p in a.run.iterdir() if (p / "reconstruction_results.json").exists()):
         parts.append(f"<h2>{html.escape(scene.name)}</h2>")
-        if a.before:
-            parts.append(_block("before", a.before.resolve() / scene.name, root))
+        for b in a.before:
+            if (b.resolve() / scene.name).exists():
+                parts.append(_block(f"before ({b.name})", b.resolve() / scene.name, root))
+                break
         parts.append(_block("after" if a.before else "result", scene, root))
     out = a.run / "index.html"
     out.write_text("\n".join(parts))
