@@ -44,6 +44,8 @@ def load_scene_meshes(scene: Path, include_room: bool = True):
     import trimesh
     out = []
     glb = scene / "scene.glb"
+    if not glb.exists() and not any((scene / "3d_models").glob("[0-9]*.ply")):
+        glb = scene / "scene_lite.glb"            # a run stripped of its dense meshes still renders
     if glb.exists():
         sc = trimesh.load(str(glb), process=False)
         for name, geom in sc.geometry.items():
@@ -62,7 +64,15 @@ def load_scene_meshes(scene: Path, include_room: bool = True):
             p = scene / "3d_models" / p.name
         if p.exists():
             out.append((f"{o['id']:03d}_{o['label']}", trimesh.load(str(p), process=False)))
-    if include_room and (scene / "3d_models" / "room.ply").exists():
+    room_glb = scene / "3d_models" / "room.glb"
+    if include_room and room_glb.exists():       # textured shell, relief and built-ins, as in scene.glb
+        sc = trimesh.load(str(room_glb), process=False)
+        for name, geom in sc.geometry.items():
+            nodes = sc.graph.geometry_nodes.get(name, [])
+            g = geom.copy()
+            g.apply_transform(sc.graph.get(nodes[0])[0] if nodes else np.eye(4))
+            out.append((name if name.startswith("room") else f"room_{name}", g))
+    elif include_room and (scene / "3d_models" / "room.ply").exists():
         out.append(("room", trimesh.load(str(scene / "3d_models" / "room.ply"), process=False)))
     return out
 
@@ -94,6 +104,12 @@ def render_views(scene: Path, views, size=640, include_room=True, only=None, dep
     c = 0.5 * (lo + hi)
     ext = float(np.linalg.norm(hi - lo))
 
+    lay_lo = lay_hi = None
+    lp = scene / "3d_models" / "layout.json"
+    if lp.exists():
+        lay = json.loads(lp.read_text())
+        lay_lo, lay_hi = np.asarray(lay["bounds_min"], float), np.asarray(lay["bounds_max"], float)
+
     out = {}
     for v in views:
         if v == "photo":
@@ -114,6 +130,15 @@ def render_views(scene: Path, views, size=640, include_room=True, only=None, dep
                 pose = _look_at(eye, c, up=(0, 0, 1))
             elif v == "side":
                 eye = [c[0] + 1.3 * ext, c[1] + 0.05 * ext, c[2]]
+                pose = _look_at(eye, c)
+            elif v in ("left", "right"):
+                # standing beside the photographer, looking at the middle of the
+                # scene: the view a visitor gets first, and where a texture that
+                # is only right from the photo's side shows
+                sgn = 1.0 if v == "left" else -1.0
+                eye = [sgn * 0.45 * ext, 0.12 * ext, min(0.0, c[2] - 0.6 * ext)]
+                if lay_lo is not None:
+                    eye = np.clip(eye, lay_lo + 0.03 * ext, lay_hi - 0.03 * ext).tolist()
                 pose = _look_at(eye, c)
             elif v == "side2":
                 eye = [c[0] - 1.3 * ext, c[1] + 0.05 * ext, c[2]]
