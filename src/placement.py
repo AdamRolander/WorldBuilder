@@ -832,6 +832,62 @@ def restack(ev: SceneEvidence, objs: List["PlacedObject"], before: Dict[int, np.
     return out
 
 
+def _box_samples(mn: np.ndarray, mx: np.ndarray, n: int = 24) -> np.ndarray:
+    """Dense points on a box's surface (for splatting a proxy like a mesh)."""
+    a = np.linspace(0.0, 1.0, n)
+    g1, g2 = (g.ravel() for g in np.meshgrid(a, a))
+    faces = []
+    for axis in range(3):
+        for val in (0.0, 1.0):
+            p = np.zeros((len(g1), 3))
+            p[:, axis] = val
+            p[:, (axis + 1) % 3] = g1
+            p[:, (axis + 2) % 3] = g2
+            faces.append(p)
+    return mn + np.vstack(faces) * (mx - mn)
+
+
+def make_proxy(ev: SceneEvidence, o: "PlacedObject", room: Optional[Dict]) -> bool:
+    """Replace a failed reconstruction by a box fitted to what the photo saw.
+
+    When SAM 3D's mesh misses its mask entirely (a wall shelf generated as
+    something else), the object used to be dropped, and whatever stood on it
+    then floated. If other objects rest on it, a box stands in: the 5th to
+    95th percentile of the observed points under its own mask, at least a
+    few centimetres thick, reaching back to the wall the photo shows it
+    against. It is crude, but it carries the bottles. Returns True if done.
+    """
+    m = ev.masks.get(o.id)
+    if m is None:
+        return False
+    own = m & ev.valid
+    if ev.owner is not None:
+        own &= ev.owner == o.id
+    if int(own.sum()) < 20:
+        return False
+    P = ev.points[own]
+    mn, mx = np.percentile(P, 5, axis=0), np.percentile(P, 95, axis=0)
+    t = 0.02 * ev.room_height
+    for a in range(3):
+        if mx[a] - mn[a] < t:
+            c = 0.5 * (mn[a] + mx[a])
+            mn[a], mx[a] = c - 0.5 * t, c + 0.5 * t
+    side = wall_contact(ev, o, room) if room else None
+    if side is not None:
+        axis = 0 if side.startswith("x") else 2
+        if side.endswith("min"):
+            mn[axis] = min(mn[axis], room["min"][axis])
+        else:
+            mx[axis] = max(mx[axis], room["max"][axis])
+    world = _box_samples(mn, mx)
+    o.model = np.stack([world[:, 0], world[:, 2], -world[:, 1]], 1)      # inverse of the GLB frame change
+    o._idx = None
+    o.r.update(translation=[0.0, 0.0, 0.0], rotation_quaternion=[1.0, 0.0, 0.0, 0.0], scale=[1.0, 1.0, 1.0])
+    o._verts = None
+    o.r['proxy'] = "box from the photo (reconstruction did not match its mask)"
+    return True
+
+
 def upright_resting(ev: SceneEvidence, objs: List["PlacedObject"], max_tilt_deg: float = 15.0,
                     max_iou_loss: float = 0.10) -> Dict[int, float]:
     """Anything resting on a horizontal surface stands upright.
@@ -1454,9 +1510,21 @@ def place_objects(results: List[Dict], model_verts: Dict[int, np.ndarray], ev: S
             f"{by_id[i].r['label']} +{g}" for i, g in refined.items()))
 
     # 3. contacts
+    raw_contacts = {o.id: find_contact(ev, o) for o in objs}
+    # a failed reconstruction that carries other objects becomes a box
+    carriers = {c.supporter for c in raw_contacts.values() if c is not None and c.kind == "object"}
+    proxies = []
+    for o in objs:
+        if o.id in carriers and (o.r.get('fit_iou_raw') or 0.0) < min_fit_iou and make_proxy(ev, o, room):
+            o.r['fit_iou_raw'] = _round(fit_iou(ev, o))
+            proxies.append(o.id)
+    diag['proxies'] = proxies
+    if proxies:
+        log("  replaced by a box from the photo (mesh missed its mask, things rest on it): " + ", ".join(
+            f"{by_id[i].r['label']} #{i}" for i in proxies))
     contacts: Dict[int, Contact] = {}
     for o in objs:
-        c = find_contact(ev, o)
+        c = raw_contacts[o.id]
         if c is not None and c.kind == "object" and (
                 c.supporter not in by_id or (by_id[c.supporter].r.get('fit_iou_raw') or 0) < min_supporter_iou):
             # the supporter's mesh is missing or does not match the photo:
@@ -1614,12 +1682,14 @@ def place_objects(results: List[Dict], model_verts: Dict[int, np.ndarray], ev: S
     # 6. reprojection check
     for o in objs:
         o.r['fit_iou'] = _round(fit_iou(ev, o))
+        if o.r.get('proxy'):
+            o.r['proxy_box'] = {"min": o.lo.tolist(), "max": o.hi.tolist()}
 
     # 7. reconstructions that do not look like their mask at all
     removed: Dict[int, str] = {}
     for o in objs:
         iou = o.r.get('fit_iou')
-        if iou is not None and iou < min_fit_iou and not o.r.get('instance_of'):
+        if iou is not None and iou < min_fit_iou and not o.r.get('instance_of') and not o.r.get('proxy'):
             removed[o.id] = f"mesh does not match its mask (IoU {iou:.2f})"
     # 8. duplicates
     dups = find_duplicates([o for o in objs if o.id not in removed], ev)

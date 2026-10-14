@@ -363,7 +363,7 @@ def share_instances(ev: SceneEvidence, objs: List[PlacedObject], image_small: np
     undo: Dict[int, Tuple] = {}
     groups: Dict[str, List[PlacedObject]] = {}
     for o in objs:
-        if o.id in ev.masks:
+        if o.id in ev.masks and not o.r.get('proxy'):
             groups.setdefault(o.r['label'], []).append(o)
     for label, members in groups.items():
         if len(members) < min_group:
