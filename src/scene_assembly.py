@@ -14,6 +14,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -63,6 +64,43 @@ def world_mesh(result: Dict):
     return trimesh.Trimesh(vertices=wv, faces=mesh.faces, vertex_colors=colors, process=False)
 
 
+def beyond_window(masks: Dict[int, np.ndarray], window: Optional[np.ndarray], points_aligned: np.ndarray,
+                  valid: np.ndarray, layout, min_inside: float = 0.7, min_beyond: float = 0.6) -> List[int]:
+    """Detections that are the view through a window: the trees, cars and
+    buildings outside, a blind in the frame. Their mask lies mostly inside
+    the window mask *and* the points the photo saw there lie on or beyond an
+    observed wall. A plant on the sill is inside the window's outline too,
+    but in front of the wall."""
+    if window is None or not window.any():
+        return []
+    h, w = valid.shape
+    win = rl._resize_mask(window, (h, w))
+    mn, mx = np.asarray(layout.bounds_min, float), np.asarray(layout.bounds_max, float)
+    tol = 0.02 * float(max(mx[0] - mn[0], mx[2] - mn[2]))
+    out = []
+    for rid, m in masks.items():
+        mm = rl._resize_mask(m, (h, w)) & valid
+        n = int(mm.sum())
+        if n < 20 or float((mm & win).sum()) < min_inside * n:
+            continue
+        inside = float((mm & win).sum()) / n
+        P = points_aligned[mm]
+        beyond = np.zeros(len(P), bool)
+        on_wall = np.zeros(len(P), bool)
+        for side, src in layout.wall_sources.items():
+            if not str(src).startswith("wall"):
+                continue
+            axis = 0 if side.startswith("x") else 2
+            d = (mn[axis] - P[:, axis]) if side.endswith("min") else (P[:, axis] - mx[axis])   # >0 beyond
+            beyond |= d > tol
+            on_wall |= d > -tol
+        # A depth map often reads window glass as flat, putting the view on
+        # the wall plane: then the mask must lie almost wholly in the window.
+        if float(beyond.mean()) >= min_beyond or (inside >= 0.9 and float(on_wall.mean()) >= min_beyond):
+            out.append(int(rid))
+    return out
+
+
 def mark_glass(results: List[Dict], verts: Dict[int, np.ndarray], seg_json: Path) -> None:
     """Flag transparent objects so exports draw them translucent.
 
@@ -85,7 +123,10 @@ def mark_glass(results: List[Dict], verts: Dict[int, np.ndarray], seg_json: Path
         d = desc.get(int(r["id"]))
         if d:
             r["description"] = d
-        text = f"{r.get('label', '')} {d or ''}".lower()
+        # only what the object itself is made of: "metal handle on a glass
+        # door" is not glass, "glass case with cakes" is
+        head = re.split(r"\b(?:on|with|in|inside|of|under|behind|near|against|through)\b", (d or "").lower())[0]
+        text = f"{r.get('label', '')} {head}".lower()
         if (r.get("seen_through") or 0.0) < 0.5 or "glass" not in text:
             continue
         v = verts.get(r["id"])
@@ -178,6 +219,9 @@ def assemble_from_cache(models_dir: Path, image_rgb: np.ndarray,
         )
         from src.room_generator import model_vertices
         structural = structural_duplicates(masks, structural_masks)
+        for rid in beyond_window(masks, (structural_masks or {}).get("window"), pm["points"] @ layout.R_total.T,
+                                 pm["valid"], layout):
+            structural.setdefault(rid, "view through a window")
         if layout.scene_type == "open" and "floor" not in (structural_masks or {}):
             P_al = pm["points"] @ layout.R_total.T
             N_al = rl.compute_normals(pm["points"], pm["valid"]) @ layout.R_total.T

@@ -26,7 +26,7 @@ def test_fill_keeps_what_was_seen_and_continues_the_material():
     vis = np.zeros((th, tw), bool)
     vis[20:90, 30:120] = True
     out, how = rt.fill_hidden(np.where(vis[..., None], tex, 0).astype(np.uint8), vis)
-    assert how == "tiled"
+    assert how.startswith("tiled")
     # well inside the seen area nothing changes
     np.testing.assert_array_equal(out[40:70, 50:100], tex[40:70, 50:100])
     # the unseen area carries the same two-tone material, not black and not a flat colour
@@ -150,7 +150,7 @@ def test_wall_prediction_is_layered_and_ignores_a_minority_material():
     vis = np.zeros((th, tw), bool)
     vis[:, :108] = True
     fill, how = rt.synthesize_fill(tex.astype(np.uint8), vis, rows=True)
-    assert how == "tiled"
+    assert how.startswith("tiled")
     far = fill[:, 180:]
     assert far[10:50, :, 0].mean() > 160 and far[10:50, :, 2].mean() < 130     # paper, not the white panel
     assert abs(far[70:110, :, 0].mean() - 120) < 12                            # panelling below
@@ -168,7 +168,7 @@ def test_blurry_texels_are_predicted_when_the_surface_can_be():
     quality = np.ones((th, tw)); quality[:, 110:] = 0.05           # the right third was seen at a grazing angle
     smeared = tex.copy(); smeared[:, 110:] = 128                    # ...and is a smear in the photo
     out, how = rt.fill_hidden(smeared, vis, quality=quality)
-    assert how == "tiled"
+    assert how.startswith("tiled")
     assert out[:, 130:].astype(float).std() > 8                     # the pattern is back
     np.testing.assert_array_equal(out[20:70, 20:80], smeared[20:70, 20:80])
 

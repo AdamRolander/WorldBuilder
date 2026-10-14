@@ -195,7 +195,7 @@ function registerObject(id, node) {
   items[id] = Object.assign(items[id] || {}, { pivot, home: c.clone(), size: box.getSize(new THREE.Vector3()), minY: box.min.y });
   const info = OBJECTS.find(e => e.id === id);
   if (info && info.glass) {       // transparent in the photo: see the room through it
-    node.traverse(o => { if (o.isMesh) { o.material.transparent = true; o.material.opacity = 0.3; o.material.depthWrite = false; } });
+    node.traverse(o => { if (o.isMesh) { o.material.transparent = true; o.material.opacity = 0.45; o.material.depthWrite = false; } });
   }
 }
 
