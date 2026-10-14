@@ -29,6 +29,9 @@ versions follow [SemVer](https://semver.org/) (0.x: minor = features, patch = fi
   objects against a wall are squared to it, and long furniture to the room's axes; wall
   contact climbs over an object's own (unsegmented) top surface; a short mesh whose mask
   reaches down to its support is lengthened down to it.
+- A detected supporter whose reconstruction misses its mask is replaced by a box fitted to
+  the photo's points instead of being dropped, so what stands on it does not float.
+- Segmentation tries a label's head noun ("chair" for "dining chair") before the box fallback.
 - `scripts/detect_only.py`: stage 1 for a batch, so the VLM server can be stopped before
   SAM 3 / SAM 3D load.
 
