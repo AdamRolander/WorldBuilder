@@ -233,7 +233,9 @@ def assemble_from_cache(models_dir: Path, image_rgb: np.ndarray,
                 depth = (pm["points"] @ rl.OPENCV_TO_WORLD.T)[..., 2]
                 depth = np.where(pm["valid"], depth, np.nan)
                 owner = object_pixels if object_pixels is not None else np.zeros(pm["valid"].shape, np.int32)
-                blocked = ndimage.binary_dilation(owner > 0, iterations=2)
+                # grown past the mask edge: the soft edge and the shadow an
+                # object casts are not the surface's material
+                blocked = ndimage.binary_dilation(owner > 0, iterations=max(2, int(0.006 * owner.shape[0])))
                 is_open = layout.scene_type == "open"
                 shell_layout, sky_rgb, terrain = layout, None, False
                 if is_open:

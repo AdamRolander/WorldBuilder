@@ -325,3 +325,42 @@ def test_large_flat_mask_at_ground_level_is_ground_but_a_small_one_is_not():
     hedge = np.zeros((h, w), bool); hedge[:20, :] = True    # big, vertical
     got = pl.ground_masks({1: path, 2: mat, 3: hedge}, P, N, valid, floor_y=-1.5, camera_height=1.5)
     assert got == {1: "ground"}
+
+
+def test_wall_contact_is_read_off_the_photo_and_the_gap_closed(scene):
+    ev, results, verts = scene
+    room = {"min": [-3.0, FLOOR_Y, 0.0], "max": [3.0, CEIL_Y, WALL_Z],
+            "sources": {"z_max": "wall(5000)", "x_min": "extent", "x_max": "extent", "z_min": "extent"},
+            "ceiling_y": CEIL_Y}
+    by = {r["id"]: r for r in results}
+    pic = pl.PlacedObject(by[3], verts[3])
+    table = pl.PlacedObject(by[1], verts[1])
+    assert pl.wall_contact(ev, pic, room) == "z_max"       # the wall is right above the picture, at its depth
+    assert pl.wall_contact(ev, table, room) is None        # the wall above the table is a metre behind it
+    # the picture generated 0.4 in front of the wall: the photo says it hangs on it
+    by[3]["translation"] = (np.array(by[3]["translation"]) - [0, 0, 0.4]).tolist()
+    pic = pl.PlacedObject(by[3], verts[3])
+    out = pl.push_to_walls(ev, [pic, table], room)
+    assert 3 in out and out[3]["side"] == "z_max"
+    assert pic.hi[2] == pytest.approx(WALL_Z, abs=0.02)
+    assert 1 not in out
+
+
+def test_objects_stay_below_an_observed_ceiling(scene):
+    ev, results, verts = scene
+    room = {"min": [-3.0, FLOOR_Y, 0.0], "max": [3.0, CEIL_Y, WALL_Z], "sources": {}, "ceiling_y": CEIL_Y}
+    by = {r["id"]: r for r in results}
+    by[3]["translation"] = (np.array(by[3]["translation"]) + [0, 1.0, 0]).tolist()   # a metre into the ceiling
+    pic = pl.PlacedObject(by[3], verts[3])
+    assert pl.clamp_below_ceiling(ev, [pic], room) == 1
+    assert pic.hi[1] <= CEIL_Y + 1e-6
+
+
+def test_contact_under_an_object_standing_in_front_of_its_edge(scene):
+    """The surface a few pixels below a small object's base runs on toward
+    the camera and is nearer than the object's front: still its support."""
+    ev, results, verts = scene
+    lamp = pl.PlacedObject(next(r for r in results if r["id"] == 2), verts[2])
+    c = pl.find_contact(ev, lamp)
+    assert c is not None and c.kind == "object" and c.supporter == 1
+    assert c.y == pytest.approx(BOXES[1][1][1], abs=0.03)

@@ -96,9 +96,18 @@ def _smooth_over_mesh(w: np.ndarray, faces: np.ndarray, n: int, rounds: int = 3)
 
 def photo_colors(vertices: np.ndarray, faces: np.ndarray, colors: np.ndarray, obj_id: int,
                  ctx: PhotoContext, depth_tol: float = 0.10, max_view_angle_deg: float = 75.0,
-                 min_support: int = 200) -> Tuple[np.ndarray, Dict]:
+                 min_support: int = 200, flat_only: bool = True, min_flatness: float = 0.8) -> Tuple[np.ndarray, Dict]:
     """New vertex colours for one placed object. ``vertices`` are in the
     aligned world frame, ``colors`` (n, 3|4) uint8 are SAM 3D's.
+
+    With ``flat_only`` (the default) only objects whose photographed side
+    is one flat surface facing the camera are painted: that is where the
+    photo's pixels land on the right geometry (signs, screens, art, cabinet
+    and drawer fronts). On free-standing furniture the mesh and the photo
+    disagree by a few centimetres, and the right pixels on slightly wrong
+    geometry look worse than SAM 3D's soft texture — doubled shelves, a
+    streak of background across a seat. Measured over 22 scenes, that was
+    the usual outcome.
 
     Returns ``(colors_uint8 (n, 4), stats)``; the input colours come back
     unchanged when too little of the object passes the tests.
@@ -140,6 +149,17 @@ def photo_colors(vertices: np.ndarray, faces: np.ndarray, colors: np.ndarray, ob
     cosv = np.abs(np.sum(normals * view, axis=1))
     cos_min = np.cos(np.radians(max_view_angle_deg))
     face_w = np.clip((cosv - cos_min) / (1.0 - cos_min), 0.0, 1.0) ** 0.5
+    # Is the photographed side one flat, camera-facing surface? Judged by
+    # the mesh's own normals over the vertices the photo saw: their mean
+    # direction is long when they agree (a screen, a poster, a cabinet
+    # front; 1.0 = all parallel) and short on a sofa, a plant or a chair.
+    # (SAM 3D's faces are not consistently wound, so normals are compared up
+    # to sign: the top eigenvalue of their scatter matrix, 1.0 = all parallel.)
+    nz = normals[seen] / np.maximum(np.linalg.norm(normals[seen], axis=1, keepdims=True), 1e-9)
+    stats["flatness"] = round(float(np.linalg.eigvalsh(nz.T @ nz / max(len(nz), 1))[-1]), 3)
+    stats["facing"] = round(float(np.median(cosv[seen])), 3)
+    if flat_only and not (stats["flatness"] >= min_flatness and stats["facing"] >= np.cos(np.radians(45))):
+        return out, stats
 
     idx = np.flatnonzero(seen)
     photo = _sample(ctx.image, u[idx], v[idx])
@@ -160,7 +180,9 @@ def repaint(mesh, obj_id: int, ctx: Optional[PhotoContext]) -> Optional[Dict]:
     """In-place for a trimesh with vertex colours; returns the stats or None."""
     if ctx is None or getattr(mesh.visual, "kind", None) != "vertex":
         return None
+    import os
     colors, stats = photo_colors(np.asarray(mesh.vertices), np.asarray(mesh.faces),
-                                 np.asarray(mesh.visual.vertex_colors), obj_id, ctx)
+                                 np.asarray(mesh.visual.vertex_colors), obj_id, ctx,
+                                 flat_only=os.environ.get("WORLDBUILDER_PHOTO_TEXTURE", "1") != "all")
     mesh.visual.vertex_colors = colors
     return stats
