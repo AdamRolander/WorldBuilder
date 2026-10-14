@@ -225,7 +225,7 @@ class SAM3Segmenter:
         min_mask_pixels: int = 100,
         max_mask_fraction: float = 0.6,
         prompt_strategy: str = "union",     # "union" | "label" | "description"
-        single_keep_ratio: float = 0.85,    # 1.0 reproduces the old hard top-1
+        single_keep_ratio: float = 0.7,     # 1.0 reproduces the old hard top-1; the VLM calls many repeated things "single"
         max_instances_per_label: int = 24,
         nms_iou: float = 0.5,
         use_box_fallback: bool = True,
