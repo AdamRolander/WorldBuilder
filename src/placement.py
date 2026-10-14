@@ -904,7 +904,11 @@ def wall_contact(ev: SceneEvidence, obj: "PlacedObject", room: Dict, band_frac: 
     cols, top = cols[edge_ok], top[edge_ok]
     if len(cols) < 3:
         return None
-    z_edge = ev.depth[top, cols]
+    # the object's own depth a few pixels inside its outline: the edge pixel
+    # itself is often a blend with what is behind it (the wall's depth)
+    inner = np.minimum(top + 3, h - 1)
+    inner_ok = m[inner, cols] & ev.valid[inner, cols]
+    z_edge = np.where(inner_ok, ev.depth[inner, cols], ev.depth[top, cols])
     # the row touching the edge has a normal smeared across the depth step
     rr = (top[:, None] - np.arange(2, band + 2)[None, :]).ravel()
     cc = np.repeat(cols, band)
@@ -958,11 +962,17 @@ def _climb_top_surface(ev: SceneEvidence, obj: "PlacedObject", m: np.ndarray, co
         if not np.isfinite(z_prev):
             continue
         n_up = 0
+        y_top = 0.0
         r = t - 1
         stop = max(0, t - max_rows)
         lip = max(4, int(0.03 * h))               # the top's own front face, a few percent of the frame
+        n_skip = 0
         while r >= stop:
             if m[r, c] or (smaller is not None and smaller[r, c]):
+                if n_up and not m[r, c]:
+                    n_skip += 1
+                    if n_skip > 3 * n_up + 5:
+                        break                     # more "things on it" than top: something else behind
                 r -= 1
                 continue                          # its own pixels, or a thing standing on the top
             if not ev.valid[r, c] or (ev.owner is not None and ev.owner[r, c] not in (0, obj.id)):
@@ -974,6 +984,11 @@ def _climb_top_surface(ev: SceneEvidence, obj: "PlacedObject", m: np.ndarray, co
             if not (z_prev * 0.97 <= z <= z_prev * hi_ratio):
                 break                             # depth jumps: not one continuous surface
             if ny > 0.6:
+                y = ev.points[r, c, 1]
+                if n_up == 0:
+                    y_top = y
+                elif abs(y - y_top) > 0.03 * ev.room_height:
+                    break                         # not the same flat top (the floor behind a sofa)
                 n_up += 1
                 z_prev = z
                 r -= 1
@@ -1120,6 +1135,21 @@ def square_long_objects(ev: SceneEvidence, objs: List["PlacedObject"], room: Opt
     return out
 
 
+def depth_agreement(ev: SceneEvidence, obj: "PlacedObject", min_pixels: int = 40) -> Optional[float]:
+    """Median ratio of observed depth to the placed mesh's visible depth
+    over the object's mask (1.0 = the mesh's front is where the photo saw
+    it). Moving an object along its viewing direction barely changes its
+    silhouette, so moves in depth are checked with this instead."""
+    m = ev.masks.get(obj.id)
+    if m is None:
+        return None
+    sil, zbuf = splat(ev, obj.fast_verts)
+    both = sil & m & ev.valid & np.isfinite(zbuf)
+    if int(both.sum()) < min_pixels:
+        return None
+    return float(np.median(ev.depth[both] / zbuf[both]))
+
+
 def push_to_walls(ev: SceneEvidence, objs: List[PlacedObject], room: Dict, max_stretch: float = 1.5,
                   max_iou_loss: float = 0.10) -> Dict[int, Dict]:
     """Close the gap between an object and the wall the photo shows it
@@ -1155,7 +1185,9 @@ def push_to_walls(ev: SceneEvidence, objs: List[PlacedObject], room: Dict, max_s
         options = []
         d = np.zeros(3); d[axis] = -gap if side.endswith("min") else gap
         o.translate(d)
-        options.append((fit_iou(ev, o), "move", o.snapshot()))
+        k = depth_agreement(ev, o)
+        if k is None or abs(k - 1.0) <= 0.06:      # its front must stay where the photo saw it
+            options.append((fit_iou(ev, o), "move", o.snapshot()))
         o.restore(snap)
         # Lengthening is for a mesh that came out too shallow: it never makes
         # the object deeper than it is wide (a chair is not a sofa).
@@ -1169,6 +1201,8 @@ def push_to_walls(ev: SceneEvidence, objs: List[PlacedObject], room: Dict, max_s
                 o.translate(d)
             options.append((fit_iou(ev, o), "stretch", o.snapshot()))
             o.restore(snap)
+        if not options:
+            continue
         best = max(options, key=lambda t: -1.0 if t[0] is None else t[0])
         if before is not None and best[0] is not None and best[0] < before - max_iou_loss:
             continue
