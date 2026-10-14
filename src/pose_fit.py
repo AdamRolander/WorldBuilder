@@ -252,9 +252,91 @@ def _fit_copy(ev: SceneEvidence, ex_verts: np.ndarray, mask: np.ndarray, centre_
     return best
 
 
+def _proposals(ev: SceneEvidence, ex: PlacedObject, members: List[PlacedObject], image_small: np.ndarray,
+               max_color_dist: float, max_shape_diff: float, min_gain: float):
+    """Which members a copy of ``ex`` would replace, and how (see
+    ``share_instances``). Returns ``(proposals, {id: why not})``; nothing is
+    changed."""
+    props: List[Dict] = []
+    rej: Dict[int, str] = {}
+    ex_color = _chroma(_mean_color(image_small, ev.masks[ex.id]))
+    ex_hist = _chroma_hist(image_small, ev.masks[ex.id])
+    ex_h = ex.height
+    ex_sig = _crop_signature(image_small, ev.masks[ex.id])
+    ex_dims = (ex.hi - ex.lo).copy()
+    # A flat thing (a picture, a sign, a screen) is identified by what is
+    # on its face; frames of one size hold different pictures.
+    ex_flat = float(np.sort(ex_dims)[0]) < 0.2 * float(np.sort(ex_dims)[2])
+    ex_fast = ex.fast_verts.copy()
+    ex_full_lo = ex.lo.copy()
+    for o in members:
+        if o is ex:
+            continue
+        m = ev.masks[o.id]
+        if float(np.linalg.norm(_chroma(_mean_color(image_small, m)) - ex_color)) > max_color_dist:
+            rej[o.id] = "colour"
+            continue
+        own = fit_score(ev, o.fast_verts, m)
+        dims_o = np.sort(o.hi - o.lo)
+        dims_e = np.sort(ex_dims)
+        same_shape = bool(np.all(np.abs(dims_o / np.maximum(dims_e, 1e-9) - 1.0) <= max_shape_diff))
+        short = o.height < 0.7 * ex_h
+        if not (same_shape or short):
+            rej[o.id] = "shape"
+            continue
+        if not short or ex_flat:
+            # a complete instance must also *look* like the exemplar
+            sig = _crop_signature(image_small, m)
+            if sig is None or ex_sig is None or float(sig @ ex_sig) < (0.6 if ex_flat else 0.4):
+                rej[o.id] = "looks different"
+                continue
+        # a fragment is judged by its colours: the visible part of the same
+        # chair is made of the same colours, a different object is not
+        if _hist_similarity(_chroma_hist(image_small, m), ex_hist) < 0.6:
+            rej[o.id] = "colour make-up"
+            continue
+        # where does it stand: on the floor if the exemplar does, else at its own bottom
+        bottom = ex_full_lo[1] if ex.r.get('support') == 'floor' and ev.floor_y is not None else float(o.lo[1])
+        centre = np.array([0.5 * (o.lo[0] + o.hi[0]), 0.5 * (o.lo[2] + o.hi[2])])
+        score, yaw, xz = _fit_copy(ev, ex_fast, m, centre, bottom, wall_side=o.r.get('against_wall'))
+        fragment = False
+        if short:
+            lo_e, hi_e = ex_fast.min(0), ex_fast.max(0)
+            c_e = np.array([0.5 * (lo_e[0] + hi_e[0]), lo_e[1], 0.5 * (lo_e[2] + hi_e[2])])
+            copy = (ex_fast - c_e) @ _yaw(yaw).T + np.array([xz[0], bottom, xz[1]])
+            fragment = hidden_fraction(ev, copy, m) > 0.15 or any(touches_border(m).values())
+            if not fragment:
+                rej[o.id] = "short but not hidden"
+                continue
+        # A fragment only has to be explained nearly as well as its own
+        # sliver explained it; a complete instance must be explained
+        # *better*, otherwise swapping it gains nothing and risks a lot.
+        if score < (0.8 * own if fragment else own + min_gain) or score < 0.15:
+            rej[o.id] = f"fit {score:.2f} vs own {own:.2f}"
+            continue
+        # The occlusion-aware score excuses pixels hidden behind nearer
+        # things, so a copy that is far too big can pass by burying its
+        # excess behind its neighbours (a portrait copied onto a small
+        # frame's mask). The plain silhouette IoU does not excuse that.
+        # A fragment is exempt: a chair behind a table *is* mostly hidden,
+        # and what keeps a wrong fragment copy out is the colour make-up
+        # test above and, for flat things, their face.
+        if not fragment:
+            plain_own = mask_iou(splat(ev, o.fast_verts)[0], m)
+            lo_e, hi_e = ex_fast.min(0), ex_fast.max(0)
+            c_e = np.array([0.5 * (lo_e[0] + hi_e[0]), lo_e[1], 0.5 * (lo_e[2] + hi_e[2])])
+            copy_v = (ex_fast - c_e) @ _yaw(yaw).T + np.array([xz[0], bottom, xz[1]])
+            if mask_iou(splat(ev, copy_v)[0], m) < max(0.7 * plain_own, 0.12):
+                rej[o.id] = "plain silhouette"
+                continue
+        props.append({"o": o, "score": score, "yaw": yaw, "xz": xz, "bottom": bottom, "own": own,
+                      "fragment": fragment})
+    return props, rej
+
+
 def share_instances(ev: SceneEvidence, objs: List[PlacedObject], image_small: np.ndarray,
                     min_group: int = 2, max_color_dist: float = 0.25, max_score_loss: float = 0.05,
-                    min_exemplar_iou: float = 0.5, max_shape_diff: float = 0.2,
+                    min_exemplar_iou: float = 0.4, max_shape_diff: float = 0.2,
                     min_gain: float = 0.05) -> List[Dict]:
     """Replace repeated objects by re-posed copies of the best-observed one.
 
@@ -291,85 +373,38 @@ def share_instances(ev: SceneEvidence, objs: List[PlacedObject], image_small: np
         for o in members:
             m = ev.masks[o.id]
             iou = mask_iou(splat(ev, o.fast_verts)[0], m)
-            if iou < min_exemplar_iou or any(touches_border(m).values()):
+            if iou < min_exemplar_iou:
                 continue
-            if hidden_fraction(ev, o.fast_verts, m) > 0.25:
+            hid = hidden_fraction(ev, o.fast_verts, m)
+            if hid > 0.45:
                 continue
-            ranked.append((iou * float(np.sqrt(m.sum())), o))
+            # Best observed: large, matching its mask, little hidden, not cut
+            # by the frame. Cut or partly hidden instances are only penalised:
+            # SAM 3D completes them, and when every instance is partly out of
+            # view (booths along two walls) one of them must still serve.
+            cut = any(touches_border(m).values())
+            ranked.append((iou * float(np.sqrt(m.sum())) * (1.0 - hid) * (0.6 if cut else 1.0), o))
         if not ranked:
             continue
-        ex = max(ranked, key=lambda t: t[0])[1]
-        ex_color = _chroma(_mean_color(image_small, ev.masks[ex.id]))
-        ex_hist = _chroma_hist(image_small, ev.masks[ex.id])
-        ex_h = ex.height
-        ex_sig = _crop_signature(image_small, ev.masks[ex.id])
-        ex_dims = (ex.hi - ex.lo).copy()
-        # A flat thing (a picture, a sign, a screen) is identified by what is
-        # on its face; frames of one size hold different pictures.
-        ex_flat = float(np.sort(ex_dims)[0]) < 0.2 * float(np.sort(ex_dims)[2])
-        ex_fast = ex.fast_verts.copy()
-        ex_full_lo = ex.lo.copy()
-        ex_pose = ex.snapshot()
+        # ...and complete: a fragment's mesh comes out smaller than the object.
+        # The ranking is a guess; the three best candidates are each tried and
+        # the one that explains most of its group (then best) is used.
+        h_max = max(o.height for _, o in ranked)
+        ranked.sort(key=lambda t: -t[0] * t[1].height / max(h_max, 1e-9))
+        best = None
+        for _, cand in ranked[:3]:
+            props, rej = _proposals(ev, cand, members, image_small, max_color_dist, max_shape_diff, min_gain)
+            key = (len(props), sum(p["score"] for p in props))
+            if best is None or key > best[0]:
+                best = (key, cand, props, rej)
+        _, ex, props, rej = best
         for o in members:
-            if o is ex:
-                continue
-            m = ev.masks[o.id]
-            if float(np.linalg.norm(_chroma(_mean_color(image_small, m)) - ex_color)) > max_color_dist:
-                o.r['share_rejected'] = "colour"
-                continue
-            own = fit_score(ev, o.fast_verts, m)
-            dims_o = np.sort(o.hi - o.lo)
-            dims_e = np.sort(ex_dims)
-            same_shape = bool(np.all(np.abs(dims_o / np.maximum(dims_e, 1e-9) - 1.0) <= max_shape_diff))
-            short = o.height < 0.7 * ex_h
-            if not (same_shape or short):
-                o.r['share_rejected'] = "shape"
-                continue
-            if not short or ex_flat:
-                # a complete instance must also *look* like the exemplar
-                sig = _crop_signature(image_small, m)
-                if sig is None or ex_sig is None or float(sig @ ex_sig) < (0.6 if ex_flat else 0.4):
-                    o.r['share_rejected'] = "looks different"
-                    continue
-            # a fragment is judged by its colours: the visible part of the same
-            # chair is made of the same colours, a different object is not
-            if _hist_similarity(_chroma_hist(image_small, m), ex_hist) < 0.6:
-                o.r['share_rejected'] = "colour make-up"
-                continue
-            # where does it stand: on the floor if the exemplar does, else at its own bottom
-            bottom = ex_full_lo[1] if ex.r.get('support') == 'floor' and ev.floor_y is not None else float(o.lo[1])
-            centre = np.array([0.5 * (o.lo[0] + o.hi[0]), 0.5 * (o.lo[2] + o.hi[2])])
-            score, yaw, xz = _fit_copy(ev, ex_fast, m, centre, bottom, wall_side=o.r.get('against_wall'))
-            fragment = False
-            if short:
-                lo_e, hi_e = ex_fast.min(0), ex_fast.max(0)
-                c_e = np.array([0.5 * (lo_e[0] + hi_e[0]), lo_e[1], 0.5 * (lo_e[2] + hi_e[2])])
-                copy = (ex_fast - c_e) @ _yaw(yaw).T + np.array([xz[0], bottom, xz[1]])
-                fragment = hidden_fraction(ev, copy, m) > 0.15 or any(touches_border(m).values())
-                if not fragment:
-                    o.r['share_rejected'] = "short but not hidden"
-                    continue
-            # A fragment only has to be explained nearly as well as its own
-            # sliver explained it; a complete instance must be explained
-            # *better*, otherwise swapping it gains nothing and risks a lot.
-            if score < (0.8 * own if fragment else own + min_gain) or score < 0.15:
-                o.r['share_rejected'] = f"fit {score:.2f} vs own {own:.2f}"
-                continue
-            # The occlusion-aware score excuses pixels hidden behind nearer
-            # things, so a copy that is far too big can pass by burying its
-            # excess behind its neighbours (a portrait copied onto a small
-            # frame's mask). The plain silhouette IoU does not excuse that.
-            # A fragment is exempt: a chair behind a table *is* mostly hidden,
-            # and what keeps a wrong fragment copy out is the colour make-up
-            # test above and, for flat things, their face.
-            if not fragment:
-                plain_own = mask_iou(splat(ev, o.fast_verts)[0], m)
-                lo_e, hi_e = ex_fast.min(0), ex_fast.max(0)
-                c_e = np.array([0.5 * (lo_e[0] + hi_e[0]), lo_e[1], 0.5 * (lo_e[2] + hi_e[2])])
-                copy_v = (ex_fast - c_e) @ _yaw(yaw).T + np.array([xz[0], bottom, xz[1]])
-                if mask_iou(splat(ev, copy_v)[0], m) < max(0.7 * plain_own, 0.12):
-                    o.r['share_rejected'] = "plain silhouette"
-                    continue
+            if o.id in rej:
+                o.r['share_rejected'] = rej[o.id]
+        ex_pose = ex.snapshot()
+        ex_full_lo = ex.lo.copy()
+        for p in props:
+            o, score, yaw, xz, bottom, own, fragment = (p[k] for k in ("o", "score", "yaw", "xz", "bottom", "own", "fragment"))
             undo[o.id] = (o.model, o.snapshot(), dict(o.r))
             # adopt the exemplar's mesh and pose, then turn and move it
             o.model = ex.model
