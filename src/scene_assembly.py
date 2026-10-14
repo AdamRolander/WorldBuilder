@@ -196,6 +196,25 @@ def mark_glass(results: List[Dict], verts: Dict[int, np.ndarray], seg_json: Path
         r["glass"] = True
 
 
+def proxy_mesh(result: Dict, photo_ctx=None):
+    """The stand-in box of an object whose reconstruction failed
+    (``placement.make_proxy``), coloured with the photo's median colour
+    under its mask."""
+    import trimesh
+    b = result["proxy_box"]
+    mn, mx = np.asarray(b["min"], float), np.asarray(b["max"], float)
+    m = trimesh.creation.box(extents=np.maximum(mx - mn, 1e-4))
+    m.apply_translation(0.5 * (mn + mx))
+    rgb = np.array([150, 150, 150])
+    if photo_ctx is not None:
+        own = photo_ctx.owner == int(result["id"])
+        if own.any():
+            small = np.asarray(Image.fromarray(photo_ctx.image).resize(own.shape[::-1], Image.BILINEAR))
+            rgb = np.median(small[own], axis=0)
+    m.visual.vertex_colors = np.tile(np.append(rgb, 255).astype(np.uint8), (len(m.vertices), 1))
+    return m
+
+
 def assemble_from_cache(models_dir: Path, image_rgb: np.ndarray,
                         structural_masks: Optional[Dict[str, np.ndarray]] = None,
                         build_room: bool = True, verbose: bool = True,
@@ -514,8 +533,11 @@ def export_world(results: List[Dict], models_dir: Path, verbose: bool = True, ph
         src = r.get('model_path')
         if not src or not Path(src).exists():
             continue
-        m = world_mesh(r)
-        if photo_ctx is not None:
+        if r.get('proxy_box'):
+            m = proxy_mesh(r, photo_ctx)
+        else:
+            m = world_mesh(r)
+        if photo_ctx is not None and not r.get('proxy_box'):
             try:
                 from src.object_texture import repaint
                 st = repaint(m, int(r['id']), photo_ctx)
