@@ -63,6 +63,40 @@ def world_mesh(result: Dict):
     return trimesh.Trimesh(vertices=wv, faces=mesh.faces, vertex_colors=colors, process=False)
 
 
+def mark_glass(results: List[Dict], verts: Dict[int, np.ndarray], seg_json: Path) -> None:
+    """Flag transparent objects so exports draw them translucent.
+
+    Two pieces of evidence must agree: over the object's own mask the photo
+    saw something well behind the placed mesh (``seen_through``, set by
+    ``placement.enforce_visibility``), and the detector described the object
+    as glass. Neither alone is enough: a misplaced object is also "seen
+    through", and a glass-fronted oven is not transparent. Flat things
+    against a wall (mirrors, framed glass) are excluded: a mirror shows a
+    reflection, which also reads as depth behind it. Descriptions are copied
+    onto the results either way.
+    """
+    desc = {}
+    if seg_json.exists():
+        try:
+            desc = {int(s["id"]): s.get("description", "") for s in json.loads(seg_json.read_text())}
+        except (ValueError, KeyError, TypeError):
+            desc = {}
+    for r in results:
+        d = desc.get(int(r["id"]))
+        if d:
+            r["description"] = d
+        text = f"{r.get('label', '')} {d or ''}".lower()
+        if (r.get("seen_through") or 0.0) < 0.5 or "glass" not in text:
+            continue
+        v = verts.get(r["id"])
+        if v is None:
+            continue
+        ext = np.sort(np.ptp(world_vertices(v, r), axis=0))
+        if ext[0] < 0.15 * ext[2] and r.get("against_wall"):
+            continue
+        r["glass"] = True
+
+
 def assemble_from_cache(models_dir: Path, image_rgb: np.ndarray,
                         structural_masks: Optional[Dict[str, np.ndarray]] = None,
                         build_room: bool = True, verbose: bool = True,
@@ -184,6 +218,10 @@ def assemble_from_cache(models_dir: Path, image_rgb: np.ndarray,
         for side in diag.get("disputed_walls", []):
             layout.wall_sources[side] = "extent (objects stand beyond the fitted plane)"
         diag["structural"] = structural
+        mark_glass(results, verts, models_dir.parent / "segmentation_results.json")
+        if any(r.get("glass") for r in results):
+            log("  glass (the photo sees through it; exported translucent): " + ", ".join(
+                f"{r['label']} #{r['id']}" for r in results if r.get("glass")))
         failed = failed + [{"id": i, "label": v["label"], "status": f"removed: {v['reason']}"}
                            for i, v in diag.get("removed", {}).items()]
     elif mode == "raw":
@@ -270,7 +308,14 @@ def assemble_from_cache(models_dir: Path, image_rgb: np.ndarray,
                     if sky.sum() > 200:
                         small = np.asarray(Image.fromarray(image_rgb).resize(sky.shape[::-1], Image.BILINEAR))
                         sky_rgb = [int(c) for c in np.median(small[sky], axis=0)]
-                room_meshes, stats = rt.build_shell(shell_layout, pm["intrinsics"], image_rgb, depth, blocked)
+                # windows are painted where seen but never teach a wall its material
+                win = (structural_masks or {}).get("window")
+                exclude = None
+                if win is not None and win.any():
+                    exclude = ndimage.binary_dilation(rl._resize_mask(win, pm["valid"].shape),
+                                                      iterations=max(1, int(0.004 * owner.shape[0])))
+                room_meshes, stats = rt.build_shell(shell_layout, pm["intrinsics"], image_rgb, depth, blocked,
+                                                    exclude=exclude)
                 if terrain and stats.get("floor", {}).get("fill") in ("fallback", "median"):
                     # nothing of the lowered base was seen: give it the ground's own colour
                     small = np.asarray(Image.fromarray(image_rgb).resize(ground.shape[::-1], Image.BILINEAR))

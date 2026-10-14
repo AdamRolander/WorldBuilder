@@ -82,7 +82,8 @@ def room_planes(layout: rl.RoomLayout, include_ceiling: bool = True,
 def project_plane_texture(plane: Dict, R_total: np.ndarray, K: np.ndarray, image_rgb: np.ndarray,
                           depth: np.ndarray, blocked: Optional[np.ndarray] = None,
                           long_side: int = 1024, depth_tol: float = 0.06,
-                          keep_flush: bool = False, return_quality: bool = False):
+                          keep_flush: bool = False, return_quality: bool = False,
+                          exclude: Optional[np.ndarray] = None):
     """Rectified view of one plane. Returns ``(texture (th,tw,3) uint8,
     visible (th,tw) bool)``; row 0 is the plane's far edge along ``av`` so
     that trimesh/OpenGL UVs (v up) map ``v = t / sv``.
@@ -99,7 +100,11 @@ def project_plane_texture(plane: Dict, R_total: np.ndarray, K: np.ndarray, image
     many photo pixels it spans in its worst direction (small = stretched,
     blurry), and ``clean`` — seen and not part of any object, flush or not.
     A flush mirror belongs on the wall where it was seen, but the wall's
-    material must be learned from texels that are only wall.
+    material must be learned from texels that are only wall. Texels seen
+    *through* the plane (a window, a doorway) and texels under ``exclude``
+    (same size as ``depth``; the window mask) are not clean either: the
+    trees outside a window are painted where the window is, but they are
+    not what the wall is made of.
     """
     import cv2
     Hi, Wi = image_rgb.shape[:2]
@@ -122,7 +127,9 @@ def project_plane_texture(plane: Dict, R_total: np.ndarray, K: np.ndarray, image
         # the plane was actually observed, not placed by a prior.
         beyond = (z_obs > z * (1 + depth_tol)) if plane.get("evidence") else np.zeros_like(on_surface)
     visible = inside & np.isfinite(z_obs) & (on_surface | beyond)
-    clean = visible.copy()                   # seen *and* not part of any object
+    clean = visible & ~beyond                # seen, is the surface itself, not part of any object
+    if exclude is not None:
+        clean &= ~exclude[vi, ui]
     if blocked is not None:
         blk = blocked[vi, ui]
         clean &= ~blk
@@ -307,6 +314,48 @@ def synthesize_fill(tex: np.ndarray, visible: np.ndarray, rows: bool = False,
     return base[:, None, :] + detail, "tiled" if textured else "banded"
 
 
+def _match_local(tex: np.ndarray, fill: np.ndarray, known: np.ndarray, scale_frac: float = 0.02,
+                 reach_frac: float = 0.2, clip: float = 80.0) -> np.ndarray:
+    """Carry the seen surface's local colour into the prediction near it.
+
+    A fill learned from the whole surface has the surface's average colour,
+    but light falls off across a wall and a floor: the patch hidden behind a
+    lamp or a chair, filled with the average, is a silhouette of that object
+    in a slightly different colour, visible from every other viewpoint. The
+    low-frequency difference between what was seen and the prediction is
+    interpolated into the unseen texels (normalised convolution, fine to
+    coarse) and faded out with distance from anything seen, so a hole
+    surrounded by wall takes that wall's colour and an unseen wall far away
+    keeps the predicted material. ``known`` are the texels the material was
+    learned from (no windows, no objects).
+    """
+    import cv2
+    from scipy import ndimage
+    th, tw = known.shape
+    if int(known.sum()) < 16:
+        return fill
+    f = max(1, int(np.ceil(max(th, tw) / 256)))
+    sh, sw = max(2, th // f), max(2, tw // f)
+    r = np.clip(tex.astype(np.float32) - fill.astype(np.float32), -clip, clip) * known[..., None]
+    rs = cv2.resize(r, (sw, sh), interpolation=cv2.INTER_AREA)
+    ws = cv2.resize(known.astype(np.float32), (sw, sh), interpolation=cv2.INTER_AREA)
+    acc = np.zeros_like(rs)
+    accw = np.zeros((sh, sw), np.float32)
+    base = max(1.0, scale_frac * max(sh, sw))
+    for sigma in (base, 3 * base, 9 * base):
+        num = cv2.GaussianBlur(rs, (0, 0), sigma)
+        den = cv2.GaussianBlur(ws, (0, 0), sigma)
+        est = num / np.maximum(den, 1e-4)[..., None]
+        conf = np.clip(den / 0.25, 0, 1) * (1 - accw)
+        acc += conf[..., None] * est
+        accw += conf
+    dist = ndimage.distance_transform_edt(ws < 0.5)
+    beta = np.clip(1.0 - dist / (reach_frac * max(sh, sw)), 0, 1)
+    corr = cv2.resize(acc * beta[..., None], (tw, th), interpolation=cv2.INTER_LINEAR)
+    return fill.astype(np.float32) + corr
+
+
+
 def fill_hidden(tex: np.ndarray, visible: np.ndarray, fallback_rgb=(200, 200, 200), rows: bool = False,
                 quality: Optional[np.ndarray] = None, donor: Optional[np.ndarray] = None,
                 return_fill: bool = False, source: Optional[np.ndarray] = None, min_quality: float = 0.35):
@@ -360,6 +409,7 @@ def fill_hidden(tex: np.ndarray, visible: np.ndarray, fallback_rgb=(200, 200, 20
     pure = fill if how in ("tiled", "tiled-soft", "banded") else None
     if frac > 0.999 and sharp is visible:
         return _ret(tex, "complete", pure)
+    fill = _match_local(tex, fill, sharp & src)
     # Feather: observed texels fade into the prediction over a few percent
     # of the plane, so there is no hard line where the photo's knowledge ends.
     ramp = max(2.0, 0.02 * max(th, tw))
@@ -374,12 +424,15 @@ def fill_hidden(tex: np.ndarray, visible: np.ndarray, fallback_rgb=(200, 200, 20
 
 def build_shell(layout: rl.RoomLayout, K: np.ndarray, image_rgb: np.ndarray, depth: np.ndarray,
                 blocked: Optional[np.ndarray] = None, long_side: Optional[int] = None,
-                include_ceiling: bool = True, include_front_wall: bool = True):
+                include_ceiling: bool = True, include_front_wall: bool = True,
+                exclude: Optional[np.ndarray] = None):
     """Textured quads for every shell plane.
 
     Returns ``(meshes, stats)``: ``meshes`` maps node name → trimesh with
     ``TextureVisuals``; ``stats`` maps plane → visible fraction, fill mode
-    and texture size.
+    and texture size. ``exclude`` (same size as ``depth``) marks pixels that
+    are painted where seen but never used to learn a surface's material
+    (windows).
     """
     import trimesh
     from PIL import Image
@@ -389,7 +442,8 @@ def build_shell(layout: rl.RoomLayout, K: np.ndarray, image_rgb: np.ndarray, dep
     meshes, stats = {}, {}
     planes = room_planes(layout, include_ceiling, include_front_wall)
     projected = {name: project_plane_texture(pl, R, K, image_rgb, depth, blocked, long_side,
-                                             keep_flush=(name != "floor"), return_quality=True)
+                                             keep_flush=(name != "floor"), return_quality=True,
+                                             exclude=exclude)
                  for name, pl in planes.items()}
     # A wall the photo never saw takes the colour of the walls it did see,
     # which beats any hard-coded default.
@@ -407,7 +461,9 @@ def build_shell(layout: rl.RoomLayout, K: np.ndarray, image_rgb: np.ndarray, dep
     # had nothing to learn from borrows the best-seen wall's predicted
     # make-up (all walls share the floor-to-ceiling axis, so skirting and
     # panelling line up), tiled along its own length.
-    donors = [(projected[n][1].mean(), n) for n in planes
+    # The donor is the wall with the most *clean* texels: a wall that is
+    # mostly window was seen a lot but shows little of the wall's material.
+    donors = [(projected[n][3].mean(), n) for n in planes
               if n.startswith("wall") and done[n][2] is not None]
     if donors:
         donor_name = max(donors)[1]
@@ -423,6 +479,21 @@ def build_shell(layout: rl.RoomLayout, K: np.ndarray, image_rgb: np.ndarray, dep
             t2, how2, _ = fill_hidden(tex, vis, wall_rgb, rows=True, quality=qual, donor=strip,
                                       return_fill=True, source=clean)
             done[name] = (t2, f"like {donor_name}" if how2 == "donor" else how2, None)
+    # A ceiling the photo never shows: the colour where the seen walls meet
+    # it (their top band), not a white lid that reads as a hole in a dark room.
+    if "ceiling" in done and done["ceiling"][1] == "fallback":
+        tops = []
+        for n in planes:
+            if not n.startswith("wall"):
+                continue
+            tex, vis, qual, clean = projected[n]
+            band = clean[: max(2, int(0.15 * clean.shape[0]))]
+            if band.sum() >= 50:
+                tops.append(tex[: band.shape[0]][band])
+        if tops:
+            rgb = np.median(np.concatenate(tops), axis=0).astype(np.float32)
+            th, tw = projected["ceiling"][1].shape
+            done["ceiling"] = (np.tile(np.clip(rgb, 0, 255).astype(np.uint8), (th, tw, 1)), "wall top colour", None)
     for name, pl in planes.items():
         tex, how, _ = done[name]
         vis = projected[name][1]

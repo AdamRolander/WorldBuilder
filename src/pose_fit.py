@@ -160,6 +160,26 @@ def _crop_signature(image_small: np.ndarray, mask: np.ndarray, n: int = 16) -> O
     return v / norm if norm > 1e-6 else None
 
 
+def _chroma_hist(image_small: np.ndarray, mask: np.ndarray, bins: int = 8) -> Optional[np.ndarray]:
+    """Normalised histogram of rg-chromaticity inside a mask: the colours an
+    object is made of, independent of how brightly it is lit and of how
+    much of it is visible."""
+    px = image_small[mask].reshape(-1, 3).astype(np.float64)
+    if len(px) < 16:
+        return None
+    s = np.maximum(px.sum(axis=1), 1e-6)
+    r, g = px[:, 0] / s, px[:, 1] / s
+    h, _, _ = np.histogram2d(r, g, bins=bins, range=[[0, 1], [0, 1]])
+    return h / max(h.sum(), 1e-9)
+
+
+def _hist_similarity(a: Optional[np.ndarray], b: Optional[np.ndarray]) -> float:
+    """Bhattacharyya coefficient (1 = same colour make-up)."""
+    if a is None or b is None:
+        return 0.0
+    return float(np.sum(np.sqrt(a * b)))
+
+
 def _chroma(rgb: np.ndarray) -> np.ndarray:
     """Brightness-free colour: the same chair in shade and in sun agrees."""
     return rgb / max(float(rgb.sum()), 1e-6)
@@ -280,9 +300,13 @@ def share_instances(ev: SceneEvidence, objs: List[PlacedObject], image_small: np
             continue
         ex = max(ranked, key=lambda t: t[0])[1]
         ex_color = _chroma(_mean_color(image_small, ev.masks[ex.id]))
+        ex_hist = _chroma_hist(image_small, ev.masks[ex.id])
         ex_h = ex.height
         ex_sig = _crop_signature(image_small, ev.masks[ex.id])
         ex_dims = (ex.hi - ex.lo).copy()
+        # A flat thing (a picture, a sign, a screen) is identified by what is
+        # on its face; frames of one size hold different pictures.
+        ex_flat = float(np.sort(ex_dims)[0]) < 0.2 * float(np.sort(ex_dims)[2])
         ex_fast = ex.fast_verts.copy()
         ex_full_lo = ex.lo.copy()
         ex_pose = ex.snapshot()
@@ -299,11 +323,15 @@ def share_instances(ev: SceneEvidence, objs: List[PlacedObject], image_small: np
             short = o.height < 0.7 * ex_h
             if not (same_shape or short):
                 continue
-            if not short:
+            if not short or ex_flat:
                 # a complete instance must also *look* like the exemplar
                 sig = _crop_signature(image_small, m)
-                if sig is None or ex_sig is None or float(sig @ ex_sig) < 0.4:
+                if sig is None or ex_sig is None or float(sig @ ex_sig) < (0.6 if ex_flat else 0.4):
                     continue
+            # a fragment is judged by its colours: the visible part of the same
+            # chair is made of the same colours, a different object is not
+            if _hist_similarity(_chroma_hist(image_small, m), ex_hist) < 0.6:
+                continue
             # where does it stand: on the floor if the exemplar does, else at its own bottom
             bottom = ex_full_lo[1] if ex.r.get('support') == 'floor' and ev.floor_y is not None else float(o.lo[1])
             centre = np.array([0.5 * (o.lo[0] + o.hi[0]), 0.5 * (o.lo[2] + o.hi[2])])

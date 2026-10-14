@@ -158,7 +158,18 @@ def photo_colors(vertices: np.ndarray, faces: np.ndarray, colors: np.ndarray, ob
     nz = normals[seen] / np.maximum(np.linalg.norm(normals[seen], axis=1, keepdims=True), 1e-9)
     stats["flatness"] = round(float(np.linalg.eigvalsh(nz.T @ nz / max(len(nz), 1))[-1]), 3)
     stats["facing"] = round(float(np.median(cosv[seen])), 3)
-    if flat_only and not (stats["flatness"] >= min_flatness and stats["facing"] >= np.cos(np.radians(45))):
+    # A facade is as good as a flat panel: a bookcase full of books, a
+    # dresser, a run of cabinets seen from the front. Its normals disagree
+    # (shelves, mouldings, handles) but everything the photo saw lies in a
+    # thin layer compared with how wide it is, so the photo's pixels land on
+    # the right surfaces. That is also where the photo matters most: the
+    # books on a shelf are never generated.
+    zs = cam[seen][:, 2] if cam.shape[1] == 3 else z[seen]
+    lat = np.ptp(cam[seen][:, :2], axis=0).max() if seen.sum() > 1 else 0.0
+    depth_layer = float(np.percentile(np.abs(zs), 90) - np.percentile(np.abs(zs), 10))
+    stats["facade"] = round(depth_layer / max(float(lat), 1e-9), 3)
+    flat = stats["flatness"] >= min_flatness or stats["facade"] <= 0.2
+    if flat_only and not (flat and stats["facing"] >= np.cos(np.radians(45))):
         return out, stats
 
     idx = np.flatnonzero(seen)
