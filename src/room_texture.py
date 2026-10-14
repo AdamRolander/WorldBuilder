@@ -289,7 +289,7 @@ def _tile_periodic(patch: np.ndarray, r0: int, c0: int, th: int, tw: int) -> Opt
     return patch[index(th, r0, h, pr, near_end=True)][:, index(tw, c0, w, pc)].astype(np.float32)
 
 
-def _detrend(patch: np.ndarray, rows: bool) -> np.ndarray:
+def _detrend(patch: np.ndarray, rows: bool, scale: float = 0.5) -> np.ndarray:
     """Detail of a patch on a flat base, so that tiling it repeats the
     material but not the lighting (mirrored shadows read as blobs). In
     ``rows`` mode the base keeps one colour per row, which preserves a
@@ -302,7 +302,7 @@ def _detrend(patch: np.ndarray, rows: bool) -> np.ndarray:
         low = cv2.blur(p, (k, 1), borderType=cv2.BORDER_REFLECT)
         base = np.median(p, axis=1, keepdims=True)
     else:
-        k = max(3, (min(h, w) // 2) | 1)
+        k = max(3, int(min(h, w) * scale) | 1)
         low = cv2.blur(p, (k, k), borderType=cv2.BORDER_REFLECT)
         base = np.median(p.reshape(-1, 3), axis=0)[None, None, :]
     return p - low + base
@@ -339,8 +339,11 @@ def synthesize_fill(tex: np.ndarray, visible: np.ndarray, rows: bool = False,
             if per is not None:
                 return per, "tiled-periodic"
         if _texture_like(patch, rows=False) or regular:
-            # Grain is small and evenly spread; a chair leg's shadow or a crumb
-            # in the patch is an outlier that tiling would stamp everywhere.
+            # Grain is small and evenly spread; a shadow or a crumb in the
+            # patch is not, and tiling would stamp it everywhere. A material
+            # without a regular pattern keeps only its fine detail, and
+            # outliers in that are clipped.
+            flat = _detrend(patch, rows=False, scale=1 / 6)
             base = np.median(flat.reshape(-1, 3), axis=0)
             dev = flat - base
             mad = float(np.median(np.abs(dev))) * 1.4826
