@@ -248,11 +248,21 @@ function loadRoomGLB(url, done) {
     done();
   }, undefined, e => { console.error(url, e); if (ROOM) loadPLY(ROOM, null, done); else done(); });
 }
+// "Room" means the shell (floor, walls, ceiling). Built-ins (relief pieces and
+// solid blocks) are furniture-like and keep their own checkboxes, so ghosting
+// or hiding the room leaves them as they are.
+function isShell(o) {
+  const nm = o.name + ' ' + (o.parent ? o.parent.name : '');
+  return !(nm.includes('room_relief') || nm.includes('room_builtin'));
+}
 function setRoomMode(mode) {
   if (!roomMesh) return;
-  roomMesh.visible = mode !== 'hidden';
   const op = mode === 'ghost' ? 0.35 : 1.0;
-  roomMesh.traverse(o => { if (o.isMesh) { o.material.opacity = op; o.material.depthWrite = mode !== 'ghost'; o.material.needsUpdate = true; } });
+  roomMesh.traverse(o => {
+    if (!o.isMesh || !isShell(o)) return;
+    o.visible = mode !== 'hidden';
+    o.material.opacity = op; o.material.depthWrite = mode !== 'ghost'; o.material.needsUpdate = true;
+  });
 }
 
 function loadPLY(url, id, done) {
@@ -334,8 +344,9 @@ function buildBuiltinList() {
     const title = b.kind === 'relief' ? `${terrain ? 'Ground / backdrop' : 'Surface'} ${b.idx + 1}` : `Solid block ${b.idx + 1}`;
     row.innerHTML = `<input type="checkbox" checked><span class="name">${title}</span><span class="conf">${b.kind}</span>`;
     el.appendChild(row); b.row = row;
-    row.addEventListener('mouseenter', () => tint(b.nodes, true));
-    row.addEventListener('mouseleave', () => tint(b.nodes, false));
+    row.title = 'Hover to highlight in the scene; shift-click a built-in in the scene to hide it';
+    row.addEventListener('mouseenter', () => setHotBuiltin(k));
+    row.addEventListener('mouseleave', () => setHotBuiltin(null));
     row.querySelector('input').addEventListener('change', e => { setBuiltin(k, e.target.checked); markDirty(); });
   });
 }
@@ -354,7 +365,7 @@ const HOT = new THREE.Color(1.0, 0.82, 0.45), WHITE = new THREE.Color(1, 1, 1);
 function tint(nodes, on) {
   nodes.forEach(n => n.traverse(o => { if (o.isMesh) o.material.color.copy(on ? HOT : WHITE); }));
 }
-let hotId = null, selId = null;
+let hotId = null, selId = null, hotBuiltin = null;
 const hotBox = new THREE.BoxHelper(undefined, 0xffc850); hotBox.visible = false; scene.add(hotBox);
 const selBox = new THREE.BoxHelper(undefined, 0x66ccff); selBox.visible = false; scene.add(selBox);
 function setHot(id) {
@@ -365,16 +376,31 @@ function setHot(id) {
   if (it && it.pivot) { tint([it.pivot], true); it.row.classList.add('hot'); hotBox.setFromObject(it.pivot); hotBox.visible = it.pivot.visible; }
   else hotBox.visible = false;
 }
+// Built-ins highlight on hover too (both ways: list row <-> scene), so a
+// relief piece or a solid block can be found and switched off from the scene.
+function setHotBuiltin(key) {
+  if (hotBuiltin === key) return;
+  if (hotBuiltin !== null && builtins[hotBuiltin]) { tint(builtins[hotBuiltin].nodes, false); if (builtins[hotBuiltin].row) builtins[hotBuiltin].row.classList.remove('hot'); }
+  hotBuiltin = key;
+  const b = key !== null ? builtins[key] : null;
+  if (b) { tint(b.nodes, true); if (b.row) { b.row.classList.add('hot'); b.row.scrollIntoView({ block: 'nearest' }); } }
+}
 
 const ray = new THREE.Raycaster(), ptr = new THREE.Vector2();
+// Returns { id } for an object, { builtin: key } for a built-in, or null.
 function pick(ev) {
   ptr.set((ev.clientX / innerWidth) * 2 - 1, -(ev.clientY / innerHeight) * 2 + 1);
   ray.setFromCamera(ptr, camera);
   const targets = Object.values(items).filter(i => i.pivot && i.pivot.visible).map(i => i.pivot);
-  const hit = ray.intersectObjects(targets, true)[0];
+  const bnodes = [];
+  for (const [k, b] of Object.entries(builtins)) b.nodes.forEach(n => { if (n.visible) { n.userData.builtinKey = k; bnodes.push(n); } });
+  const hit = ray.intersectObjects(targets.concat(bnodes), true)[0];
   if (!hit) return null;
-  for (const [id, it] of Object.entries(items)) {
-    let o = hit.object; while (o) { if (o === it.pivot) return parseInt(id); o = o.parent; }
+  let o = hit.object;
+  while (o) {
+    if (o.userData && o.userData.builtinKey) return { builtin: o.userData.builtinKey };
+    for (const [id, it] of Object.entries(items)) if (o === it.pivot) return { id: parseInt(id) };
+    o = o.parent;
   }
   return null;
 }
@@ -383,12 +409,16 @@ renderer.domElement.addEventListener('pointerdown', e => { downAt = [e.clientX, 
 renderer.domElement.addEventListener('pointermove', e => {
   if (e.buttons || performance.now() - lastMove < 60) return;
   lastMove = performance.now();
-  const id = pick(e); setHot(id);
+  const p = pick(e);
+  const id = (p && p.id !== undefined) ? p.id : null;
+  setHot(id); setHotBuiltin(p && p.builtin ? p.builtin : null);
   if (id !== null && items[id].row) items[id].row.scrollIntoView({ block: 'nearest' });
 });
 renderer.domElement.addEventListener('pointerup', e => {
   if (!downAt || Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 4) return;   // a drag, not a click
-  const id = pick(e); if (id !== null) select(id);
+  const p = pick(e);
+  if (p && p.id !== undefined) select(p.id);
+  else if (p && p.builtin && e.shiftKey) { setBuiltin(p.builtin, false); markDirty(); }   // shift-click hides a built-in
 });
 
 // ---------------------------------------------------------------- edits

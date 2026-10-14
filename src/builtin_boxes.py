@@ -108,7 +108,7 @@ def find_faces(points: np.ndarray, keep: np.ndarray, layout: rl.RoomLayout,
 
 
 def face_to_box(face: Dict, layout: rl.RoomLayout, points: np.ndarray, valid: np.ndarray,
-                inset_frac: float = 0.008, slab_frac: float = 0.04) -> Dict:
+                inset_frac: float = 0.008, slab_frac: float = 0.04, max_depth_ratio: float = 1.5) -> Dict:
     """Extrude a face away from its normal to the room's shell.
 
     Returns ``{"min", "max", "axis", "sign", "thin"}``. The box is thinned
@@ -135,7 +135,17 @@ def face_to_box(face: Dict, layout: rl.RoomLayout, points: np.ndarray, valid: np
 
     thin = False
     depth = abs(front - back)
+    face_size = float(max(np.asarray(face["hi"]) - np.asarray(face["lo"])))
     if axis != 1 and depth > 0.45 * dims[axis]:
+        thin = True
+    elif depth > max_depth_ratio * face_size:
+        # A solid is not much deeper than its visible face is wide or tall.
+        # The top of a chair back or the end of a desk, read as a small
+        # face in mid-room, used to be extruded all the way to the far
+        # wall: a rod across the classroom. It becomes a block as deep as
+        # it is large instead.
+        b = front - sign * max_depth_ratio * face_size
+        lo[axis], hi[axis] = min(front, b), max(front, b)
         thin = True
     else:
         # free-space check: observed points strictly inside the box

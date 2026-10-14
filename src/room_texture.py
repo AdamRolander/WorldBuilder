@@ -218,7 +218,7 @@ def _detrend(patch: np.ndarray, rows: bool) -> np.ndarray:
 
 
 def synthesize_fill(tex: np.ndarray, visible: np.ndarray, rows: bool = False,
-                    max_bands: int = 4) -> Tuple[Optional[np.ndarray], str]:
+                    max_bands: int = 4, detail_clip: float = 24.0) -> Tuple[Optional[np.ndarray], str]:
     """Predict a whole surface from the part of it that was seen.
 
     ``rows=False`` (floors, ceilings): the material is the same in every
@@ -239,25 +239,50 @@ def synthesize_fill(tex: np.ndarray, visible: np.ndarray, rows: bool = False,
         if (r1 - r0) * (c1 - c0) < 0.003 * th * tw or min(r1 - r0, c1 - c0) < 12:
             return None, "none"
         patch = tex[r0:r1, c0:c1]
-        if not _texture_like(patch, rows=False):
-            return None, "none"
-        fill = np.pad(_detrend(patch, rows=False), ((r0, th - r1), (c0, tw - c1), (0, 0)), mode="symmetric")
-        return fill.astype(np.float32), "tiled"
-
-    # Colour per row: the median of what was seen in that row, so the
-    # material that covers most of the wall at that height wins (a cream
-    # panel beside a window does not repaint the papered wall above it).
-    need = max(8, int(0.02 * tw))
-    counts = visible.sum(axis=1)
-    rows_ok = np.flatnonzero(counts >= need)
-    if not len(rows_ok):
+        flat = _detrend(patch, rows=False)
+        if _texture_like(patch, rows=False):
+            fill = np.pad(flat, ((r0, th - r1), (c0, tw - c1), (0, 0)), mode="symmetric")
+            return fill.astype(np.float32), "tiled"
+        # Shadows and highlights make a tiled floor fail the test even when
+        # it is a material. If the structure is moderate (a shadow, not a
+        # hard edge) and the grain left after removing the low frequencies
+        # has none, that grain is repeated at reduced contrast, so what does
+        # leak through does not stamp itself across the room. A flat median
+        # colour (the old fallback) lost every floor pattern and left the
+        # seen patch as a blotch.
+        if _texture_like(patch, rows=False, max_residual=36.0) and _texture_like(flat, rows=False):
+            base = np.median(patch.reshape(-1, 3).astype(np.float32), axis=0)
+            soft = base + 0.5 * np.clip(flat - base, -detail_clip, detail_clip)
+            fill = np.pad(soft, ((r0, th - r1), (c0, tw - c1), (0, 0)), mode="symmetric")
+            return fill.astype(np.float32), "tiled-soft"
         return None, "none"
-    base = np.zeros((th, 3), np.float32)
+
+    # Colour per row, from the wall's *material* only. The material is the
+    # colour most of the seen wall has; a row whose seen texels are mostly
+    # a window, a door or a picture takes the material colour rather than
+    # its own median, otherwise every such row becomes a pale stripe across
+    # the whole wall (a window at mid-height repainted the unseen walls as
+    # horizontal streaks). The profile is then smoothed over a few percent
+    # of the height: row medians jump from row to row as objects hide
+    # different parts of the wall, and tiled sideways those jumps read as
+    # streaks; skirting and panelling bands are wider than the filter.
+    from scipy import ndimage
+    need = max(8, int(0.02 * tw))
+    seen_px = tex[visible].astype(np.float32)
+    if len(seen_px) < need:
+        return None, "none"
+    material = np.median(seen_px, axis=0)
+    # tolerance relative to the material's brightness: on a dark wall a
+    # window frame is only 40 levels lighter and must not count
+    tol = float(np.clip(0.3 * material.mean(), 12.0, 40.0))
+    is_mat = visible & (np.abs(tex.astype(np.float32) - material).mean(axis=-1) < tol)
+    counts = is_mat.sum(axis=1)
+    rows_ok = np.flatnonzero(counts >= need)
+    base = np.tile(material, (th, 1)).astype(np.float32)
     for r in rows_ok:
-        base[r] = np.median(tex[r, visible[r]].astype(np.float32), axis=0)
-    missing = np.setdiff1d(np.arange(th), rows_ok)
-    if len(missing):
-        base[missing] = base[rows_ok[np.argmin(np.abs(rows_ok[None, :] - missing[:, None]), axis=1)]]
+        base[r] = np.median(tex[r, is_mat[r]].astype(np.float32), axis=0)
+    k = max(3, int(0.08 * th) | 1)
+    base = ndimage.median_filter(base, size=(k, 1), mode="nearest")
     # Detail on top: visible rectangles of that same material, tiled sideways.
     detail = np.zeros((th, tw, 3), np.float32)
     free = np.ones(th, bool)
@@ -274,6 +299,9 @@ def synthesize_fill(tex: np.ndarray, visible: np.ndarray, rows: bool = False,
         if float(np.abs(row_col - base[r0:r1]).mean()) > 20.0 or not _texture_like(patch, rows=True):
             continue                          # another material, or not a material at all
         d = _detrend(patch, rows=True) - row_col[:, None, :]
+        # material grain is small; anything larger is an edge or a shadow
+        # that would otherwise repeat along the wall
+        d = np.clip(d, -detail_clip, detail_clip)
         detail[r0:r1] = np.pad(d, ((0, 0), (c0, tw - c1), (0, 0)), mode="symmetric")
         textured = True
     return base[:, None, :] + detail, "tiled" if textured else "banded"
@@ -281,7 +309,7 @@ def synthesize_fill(tex: np.ndarray, visible: np.ndarray, rows: bool = False,
 
 def fill_hidden(tex: np.ndarray, visible: np.ndarray, fallback_rgb=(200, 200, 200), rows: bool = False,
                 quality: Optional[np.ndarray] = None, donor: Optional[np.ndarray] = None,
-                return_fill: bool = False, source: Optional[np.ndarray] = None):
+                return_fill: bool = False, source: Optional[np.ndarray] = None, min_quality: float = 0.35):
     """Complete a plane texture. Returns ``(texture, how)`` (plus the pure
     synthesized fill when ``return_fill``), ``how`` in {"complete",
     "tiled", "banded", "donor", "median", "fallback"}.
@@ -311,8 +339,11 @@ def fill_hidden(tex: np.ndarray, visible: np.ndarray, fallback_rgb=(200, 200, 20
     sharp = visible
     if quality is not None and visible.any():
         ref = float(np.percentile(quality[visible], 90))
-        cand = visible & (quality >= 0.25 * ref)
-        if cand.sum() >= 0.25 * visible.sum():
+        # relative to the best of this surface, and never below a third of
+        # a photo pixel per texel: a window seen edge-on would otherwise be
+        # the only "seen" part of a wall and be dragged across all of it
+        cand = visible & (quality >= max(0.25 * ref, min_quality))
+        if cand.sum() >= 0.25 * visible.sum() or cand.sum() >= 0.003 * visible.size:
             sharp = cand
     src = visible if source is None else (visible & source)
     fill, how = synthesize_fill(tex, sharp & src, rows=rows)
@@ -326,7 +357,7 @@ def fill_hidden(tex: np.ndarray, visible: np.ndarray, fallback_rgb=(200, 200, 20
         else:
             fill = np.tile(np.median(tex[visible], axis=0).astype(np.float32), (th, tw, 1))
             how = "median"
-    pure = fill if how in ("tiled", "banded") else None
+    pure = fill if how in ("tiled", "tiled-soft", "banded") else None
     if frac > 0.999 and sharp is visible:
         return _ret(tex, "complete", pure)
     # Feather: observed texels fade into the prediction over a few percent
@@ -621,11 +652,42 @@ def build_relief(points_aligned: np.ndarray, valid: np.ndarray, owner: np.ndarra
         # row; close those gaps so the terrain is a surface and not stripes.
         cell |= ndimage.binary_closing(cell, structure=np.ones((3, 3), bool), iterations=2) & have_points
     lab, n = ndimage.label(cell)
+    dropped_floating = 0
     if n:
         sizes = ndimage.sum(cell, lab, index=np.arange(1, n + 1))
         good = 1 + np.flatnonzero(sizes >= max(8, min_component_frac * cell.size))
+        if not terrain:
+            # A small piece that touches neither the floor, a wall nor the
+            # ceiling, and is not part of a larger surface, is a fragment of
+            # something the detector did not list (the back and the legs of
+            # an unsegmented chair, with nothing in between). Built-ins are
+            # attached; floating fragments are not, and as 2.5D skins they
+            # look worse than nothing. The gap they leave is filled by the
+            # shell behind them.
+            H = float(mx[1] - mn[1])
+            keep_ids = []
+            for cid in good:
+                sel = lab == cid
+                pts = Pg[:-1, :-1][sel]
+                ext = float(np.max(pts.max(0) - pts.min(0)))
+                if ext >= 0.25 * H:
+                    keep_ids.append(cid); continue
+                near_floor = float(pts[:, 1].min()) <= mn[1] + 0.03 * H
+                near_ceiling = float(pts[:, 1].max()) >= mx[1] - 0.03 * H
+                near_wall = False
+                for pname, pl in planes.items():
+                    if pname in ("floor", "ceiling") or not pl.get("evidence"):
+                        continue
+                    d = (pts - pl["o"]) @ pl["n"]
+                    if float(np.min(d)) <= 0.03 * float(max(dims)):
+                        near_wall = True; break
+                if near_floor or near_ceiling or near_wall:
+                    keep_ids.append(cid)
+                else:
+                    dropped_floating += 1
+            good = np.asarray(keep_ids, int)
         cell &= np.isin(lab, good)
-        order = good[np.argsort(-sizes[good - 1])]
+        order = good[np.argsort(-sizes[good - 1])] if len(good) else good
     if not cell.any():
         return empty
 
@@ -679,7 +741,7 @@ def build_relief(points_aligned: np.ndarray, valid: np.ndarray, owner: np.ndarra
         if k >= max_pieces - 1:
             break
     return meshes, {"vertices": int(total_v), "faces": int(total_f), "stride": s, "pieces": len(meshes),
-                    "piece_info": pieces, "filled_hole_px": filled,
+                    "piece_info": pieces, "filled_hole_px": filled, "dropped_floating": dropped_floating,
                     "frame_fraction": round(float(keep.mean()), 3)}
 
 

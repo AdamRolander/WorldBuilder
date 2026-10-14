@@ -176,15 +176,36 @@ def _yaw(a: float) -> np.ndarray:
     return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
 
 
+_INWARD = {"x_min": np.array([1.0, 0.0]), "x_max": np.array([-1.0, 0.0]),
+           "z_min": np.array([0.0, 1.0]), "z_max": np.array([0.0, -1.0])}
+
+
 def _fit_copy(ev: SceneEvidence, ex_verts: np.ndarray, mask: np.ndarray, centre_xz: np.ndarray,
-              bottom_y: float) -> Tuple[float, float, np.ndarray]:
+              bottom_y: float, wall_side: Optional[str] = None) -> Tuple[float, float, np.ndarray]:
     """Best (score, yaw, xz) for a copy of the exemplar standing at
     ``bottom_y`` near ``centre_xz``. ``ex_verts`` are the exemplar's world
-    vertices (subsampled)."""
+    vertices (subsampled).
+
+    A silhouette cannot tell a bookshelf facing the room from one facing
+    the wall (``yaw`` and ``yaw + 180°`` give the same outline against a
+    wall), so when the instance stands against an observed wall
+    (``wall_side``), headings that turn the exemplar's photographed side —
+    the side that faced the camera — toward that wall are not tried.
+    """
     lo, hi = ex_verts.min(0), ex_verts.max(0)
     c = np.array([0.5 * (lo[0] + hi[0]), lo[1], 0.5 * (lo[2] + hi[2])])
     local = ex_verts - c                                   # origin at the bottom centre
     foot = float(max(hi[0] - lo[0], hi[2] - lo[2]))
+    front = -np.array([c[0], c[2]])                        # from the exemplar toward the camera (origin)
+    front = front / max(np.linalg.norm(front), 1e-9)
+    inward = _INWARD.get(wall_side)
+
+    def faces_room(yaw):
+        if inward is None:
+            return True
+        cy, sy = np.cos(yaw), np.sin(yaw)
+        f = np.array([cy * front[0] + sy * front[1], -sy * front[0] + cy * front[1]])   # _yaw(yaw) @ front, XZ
+        return float(f @ inward) > 0.3
 
     def score(yaw, xz):
         v = local @ _yaw(yaw).T + np.array([xz[0], bottom_y, xz[1]])
@@ -193,6 +214,8 @@ def _fit_copy(ev: SceneEvidence, ex_verts: np.ndarray, mask: np.ndarray, centre_
     best = (-1.0, 0.0, np.asarray(centre_xz, float))
     offsets = np.array([-0.4, -0.2, 0.0, 0.2, 0.4]) * foot
     for yaw in np.arange(0, 2 * np.pi, np.pi / 8):
+        if not faces_room(yaw):
+            continue
         for dx in offsets:
             for dz in offsets:
                 xz = centre_xz + np.array([dx, dz])
@@ -210,12 +233,14 @@ def _fit_copy(ev: SceneEvidence, ex_verts: np.ndarray, mask: np.ndarray, centre_
 
 
 def share_instances(ev: SceneEvidence, objs: List[PlacedObject], image_small: np.ndarray,
-                    min_group: int = 3, max_color_dist: float = 0.25, max_score_loss: float = 0.05,
+                    min_group: int = 2, max_color_dist: float = 0.25, max_score_loss: float = 0.05,
                     min_exemplar_iou: float = 0.5, max_shape_diff: float = 0.2,
                     min_gain: float = 0.05) -> List[Dict]:
     """Replace repeated objects by re-posed copies of the best-observed one.
 
-    A group is ``min_group`` or more objects with the same label; within it
+    A group is ``min_group`` or more objects with the same label (two is
+    enough: the exemplar tests below are what protect against a bad
+    swap, not the group size); within it
     the exemplar is the instance that is largest in the photo, fits its
     mask, is not cut by the frame and is barely occluded. Another instance
     takes the exemplar's mesh when (a) its mask has a similar mean colour
@@ -282,7 +307,7 @@ def share_instances(ev: SceneEvidence, objs: List[PlacedObject], image_small: np
             # where does it stand: on the floor if the exemplar does, else at its own bottom
             bottom = ex_full_lo[1] if ex.r.get('support') == 'floor' and ev.floor_y is not None else float(o.lo[1])
             centre = np.array([0.5 * (o.lo[0] + o.hi[0]), 0.5 * (o.lo[2] + o.hi[2])])
-            score, yaw, xz = _fit_copy(ev, ex_fast, m, centre, bottom)
+            score, yaw, xz = _fit_copy(ev, ex_fast, m, centre, bottom, wall_side=o.r.get('against_wall'))
             fragment = False
             if short:
                 lo_e, hi_e = ex_fast.min(0), ex_fast.max(0)
@@ -295,6 +320,16 @@ def share_instances(ev: SceneEvidence, objs: List[PlacedObject], image_small: np
             # sliver explained it; a complete instance must be explained
             # *better*, otherwise swapping it gains nothing and risks a lot.
             if score < (0.8 * own if fragment else own + min_gain) or score < 0.15:
+                continue
+            # The occlusion-aware score excuses pixels hidden behind nearer
+            # things, so a copy that is far too big can pass by burying its
+            # excess behind its neighbours (a portrait copied onto a small
+            # frame's mask). The plain silhouette IoU does not excuse that.
+            plain_own = mask_iou(splat(ev, o.fast_verts)[0], m)
+            lo_e, hi_e = ex_fast.min(0), ex_fast.max(0)
+            c_e = np.array([0.5 * (lo_e[0] + hi_e[0]), lo_e[1], 0.5 * (lo_e[2] + hi_e[2])])
+            copy_v = (ex_fast - c_e) @ _yaw(yaw).T + np.array([xz[0], bottom, xz[1]])
+            if mask_iou(splat(ev, copy_v)[0], m) < max(0.7 * plain_own, 0.12):
                 continue
             undo[o.id] = (o.model, o.snapshot(), dict(o.r))
             # adopt the exemplar's mesh and pose, then turn and move it
