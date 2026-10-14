@@ -18,8 +18,39 @@ versions follow [SemVer](https://semver.org/) (0.x: minor = features, patch = fi
   rotation / scale, one checkbox per piece of built-in structure, edits saved to
   `edits.json` (`src/scene_edits.py`) and applied by the GLB endpoints and MuJoCo export.
 - Blender add-on 0.3.0: "Review in browser".
+- A `window` structural mask (SAM 3). Windows are painted on the wall where seen but never
+  teach a wall its material; detections that are the view through a window (trees,
+  buildings, blinds in the frame) are left to the wall; window regions that are the glass
+  of a cabinet or a display case are not windows. `scripts/add_structural_masks.py` adds
+  the mask to scenes segmented before it existed.
+- Glass: an object the photo sees through and that the detector describes as glass is
+  exported translucent, and the walls behind it keep their texture.
+- Placement: resting objects stand upright; objects follow a supporter that later moved;
+  objects against a wall are squared to it, and long furniture to the room's axes; wall
+  contact climbs over an object's own (unsegmented) top surface; a short mesh whose mask
+  reaches down to its support is lengthened down to it.
+- `scripts/detect_only.py`: stage 1 for a batch, so the VLM server can be stopped before
+  SAM 3 / SAM 3D load.
 
 ### Changed
+
+- The detector is told that built-in furniture (islands, cabinet runs, shelving, vanities,
+  range hoods) is an asset too; up to 24 instances per label (was 12).
+- Room fill: hidden patches take the local colour of the seen surface around them (no
+  silhouettes of lamps and chairs on the walls); regular floor and ceiling patterns tile
+  by whole periods in phase with the seen part; other materials tile only their fine
+  detail; an unseen ceiling takes the colour of the walls' top band instead of white.
+- Built-in blocks: a vertical face is extruded no deeper than it is tall or wide, nor
+  deeper than its top was seen to run (a bar counter no longer reaches the back wall).
+- Photo re-projection onto objects only where the photographed side is flat or a shallow
+  facade facing the camera (bookcases keep their books; sofas keep SAM 3D's texture).
+- Same-label masks: a mask containing two or more same-label masks is a group and is
+  dropped for its members (a row of chairs is no longer one long bar); instance sharing
+  checks colour make-up, and a flat object's face, before copying a mesh.
+- Detections lying on the observed ceiling plane (tiles, grilles, flush panels) are the
+  ceiling's surface.
+
+### Changed (earlier in this release)
 - The relief is exported as one mesh per connected piece (`room_relief_00`, …), each with
   its own cropped texture.
 - Placement is 2–3× faster (silhouette scoring works on the object's bounding box);
