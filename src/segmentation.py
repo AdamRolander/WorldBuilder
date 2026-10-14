@@ -282,6 +282,18 @@ class SAM3Segmenter:
                     print(f"  '{p}': {len(scores)} candidate(s)"
                           + (f", best={scores.max():.2f}" if len(scores) else ""))
 
+                # SAM 3 knows short nouns best: "dining chair" can find nothing
+                # where "chair" finds all four stools. The head noun is tried
+                # before the single-box fallback.
+                head = label.split()[-1] if len(label.split()) > 1 else None
+                if not per_label and head and head.lower() not in (q.lower() for q in prompts):
+                    masks, scores, boxes = self.query_text(state, head)
+                    for m, sc in zip(masks, scores, strict=False):
+                        per_label.append({"label": label, "description": description,
+                                          "mask_array": m, "confidence": float(sc),
+                                          "prompt_used": head, "source": "text-head"})
+                    print(f"  '{head}' (head noun): {len(scores)} candidate(s)")
+
                 if not per_label and use_box_fallback and bbox_hint:
                     masks, scores, boxes = self.query_box(state, bbox_hint, W, H)
                     if len(scores):
