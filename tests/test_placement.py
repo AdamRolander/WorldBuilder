@@ -364,3 +364,40 @@ def test_contact_under_an_object_standing_in_front_of_its_edge(scene):
     c = pl.find_contact(ev, lamp)
     assert c is not None and c.kind == "object" and c.supporter == 1
     assert c.y == pytest.approx(BOXES[1][1][1], abs=0.03)
+
+
+def test_a_mask_holding_several_same_label_masks_is_a_group():
+    def m(r0, r1, c0, c1):
+        a = np.zeros((40, 60), bool)
+        a[r0:r1, c0:c1] = True
+        return a
+
+    # a row of three chairs as one mask, two of them also segmented on their own
+    row, a, b = m(10, 30, 2, 58), m(10, 30, 2, 18), m(10, 30, 22, 38)
+    out = pl.contained_parts({1: row, 2: a, 3: b}, {1: "chair", 2: "chair", 3: "chair"})
+    assert list(out) == [1]
+
+
+def test_object_against_a_wall_is_squared_to_it(scene):
+    ev, results, verts = scene
+    r = next(r for r in results if r["id"] == 3)              # the picture on the back wall
+    o = pl.PlacedObject(r, verts[3])
+    o.rotate_about_vertical(np.radians(8.0))
+    assert abs(np.degrees(pl._heading_off(o, 2))) > 7
+    turned = pl.square_to_wall(ev, o, "z_max", max_iou_loss=1.0)
+    assert turned is not None and abs(abs(turned) - 8.0) < 0.5
+    assert abs(np.degrees(pl._heading_off(o, 2))) < 0.5
+
+
+def test_resting_object_is_stood_upright(scene):
+    ev, results, verts = scene
+    r = next(r for r in results if r["id"] == 1)              # the table, on the floor
+    o = pl.PlacedObject(r, verts[1])
+    R = quat_to_matrix(r["rotation_quaternion"])
+    c, s = np.cos(np.radians(6.0)), np.sin(np.radians(6.0))
+    tilt = np.array([[1, 0, 0], [0, c, -s], [0, s, c]])
+    o.set_rotation(matrix_to_quat(R @ tilt))
+    r["support"] = pl.FLOOR
+    out = pl.upright_resting(ev, [o], max_iou_loss=1.0)
+    assert 1 in out and abs(out[1] - 6.0) < 0.5
+    assert pl.upright_rotation(quat_to_matrix(o.r["rotation_quaternion"]))[1] < 0.1

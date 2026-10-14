@@ -258,11 +258,14 @@ def _period(patch: np.ndarray, min_lag: int = 4, min_peak: float = 0.4) -> Tuple
         if best is not None:
             # the longest whole number of repeats in the patch, measured at
             # its own peak: an error of a pixel per period does not add up
-            m = max(1, int(0.95 * n) // best)
+            # (at least one whole period must still overlap, or every lag
+            # near the end of the patch correlates perfectly)
+            m = max(1, (n - best) // best)
             while m > 1:
                 lo_, hi_ = m * best - 3, min(n - 1, m * best + 4)
                 if hi_ > lo_ and float(line[lo_:hi_].max()) >= min_peak:
-                    best = lo_ + int(np.argmax(line[lo_:hi_]))
+                    seg = line[lo_:hi_] - 1e-3 * np.abs(np.arange(lo_, hi_) - m * best)
+                    best = lo_ + int(np.argmax(seg))
                     break
                 m -= 1
         out.append(best)

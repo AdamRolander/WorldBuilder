@@ -193,3 +193,32 @@ def test_builtin_box_under_a_counter_top():
     depth_a = np.where(valid, ((P_a @ layout.R_total) @ rl.OPENCV_TO_WORLD.T)[..., 2], np.nan)
     meshes, boxes = bb.build_builtins(P_a, counter, valid, layout, K, colors, depth_a)
     assert boxes and any(n.endswith("_face") for n in meshes) and any(n.endswith("_body") for n in meshes)
+
+
+def test_regular_pattern_is_tiled_in_phase_and_a_window_edge_is_not_a_material():
+    y, x = np.mgrid[:120, :200]
+    checker = ((((x // 20) + (y // 20)) % 2) * 200 + 30).astype(np.uint8)
+    checker = np.stack([checker] * 3, -1)
+    assert rt._stationary(checker)
+    pr, pc = rt._period(checker)
+    assert pr % 40 == 0 and pc % 40 == 0                    # whole periods of the 40-px pattern
+    # tiled from a patch that sits at (r0, c0) = (40, 60) in a larger plane: same phase everywhere
+    tiled = rt._tile_periodic(checker[40:120, 60:200], 40, 60, 300, 400)
+    yy, xx = np.mgrid[:300, :400]
+    expect = ((((xx // 20) + (yy // 20)) % 2) * 200 + 30)
+    assert np.mean(np.abs(tiled[..., 0] - expect) < 1) > 0.97
+    half_window = np.full((120, 200, 3), 180, np.uint8)
+    half_window[:, :100] = 60
+    assert not rt._stationary(half_window)
+
+
+def test_hidden_patch_takes_the_colour_around_it():
+    th, tw = 120, 200
+    ramp = np.linspace(80, 200, tw)[None, :, None] * np.ones((th, 1, 3))   # light falling off across a wall
+    tex = ramp.astype(np.uint8)
+    vis = np.ones((th, tw), bool)
+    vis[40:80, 150:180] = False                                 # a lamp in front of the bright end
+    fill = np.full((th, tw, 3), float(np.median(tex)), np.float32)
+    out = rt._match_local(tex, fill, vis)
+    hole = out[40:80, 150:180].mean()
+    assert abs(hole - tex[40:80, 150:180].mean()) < 15          # the bright end's colour, not the average
