@@ -193,6 +193,10 @@ function registerObject(id, node) {
   scene.add(pivot);
   bbox.union(box);
   items[id] = Object.assign(items[id] || {}, { pivot, home: c.clone(), size: box.getSize(new THREE.Vector3()), minY: box.min.y });
+  const info = OBJECTS.find(e => e.id === id);
+  if (info && info.glass) {       // transparent in the photo: see the room through it
+    node.traverse(o => { if (o.isMesh) { o.material.transparent = true; o.material.opacity = 0.3; o.material.depthWrite = false; } });
+  }
 }
 
 function registerRoomNode(o) {
@@ -642,7 +646,8 @@ def generate_viewer(output_dir: Path, results: List[Dict], room_file: Optional[s
         except ValueError:
             rel = f"3d_models/{p.name}"
         entries.append({"id": r.get("id"), "file": rel, "label": r["label"],
-                        "confidence": r.get("confidence", 0), "supported_by": r.get("supported_by")})
+                        "confidence": r.get("confidence", 0), "supported_by": r.get("supported_by"),
+                        "glass": bool(r.get("glass"))})
     layout = None
     if layout_file and (output_dir / layout_file).exists():
         try:

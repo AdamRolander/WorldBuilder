@@ -752,6 +752,109 @@ def settle_unsupported(ev: SceneEvidence, objs: List[PlacedObject], room: Option
     return out
 
 
+def restack(ev: SceneEvidence, objs: List["PlacedObject"], before: Dict[int, np.ndarray],
+            max_iou_loss: float = 0.12) -> Dict[int, float]:
+    """Keep what stands on an object on it after the object moved.
+
+    Contacts are resolved early; later passes then move supporters (a
+    cabinet pushed back to its wall, a table slid inside the room, a sofa
+    stood upright), and whatever was put on them stays where it was: the
+    plant hovers over the gap behind the vanity. ``before`` holds every
+    object's bottom-centre when the contacts were made. A dependent moves
+    sideways by as much as its supporter did (if it did not move itself)
+    and is put back down on the supporter's top under its footprint.
+    Supporters are handled before what stands on them. Returns
+    ``{id: vertical correction}``.
+    """
+    by_id = {o.id: o for o in objs}
+    H = ev.room_height
+    out: Dict[int, float] = {}
+    done: set = set()
+
+    def bottom_centre(o):
+        lo, hi = o.lo, o.hi
+        return np.array([0.5 * (lo[0] + hi[0]), lo[1], 0.5 * (lo[2] + hi[2])])
+
+    def visit(o, depth=0):
+        if o.id in done or depth > 8:
+            return
+        done.add(o.id)
+        sid = o.r.get('supported_by')
+        if o.r.get('support') != "object" or sid not in by_id:
+            return
+        sup = by_id[sid]
+        visit(sup, depth + 1)
+        snap = o.snapshot()
+        iou0 = fit_iou(ev, o)
+        if sid in before and o.id in before:
+            moved_sup = bottom_centre(sup) - before[sid]
+            moved_own = bottom_centre(o) - before[o.id]
+            d = np.array([moved_sup[0], 0.0, moved_sup[2]])
+            if np.linalg.norm(d) > 0.005 * H and np.linalg.norm(moved_own[[0, 2]]) < 0.5 * np.linalg.norm(d):
+                o.translate(d)
+        top = local_top(sup, o.lo, o.hi, float(o.lo[1]) + max(0.25 * o.height, 0.04 * H))
+        if top is None:
+            o.restore(snap)
+            return
+        dy = top - float(o.lo[1])
+        if abs(dy) > 0.005 * H:
+            o.translate([0, dy, 0])
+        iou1 = fit_iou(ev, o)
+        if iou0 is not None and iou1 is not None and iou1 < iou0 - max_iou_loss:
+            o.restore(snap)
+            return
+        if abs(dy) > 0.005 * H:
+            out[o.id] = round(float(dy), 4)
+            o.r['restacked'] = round(float(dy), 4)
+
+    for o in objs:
+        visit(o)
+    return out
+
+
+def upright_resting(ev: SceneEvidence, objs: List["PlacedObject"], max_tilt_deg: float = 15.0,
+                    max_iou_loss: float = 0.10) -> Dict[int, float]:
+    """Anything resting on a horizontal surface stands upright.
+
+    ``correct_upright`` runs before anything is known about support and
+    keeps a tilt whenever removing it costs a little silhouette match, which
+    leaves furniture standing on one edge (a vanity 5° off the floor). Once
+    an object is known to rest on the floor or on another surface, a small
+    tilt is pose noise by physics: it is removed, the bottom put back on
+    the support and the object re-centred sideways so its outline stays on
+    the mask. Large tilts (a leaning ladder) are kept. Returns ``{id: tilt}``.
+    """
+    out: Dict[int, float] = {}
+    for o in objs:
+        if o.r.get('support') is None or o.r.get('upright_corrected'):
+            continue
+        R_new, tilt = upright_rotation(quat_to_matrix(o.r['rotation_quaternion']))
+        if tilt < 0.5 or tilt > max_tilt_deg:
+            continue
+        before = fit_iou(ev, o)
+        snap = o.snapshot()
+        bottom = float(o.lo[1])
+        o.set_rotation(matrix_to_quat(R_new))
+        o.translate([0, bottom - float(o.lo[1]), 0])
+        size = float(np.linalg.norm(o.hi - o.lo))
+        upright = o.snapshot()
+        best = (fit_iou(ev, o), upright)
+        for dx in (-0.04, -0.02, 0.02, 0.04):
+            o.restore(upright)
+            o.translate([dx * size, 0, 0])
+            sc = fit_iou(ev, o)
+            if sc is not None and (best[0] is None or sc > best[0]):
+                best = (sc, o.snapshot())
+        if before is not None and best[0] is not None and best[0] < before - max_iou_loss:
+            o.restore(snap)
+            continue
+        o.restore(best[1])
+        o.r['upright_corrected'] = True
+        o.r['upright_resting'] = round(tilt, 2)
+        out[o.id] = round(tilt, 2)
+    return out
+
+
 def wall_contact(ev: SceneEvidence, obj: "PlacedObject", room: Dict, band_frac: float = 0.02,
                  min_pixels: int = 12) -> Optional[str]:
     """The observed wall an object stands against, if the photo shows one.
@@ -792,21 +895,90 @@ def wall_contact(ev: SceneEvidence, obj: "PlacedObject", room: Dict, band_frac: 
     if ev.owner is not None:
         keep &= (ev.owner[rr, cc] == 0) | (ev.owner[rr, cc] == obj.id)
     rr, cc, ze = rr[keep], cc[keep], ze[keep]
-    if len(rr) < min_pixels:
-        return None
     n = ev.normals[rr, cc]
     z = ev.depth[rr, cc]
     with np.errstate(invalid="ignore"):
         vertical = np.abs(n[:, 1]) < 0.35
         same_depth = np.abs(z / ze - 1.0) <= 0.08
-    sel = vertical & same_depth
+    sel = vertical & same_depth if len(rr) >= min_pixels else np.zeros(len(rr), bool)
     # Part of the band is often the object's own top surface seen from above
     # (a counter top behind its front lip), so a third of it being wall at
     # the right depth is enough — as long as the wall pixels agree among
     # themselves on the depth.
-    if int(sel.sum()) < max(min_pixels, 0.3 * len(rr)) or int(vertical.sum()) and sel.sum() < 0.6 * vertical.sum():
+    if len(rr) and int(sel.sum()) >= max(min_pixels, 0.3 * len(rr)) and not (int(vertical.sum()) and sel.sum() < 0.6 * vertical.sum()):
+        side = _wall_side(ev.points[rr[sel], cc[sel]], n[sel], room)
+        if side is not None:
+            return side
+    # The mask may stop at the front of the object's top (a vanity whose
+    # marble top was not segmented, a desk seen from above): then the pixels
+    # above the edge are that top, an upward-facing surface running back
+    # continuously from the edge. Follow it up the image; where it meets a
+    # vertical surface at the depth it reached, that surface is behind the
+    # object. Things standing on the top are stepped over.
+    pts, nrm = _climb_top_surface(ev, obj, m, cols, top, max_rows=int(0.25 * h))
+    if len(pts) >= max(3, 0.3 * len(cols)):
+        return _wall_side(pts, nrm, room)
+    return None
+
+
+def _climb_top_surface(ev: SceneEvidence, obj: "PlacedObject", m: np.ndarray, cols: np.ndarray, top: np.ndarray,
+                       max_rows: int, min_up_rows: int = 2):
+    """Per column, walk up from the mask's top edge over an upward-facing
+    surface (normal y > 0.6) whose depth grows smoothly, and return the first
+    vertical surface point reached at a continuous depth (one per column)."""
+    h, w = ev.hw
+    own_area = int(m.sum())
+    smaller = None
+    if ev.owner is not None:
+        ids = [i for i, mm in ev.masks.items() if i != obj.id and int(mm.sum()) < own_area]
+        smaller = np.isin(ev.owner, ids) if ids else np.zeros((h, w), bool)
+    pts, nrm = [], []
+    for c, t in zip(cols, top, strict=True):
+        z_prev = ev.depth[t, c]
+        if not np.isfinite(z_prev):
+            continue
+        n_up = 0
+        r = t - 1
+        stop = max(0, t - max_rows)
+        lip = max(4, int(0.03 * h))               # the top's own front face, a few percent of the frame
+        while r >= stop:
+            if m[r, c] or (smaller is not None and smaller[r, c]):
+                r -= 1
+                continue                          # its own pixels, or a thing standing on the top
+            if not ev.valid[r, c] or (ev.owner is not None and ev.owner[r, c] not in (0, obj.id)):
+                break                             # a larger object in the way: nothing to conclude
+            z = ev.depth[r, c]
+            ny = ev.normals[r, c, 1]
+            front = n_up == 0 and t - r <= lip    # still on the edge / front lip of the top
+            hi_ratio = 1.25 if n_up else 1.06     # a top seen at a grazing angle recedes fast
+            if not (z_prev * 0.97 <= z <= z_prev * hi_ratio):
+                break                             # depth jumps: not one continuous surface
+            if ny > 0.6:
+                n_up += 1
+                z_prev = z
+                r -= 1
+                continue
+            if abs(ny) < 0.35 and n_up >= min_up_rows:
+                # the corner's normals are smeared; take the point a few rows up
+                r2 = max(0, r - 3)
+                if ev.valid[r2, c] and abs(ev.normals[r2, c, 1]) < 0.35 and \
+                        abs(ev.depth[r2, c] / z_prev - 1.0) <= 0.08:
+                    pts.append(ev.points[r2, c])
+                    nrm.append(ev.normals[r2, c])
+                break
+            if front:
+                z_prev = z
+                r -= 1
+                continue
+            break
+    return np.asarray(pts).reshape(-1, 3), np.asarray(nrm).reshape(-1, 3)
+
+
+def _wall_side(pts: np.ndarray, nrm: np.ndarray, room: Dict) -> Optional[str]:
+    """Which observed wall a set of vertical surface points lies on, if any."""
+    if len(pts) == 0:
         return None
-    nm = n[sel].mean(axis=0)
+    nm = nrm.mean(axis=0)
     axis = 0 if abs(nm[0]) > abs(nm[2]) else 2
     if abs(nm[axis]) < 0.6:
         return None
@@ -816,10 +988,60 @@ def wall_contact(ev: SceneEvidence, obj: "PlacedObject", room: Dict, band_frac: 
         return None
     wall = room["min"][axis] if side.endswith("min") else room["max"][axis]
     span = float(max(room["max"][0] - room["min"][0], room["max"][2] - room["min"][2]))
-    coord = np.median(ev.points[rr[sel], cc[sel], axis])
+    coord = np.median(pts[:, axis])
     if abs(coord - wall) > 0.04 * span:
         return None                                     # a cabinet front or partition, not the wall
     return side
+
+
+def _heading_off(o: "PlacedObject", axis: int) -> Optional[float]:
+    """Signed angle (radians) about the vertical between the object's model
+    axis nearest the world ``axis`` and that axis; None if the object is not
+    upright (no model axis is vertical)."""
+    R = quat_to_matrix(o.r['rotation_quaternion'])          # rows: model axes in world
+    up = int(np.argmax(np.abs(R[:, 1])))
+    if abs(R[up, 1]) < 0.97:
+        return None
+    horiz = [i for i in range(3) if i != up]
+    best = max(horiz, key=lambda i: abs(R[i, axis]) / max(np.linalg.norm(R[i, [0, 2]]), 1e-9))
+    d = R[best, [0, 2]] * np.sign(R[best, axis] or 1.0)
+    target = np.array([1.0, 0.0]) if axis == 0 else np.array([0.0, 1.0])
+    return float(np.arctan2(d[0] * target[1] - d[1] * target[0], d @ target))
+
+
+def square_to_wall(ev: SceneEvidence, o: "PlacedObject", side: str, max_deg: float = 20.0,
+                   max_iou_loss: float = 0.08) -> Optional[float]:
+    """Turn an object that stands against a wall parallel to it.
+
+    Furniture against a wall is built to stand flush with it; SAM 3D's
+    heading for it is off by a few degrees more often than not, and the
+    back corner then pokes through the wall while the other end stands
+    away from it. The turn is about the object's centre and is kept unless
+    the silhouette match drops. Returns the turn in degrees, or None.
+    """
+    axis = 0 if side.startswith("x") else 2
+    off = _heading_off(o, axis)
+    if off is None or abs(np.degrees(off)) < 1.0 or abs(np.degrees(off)) > max_deg:
+        return None
+    before = fit_iou(ev, o)
+    snap = o.snapshot()
+    best = None
+    for yaw in (off, -off):
+        o.restore(snap)
+        o.rotate_about_vertical(yaw)
+        resid = _heading_off(o, axis)
+        if resid is not None and abs(resid) < 0.25 * abs(off):
+            best = yaw
+            break
+    if best is None:
+        o.restore(snap)
+        return None
+    after = fit_iou(ev, o)
+    if before is not None and after is not None and after < before - max_iou_loss:
+        o.restore(snap)
+        return None
+    o.r['squared_to_wall'] = round(float(np.degrees(best)), 2)
+    return float(np.degrees(best))
 
 
 def push_to_walls(ev: SceneEvidence, objs: List[PlacedObject], room: Dict, max_stretch: float = 1.5,
@@ -844,6 +1066,7 @@ def push_to_walls(ev: SceneEvidence, objs: List[PlacedObject], room: Dict, max_s
         if side is None:
             continue
         o.r['against_wall'] = side
+        square_to_wall(ev, o, side)
         axis = 0 if side.startswith("x") else 2
         wall = room["min"][axis] if side.endswith("min") else room["max"][axis]
         lo, hi = o.lo, o.hi
@@ -858,8 +1081,12 @@ def push_to_walls(ev: SceneEvidence, objs: List[PlacedObject], room: Dict, max_s
         o.translate(d)
         options.append((fit_iou(ev, o), "move", o.snapshot()))
         o.restore(snap)
-        if o.stretch_along(axis, min(max_stretch, (depth + gap) / depth), toward=side):
-            if (depth + gap) / depth > max_stretch:     # stretch as far as allowed, move the rest
+        # Lengthening is for a mesh that came out too shallow: it never makes
+        # the object deeper than it is wide (a chair is not a sofa).
+        lateral = float(hi[2 - axis] - lo[2 - axis])
+        factor = min(max_stretch, (depth + gap) / depth, max(1.0, lateral / depth))
+        if factor > 1.02 and o.stretch_along(axis, factor, toward=side):
+            if (depth + gap) / depth > factor:          # stretch as far as allowed, move the rest
                 lo2, hi2 = o.lo, o.hi
                 rest = (lo2[axis] - wall) if side.endswith("min") else (wall - hi2[axis])
                 d = np.zeros(3); d[axis] = -rest if side.endswith("min") else rest
@@ -1186,7 +1413,9 @@ def place_objects(results: List[Dict], model_verts: Dict[int, np.ndarray], ev: S
             o.restore(snap)
         best = max(options, key=lambda t: -1.0 if t[0] is None else t[0])
         if before is not None and best[0] is not None and best[0] < before - max_iou_loss:
-            o.r.update(supported_by=None, support_source="rejected")
+            o.r.update(supported_by=None, support_source="rejected",
+                       contact_rejected={"y": round(float(target), 4), "kind": c.kind, "iou_before": _round(before),
+                                         "options": {how: _round(sc) for sc, how, _ in options}})
             return
         o.restore(best[2])
         o.r.update(snapped=True, support=c.kind, support_source=f"contact-{best[1]}", support_y=round(target, 4))
@@ -1205,6 +1434,14 @@ def place_objects(results: List[Dict], model_verts: Dict[int, np.ndarray], ev: S
     diag['settled'] = settled
     if settled:
         log("  settled: " + ", ".join(f"{by_id[i].r['label']} ({how})" for i, how in settled.items()))
+
+    stacked_at = {o.id: np.array([0.5 * (o.lo[0] + o.hi[0]), o.lo[1], 0.5 * (o.lo[2] + o.hi[2])]) for o in objs}
+
+    # 4b'. resting objects stand upright
+    diag['upright_resting'] = upright_resting(ev, objs)
+    if diag['upright_resting']:
+        log("  stood upright on their support: " + ", ".join(
+            f"{by_id[i].r['label']} ({t}°)" for i, t in diag['upright_resting'].items()))
 
     # 4c. which objects the photo shows standing against an observed wall
     # (their copies below must keep their backs to it)
@@ -1247,6 +1484,11 @@ def place_objects(results: List[Dict], model_verts: Dict[int, np.ndarray], ev: S
         diag['ceiling_clamped'] = clamp_below_ceiling(ev, objs, room)
         if diag['ceiling_clamped']:
             log(f"  brought {diag['ceiling_clamped']} object(s) down below the observed ceiling")
+    # 5d. what stands on something that moved goes with it
+    diag['restacked'] = restack(ev, objs, stacked_at)
+    if diag['restacked']:
+        log("  put back on their (moved) supporters: " + ", ".join(
+            f"{by_id[i].r['label']}" for i in diag['restacked']))
     diag['moved_in_front'] = enforce_visibility(ev, objs)
     if diag['moved_in_front']:
         log("  moved in front of what hid them: " + ", ".join(
