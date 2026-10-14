@@ -205,6 +205,90 @@ def _texture_like(patch: np.ndarray, rows: bool, max_residual: float = 18.0) -> 
     return float((small - A @ coef).std(axis=0).max()) <= max_residual
 
 
+def _stationary(patch: np.ndarray, min_similarity: float = 0.8) -> bool:
+    """The same material everywhere in the patch, at any scale of pattern.
+
+    ``_texture_like`` judges an 8×8 reduction, which a checkerboard or large
+    tiles alias into "structure". Here the patch is cut into blocks along
+    its longer side (each holding at least one repeat of a tile pattern)
+    and every block must have the same distribution of colours as the
+    whole: a checkerboard passes, a patch that is half window does not.
+    """
+    h, w = patch.shape[:2]
+    if min(h, w) < 16:
+        return False
+    p = patch.reshape(h, w, 3).astype(np.float32)
+    lum = p.mean(axis=2)
+    lo, hi = np.percentile(lum, [1, 99])
+    if hi - lo < 1e-3:
+        return True
+    q = np.clip(((lum - lo) / (hi - lo) * 12).astype(int), 0, 11)
+    n = max(2, min(4, int(round(max(h, w) / max(1, min(h, w))))) + 1)
+    blocks = np.array_split(q, n, axis=0 if h >= w else 1)
+    whole = np.bincount(q.ravel(), minlength=12).astype(np.float64)
+    whole /= whole.sum()
+    for b in blocks:
+        hb = np.bincount(b.ravel(), minlength=12).astype(np.float64)
+        hb /= max(hb.sum(), 1.0)
+        if float(np.sum(np.sqrt(hb * whole))) < min_similarity:
+            return False
+    return True
+
+
+def _period(patch: np.ndarray, min_lag: int = 4, min_peak: float = 0.4) -> Tuple[Optional[int], Optional[int]]:
+    """Repeat length of a pattern along rows and columns (pixels, a whole
+    number of periods), from the patch's autocorrelation; None along an
+    axis with no clear repeat."""
+    g = patch.astype(np.float32).mean(axis=2)
+    g = g - g.mean()
+    h, w = g.shape
+    F = np.fft.rfft2(g, s=(2 * h, 2 * w))
+    ac = np.fft.irfft2(F * np.conj(F), s=(2 * h, 2 * w))
+    ac = ac / max(float(ac[0, 0]), 1e-9)
+    out = []
+    for line, n in ((ac[0, :w], w), (ac[:h, 0], h)):
+        # unbiased: each lag is an average over the overlap only
+        lags = np.arange(n)
+        line = line * n / np.maximum(n - lags, 1)
+        best = None
+        for k in range(min_lag, int(0.7 * n)):
+            if line[k] >= min_peak and line[k] >= line[k - 1] and line[k] >= line[k + 1]:
+                best = k
+                break
+        if best is not None:
+            # the longest whole number of repeats in the patch, measured at
+            # its own peak: an error of a pixel per period does not add up
+            m = max(1, int(0.95 * n) // best)
+            while m > 1:
+                lo_, hi_ = m * best - 3, min(n - 1, m * best + 4)
+                if hi_ > lo_ and float(line[lo_:hi_].max()) >= min_peak:
+                    best = lo_ + int(np.argmax(line[lo_:hi_]))
+                    break
+                m -= 1
+        out.append(best)
+    return out[1], out[0]            # (rows, cols): one or more whole repeats
+
+
+def _tile_periodic(patch: np.ndarray, r0: int, c0: int, th: int, tw: int) -> Optional[np.ndarray]:
+    """Tile whole periods of a regular pattern over (th, tw), in phase with
+    where the patch sits, so the fill continues the seen tiles seamlessly."""
+    pr, pc = _period(patch)
+    if pr is None and pc is None:
+        return None
+    h, w = patch.shape[:2]
+
+    def index(n_out, start, size, per, near_end=False):
+        i = np.arange(n_out) - start
+        if per is not None:                    # whole periods, repeated
+            L = min(per, size)
+            off = size - L if near_end else 0  # rows: the end nearest the camera is the sharpest
+            return (i - off) % L + off
+        m = i % (2 * size)                     # no clear period: mirror
+        return np.where(m < size, m, 2 * size - 1 - m)
+
+    return patch[index(th, r0, h, pr, near_end=True)][:, index(tw, c0, w, pc)].astype(np.float32)
+
+
 def _detrend(patch: np.ndarray, rows: bool) -> np.ndarray:
     """Detail of a patch on a flat base, so that tiling it repeats the
     material but not the lighting (mirrored shadows read as blobs). In
@@ -247,7 +331,14 @@ def synthesize_fill(tex: np.ndarray, visible: np.ndarray, rows: bool = False,
             return None, "none"
         patch = tex[r0:r1, c0:c1]
         flat = _detrend(patch, rows=False)
-        if _texture_like(patch, rows=False):
+        regular = _stationary(patch)
+        if regular:
+            # a regular pattern (tiles, a checkerboard, parquet): repeat whole
+            # periods in phase with the seen part rather than mirror it
+            per = _tile_periodic(flat, r0, c0, th, tw)
+            if per is not None:
+                return per, "tiled-periodic"
+        if _texture_like(patch, rows=False) or regular:
             fill = np.pad(flat, ((r0, th - r1), (c0, tw - c1), (0, 0)), mode="symmetric")
             return fill.astype(np.float32), "tiled"
         # Shadows and highlights make a tiled floor fail the test even when
@@ -326,8 +417,7 @@ def _match_local(tex: np.ndarray, fill: np.ndarray, known: np.ndarray, scale_fra
     interpolated into the unseen texels (normalised convolution, fine to
     coarse) and faded out with distance from anything seen, so a hole
     surrounded by wall takes that wall's colour and an unseen wall far away
-    keeps the predicted material. ``known`` are the texels the material was
-    learned from (no windows, no objects).
+    keeps the predicted material. ``known`` are the texels seen sharply.
     """
     import cv2
     from scipy import ndimage
@@ -406,10 +496,13 @@ def fill_hidden(tex: np.ndarray, visible: np.ndarray, fallback_rgb=(200, 200, 20
         else:
             fill = np.tile(np.median(tex[visible], axis=0).astype(np.float32), (th, tw, 1))
             how = "median"
-    pure = fill if how in ("tiled", "tiled-soft", "banded") else None
+    pure = fill if how in ("tiled", "tiled-soft", "tiled-periodic", "banded") else None
     if frac > 0.999 and sharp is visible:
         return _ret(tex, "complete", pure)
-    fill = _match_local(tex, fill, sharp & src)
+    # the material comes from clean wall only, but the local colour around a
+    # hidden patch from everything seen (a lamp in front of a window hides
+    # window, not wall)
+    fill = _match_local(tex, fill, sharp)
     # Feather: observed texels fade into the prediction over a few percent
     # of the plane, so there is no hard line where the photo's knowledge ends.
     ramp = max(2.0, 0.02 * max(th, tw))

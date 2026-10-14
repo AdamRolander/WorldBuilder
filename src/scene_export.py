@@ -36,7 +36,7 @@ def _load_world_mesh(ply_path: Path, name: str) -> Optional[trimesh.Trimesh]:
     return out
 
 
-def _make_translucent(mesh: trimesh.Trimesh, alpha: float = 0.3) -> None:
+def _make_translucent(mesh: trimesh.Trimesh, alpha: float = 0.45) -> None:
     """Glass: blend instead of opaque, for any importer that reads glTF alpha."""
     vis = mesh.visual
     if vis.kind == "texture" and getattr(vis, "material", None) is not None:
