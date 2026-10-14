@@ -42,7 +42,7 @@ def _jsonable(d):
 
 def load_structural_masks(mask_dir: Path) -> Dict[str, np.ndarray]:
     out = {}
-    for k in ("floor", "wall", "ceiling"):
+    for k in ("floor", "wall", "ceiling", "window"):
         p = Path(mask_dir) / f"structural_{k}.png"
         if p.exists():
             out[k] = np.asarray(Image.open(p).convert("L")) > 127
