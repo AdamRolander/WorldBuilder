@@ -31,7 +31,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 LOCAL_DETECTOR_ALIASES = ("qwen", "vlm", "local")
-STRUCTURAL_PROMPTS = ("floor", "wall", "ceiling")
+# "window" is not a room surface: its mask keeps the view outside out of the
+# wall's material and marks detections that are the window or seen through it.
+STRUCTURAL_PROMPTS = ("floor", "wall", "ceiling", "window")
 
 
 def detector_kind(override: Optional[str] = None) -> str:

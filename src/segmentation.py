@@ -226,7 +226,7 @@ class SAM3Segmenter:
         max_mask_fraction: float = 0.6,
         prompt_strategy: str = "union",     # "union" | "label" | "description"
         single_keep_ratio: float = 0.85,    # 1.0 reproduces the old hard top-1
-        max_instances_per_label: int = 12,
+        max_instances_per_label: int = 24,
         nms_iou: float = 0.5,
         use_box_fallback: bool = True,
     ) -> List[Dict]:
