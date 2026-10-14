@@ -183,12 +183,13 @@ def face_to_box(face: Dict, layout: rl.RoomLayout, points: np.ndarray, valid: np
     face_size = float(max(np.asarray(face["hi"]) - np.asarray(face["lo"])))
     if axis != 1 and up is not None:
         # A vertical face (a counter or cabinet front) is at most as deep as
-        # it is tall, and no deeper than its top was seen to run. The seen
+        # it is tall or wide, and no deeper than its top was seen to run. The seen
         # top itself is a horizontal face with its own box down to the floor.
         k_y = others.index(1)
         height = float(face["hi"][k_y] - face["lo"][k_y])
+        width = float(face["hi"][1 - k_y] - face["lo"][1 - k_y])
         seen = observed_top_depth(face, face["coord"], points, up, room, depth, image=image)
-        limit = max(height, 0.04 * room)
+        limit = max(min(height, width), 0.04 * room)
         if seen is not None and seen > 0.02 * room:
             limit = min(limit, seen + 0.01 * room)
         if limit < depth:

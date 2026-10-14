@@ -64,6 +64,41 @@ def world_mesh(result: Dict):
     return trimesh.Trimesh(vertices=wv, faces=mesh.faces, vertex_colors=colors, process=False)
 
 
+def clean_window_mask(window: Optional[np.ndarray], points_aligned: np.ndarray, valid: np.ndarray,
+                      layout, masks: Optional[Dict[int, np.ndarray]] = None, min_inside_frac: float = 0.04,
+                      same_iou: float = 0.85) -> Optional[np.ndarray]:
+    """Drop "window" regions that stand inside the room. SAM 3 calls the
+    glass front of a display case or a cabinet a window too; a real window
+    is in a wall, so what the photo saw there lies on or beyond one of the
+    room's sides. A region whose points are well in front of every side is
+    furniture glass, and the things behind it are objects, not the view.
+    So is a region that *is* a detected object's mask (a glass-fronted case
+    flush with the wall): a tree seen through a pane covers only part of it."""
+    if window is None or not window.any():
+        return window
+    from scipy import ndimage
+    h, w = valid.shape
+    win = rl._resize_mask(window, (h, w))
+    mn, mx = np.asarray(layout.bounds_min, float), np.asarray(layout.bounds_max, float)
+    span = float(max(mx[0] - mn[0], mx[2] - mn[2]))
+    lab, n = ndimage.label(win)
+    keep = np.zeros((h, w), bool)
+    for i in range(1, n + 1):
+        comp = (lab == i) & valid
+        if int(comp.sum()) < 10:
+            continue
+        P = np.median(points_aligned[comp], axis=0)
+        inset = min(P[0] - mn[0], mx[0] - P[0], mx[2] - P[2])     # distance in front of the nearest side
+        if inset > min_inside_frac * span:
+            continue
+        ci = lab == i
+        if any(float((mm & ci).sum()) >= same_iou * float((mm | ci).sum())
+               for mm in (rl._resize_mask(m, (h, w)) for m in (masks or {}).values())):
+            continue
+        keep |= ci
+    return keep
+
+
 def beyond_window(masks: Dict[int, np.ndarray], window: Optional[np.ndarray], points_aligned: np.ndarray,
                   valid: np.ndarray, layout, min_inside: float = 0.7, min_beyond: float = 0.6) -> List[int]:
     """Detections that are the view through a window: the trees, cars and
@@ -218,6 +253,11 @@ def assemble_from_cache(models_dir: Path, image_rgb: np.ndarray,
             structural_duplicates,
         )
         from src.room_generator import model_vertices
+        if structural_masks and structural_masks.get("window") is not None:
+            structural_masks = dict(structural_masks)
+            structural_masks["window"] = clean_window_mask(structural_masks["window"],
+                                                           pm["points"] @ layout.R_total.T, pm["valid"], layout,
+                                                           masks)
         structural = structural_duplicates(masks, structural_masks)
         for rid in beyond_window(masks, (structural_masks or {}).get("window"), pm["points"] @ layout.R_total.T,
                                  pm["valid"], layout):
@@ -315,6 +355,11 @@ def assemble_from_cache(models_dir: Path, image_rgb: np.ndarray,
                 depth = (pm["points"] @ rl.OPENCV_TO_WORLD.T)[..., 2]
                 depth = np.where(pm["valid"], depth, np.nan)
                 owner = object_pixels if object_pixels is not None else np.zeros(pm["valid"].shape, np.int32)
+                glass_ids = [r["id"] for r in results if r.get("glass")]
+                if glass_ids:
+                    # the photo sees through glass: what is behind it (the tiled
+                    # wall of a shower) belongs to the room's surfaces
+                    owner = np.where(np.isin(owner, glass_ids), 0, owner)
                 # grown past the mask edge: the soft edge and the shadow an
                 # object casts are not the surface's material
                 blocked = ndimage.binary_dilation(owner > 0, iterations=max(2, int(0.006 * owner.shape[0])))
