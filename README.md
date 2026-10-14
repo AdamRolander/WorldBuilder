@@ -249,7 +249,7 @@ TORCH_HUB_OFFLINE=1                 # optional: avoid hub checks on every run
 | `WORLDBUILDER_OUTPUTS`         | `outputs/`              | Where the webapp reads/writes scenes.                 |
 | `WORLDBUILDER_HOST`            | `127.0.0.1`             | Interface the webapp listens on (`0.0.0.0` for the LAN). |
 | `WORLDBUILDER_COMBINED`        | unset                   | `1` also writes `3d_models/scene_combined.ply` (all objects merged). |
-| `WORLDBUILDER_PHOTO_TEXTURE`   | `1`                     | `0` keeps SAM 3D's own colours on the side the photo saw. |
+| `WORLDBUILDER_PHOTO_TEXTURE`   | `1`                     | photo pixels on flat or facade-like sides that face the camera; `all` on every object; `0` keeps SAM 3D's own colours. |
 | `WORLDBUILDER_RELIEF`, `WORLDBUILDER_BUILTINS`, `WORLDBUILDER_SHARE_INSTANCES`, `WORLDBUILDER_LITE`, `WORLDBUILDER_METRIC` | `1` | `0` switches the feature off (for comparisons). |
 
 ### 6. Smoke test
@@ -278,7 +278,7 @@ python main.py --image photo.jpg --detector qwen # override .env for this run
 python main.py --input-dir my_photos --output my_outputs
 python main.py --force                           # reprocess instead of skipping done scenes
 python main.py --image photo.jpg --no-room       # objects only, no floor/walls/ceiling
-python main.py --image photo.jpg --no-structural # skip SAM 3 floor/wall/ceiling masks (geometry-only layout)
+python main.py --image photo.jpg --no-structural # skip SAM 3 floor/wall/ceiling/window masks (geometry-only layout)
 ```
 
 Output goes to `outputs/<image_stem>_<g|q>/`, where the suffix records which
@@ -434,7 +434,7 @@ Each scene directory holds:
 outputs/<scene>/
 ├── detected_objects.json          # stage 1 after clean-up (detected_objects_raw.json = as returned)
 ├── segmentation_results.json      # stage 2: per-instance masks, scores, boxes, prompt used
-├── masks/                         # stage 2: mask PNGs (+ structural_floor/wall/ceiling.png)
+├── masks/                         # stage 2: mask PNGs (+ structural_floor/wall/ceiling/window.png)
 ├── reconstruction_results.json    # objects (pose, support, fit to the photo), removed/failed with reasons
 ├── metrics.json                   # seconds per phase, time to first object, seconds per object, peak GPU memory, output sizes
 ├── edits.json                     # optional: manual corrections saved from the viewer (applied by the GLB endpoints)
