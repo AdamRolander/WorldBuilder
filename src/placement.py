@@ -720,7 +720,25 @@ def settle_unsupported(ev: SceneEvidence, objs: List[PlacedObject], room: Option
         gap = float(lo[1] - target)
         mask = ev.masks.get(o.id)
         cut = mask is not None and bool(mask[-2:].any())      # bottom of the object is outside the photo
-        if gap <= 1e-6 or gap > max((1.0 if cut else 0.5) * h, 0.10 * H):
+        if gap <= 1e-6:
+            continue
+        if gap > max((1.0 if cut else 0.5) * h, 0.10 * H):
+            # Too far to fall. But if the photo shows the object's own outline
+            # reaching down to that surface (a counter whose mesh came out as
+            # just its top), the mesh is short, not the object high: lengthen
+            # it down, when that clearly improves the match with the photo.
+            c = find_contact(ev, o)
+            if c is not None and abs(c.y - target) <= 0.05 * H:
+                before = fit_iou(ev, o)
+                snap = o.snapshot()
+                if before is not None and o.stretch_down((h + gap) / h):
+                    after = fit_iou(ev, o)
+                    if after is not None and after >= before + 0.08:
+                        o.r.update(snapped=True, support=FLOOR if sup_id is None else "object", supported_by=sup_id,
+                                   support_source="settle-reach", support_y=round(float(target), 4))
+                        out[o.id] = "reach"
+                        continue
+                o.restore(snap)
             continue
         held = attachment(ev, o)
         if held is not None:
@@ -1042,6 +1060,62 @@ def square_to_wall(ev: SceneEvidence, o: "PlacedObject", side: str, max_deg: flo
         return None
     o.r['squared_to_wall'] = round(float(np.degrees(best)), 2)
     return float(np.degrees(best))
+
+
+def square_long_objects(ev: SceneEvidence, objs: List["PlacedObject"], room: Optional[Dict],
+                        min_aspect: float = 2.0, max_deg: float = 12.0, max_iou_loss: float = 0.05) -> Dict[int, float]:
+    """Long furniture runs along the room's axes.
+
+    The layout stage already assumes the room is a box; a counter, a bench,
+    a sofa or a long table in it is almost always parallel to its walls,
+    and a few degrees off is what SAM 3D's heading noise looks like. An
+    object whose footprint is at least ``min_aspect`` times as long as wide
+    and within ``max_deg`` of a room axis is turned onto it, if the
+    silhouette match holds. Returns ``{id: degrees turned}``.
+    """
+    out: Dict[int, float] = {}
+    span = float(max(room["max"][0] - room["min"][0], room["max"][2] - room["min"][2])) if room else None
+    for o in objs:
+        if o.r.get('squared_to_wall') is not None:
+            continue
+        R = quat_to_matrix(o.r['rotation_quaternion'])
+        up = int(np.argmax(np.abs(R[:, 1])))
+        if abs(R[up, 1]) < 0.97:
+            continue
+        sc = np.abs(np.asarray(o.r['scale'], float))
+        horiz = [i for i in range(3) if i != up]
+        ext = [float(np.ptp(o.model[:, i]) * sc[i]) for i in horiz]
+        if min(ext) <= 0 or max(ext) / min(ext) < min_aspect:
+            continue
+        if span is not None and max(ext) < 0.15 * span:
+            continue
+        offs = [a for a in (_heading_off(o, 0), _heading_off(o, 2)) if a is not None]
+        if not offs:
+            continue
+        off = min(offs, key=abs)
+        deg = abs(np.degrees(off))
+        if deg < 1.0 or deg > max_deg:
+            continue
+        before = fit_iou(ev, o)
+        snap = o.snapshot()
+        done = None
+        for yaw in (off, -off):
+            o.restore(snap)
+            o.rotate_about_vertical(yaw)
+            rest = [a for a in (_heading_off(o, 0), _heading_off(o, 2)) if a is not None]
+            if rest and min(abs(a) for a in rest) < 0.25 * abs(off):
+                done = yaw
+                break
+        if done is None:
+            o.restore(snap)
+            continue
+        after = fit_iou(ev, o)
+        if before is not None and after is not None and after < before - max_iou_loss:
+            o.restore(snap)
+            continue
+        o.r['squared_to_room'] = round(float(np.degrees(done)), 2)
+        out[o.id] = round(float(np.degrees(done)), 2)
+    return out
 
 
 def push_to_walls(ev: SceneEvidence, objs: List[PlacedObject], room: Dict, max_stretch: float = 1.5,
@@ -1436,6 +1510,13 @@ def place_objects(results: List[Dict], model_verts: Dict[int, np.ndarray], ev: S
         log("  settled: " + ", ".join(f"{by_id[i].r['label']} ({how})" for i, how in settled.items()))
 
     stacked_at = {o.id: np.array([0.5 * (o.lo[0] + o.hi[0]), o.lo[1], 0.5 * (o.lo[2] + o.hi[2])]) for o in objs}
+
+    # 4b''. long furniture runs along the room's axes
+    if room:
+        diag['squared_to_room'] = square_long_objects(ev, objs, room)
+        if diag['squared_to_room']:
+            log("  squared to the room: " + ", ".join(
+                f"{by_id[i].r['label']} ({d}°)" for i, d in diag['squared_to_room'].items()))
 
     # 4b'. resting objects stand upright
     diag['upright_resting'] = upright_resting(ev, objs)
