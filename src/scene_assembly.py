@@ -122,7 +122,7 @@ def on_ceiling(masks: Dict[int, np.ndarray], points_aligned: np.ndarray, valid: 
 
 
 def beyond_window(masks: Dict[int, np.ndarray], window: Optional[np.ndarray], points_aligned: np.ndarray,
-                  valid: np.ndarray, layout, min_inside: float = 0.7, min_beyond: float = 0.6) -> List[int]:
+                  valid: np.ndarray, layout, min_inside: float = 0.45, min_beyond: float = 0.6) -> List[int]:
     """Detections that are the view through a window: the trees, cars and
     buildings outside, a blind in the frame. Their mask lies mostly inside
     the window mask *and* the points the photo saw there lie on or beyond an
@@ -140,7 +140,6 @@ def beyond_window(masks: Dict[int, np.ndarray], window: Optional[np.ndarray], po
         n = int(mm.sum())
         if n < 20 or float((mm & win).sum()) < min_inside * n:
             continue
-        inside = float((mm & win).sum()) / n
         P = points_aligned[mm]
         beyond = np.zeros(len(P), bool)
         on_wall = np.zeros(len(P), bool)
@@ -152,8 +151,10 @@ def beyond_window(masks: Dict[int, np.ndarray], window: Optional[np.ndarray], po
             beyond |= d > tol
             on_wall |= d > -tol
         # A depth map often reads window glass as flat, putting the view on
-        # the wall plane: then the mask must lie almost wholly in the window.
-        if float(beyond.mean()) >= min_beyond or (inside >= 0.9 and float(on_wall.mean()) >= min_beyond):
+        # the wall plane.
+        # Flush with the wall and mostly in the window: the view, or the
+        # window's own frame, door or blind.
+        if float(beyond.mean()) >= min_beyond or float(on_wall.mean()) >= 0.8:
             out.append(int(rid))
     return out
 
