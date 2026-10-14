@@ -99,6 +99,28 @@ def clean_window_mask(window: Optional[np.ndarray], points_aligned: np.ndarray, 
     return keep
 
 
+def on_ceiling(masks: Dict[int, np.ndarray], points_aligned: np.ndarray, valid: np.ndarray, layout,
+               tol_frac: float = 0.03, min_on: float = 0.8) -> List[int]:
+    """Detections that are the ceiling's own surface: tiles, flush panels,
+    grilles. What the photo saw under their mask lies on the observed
+    ceiling plane; a pendant lamp hangs below it. Walls and floors are not
+    treated this way on purpose: a picture or a rug flush with them is
+    still an object people move."""
+    if layout.ceiling_source != "geometric":
+        return []
+    h, w = valid.shape
+    H = float(layout.ceiling_y - layout.floor_y)
+    out = []
+    for rid, m in masks.items():
+        mm = rl._resize_mask(m, (h, w)) & valid
+        if int(mm.sum()) < 20:
+            continue
+        y = points_aligned[mm][:, 1]
+        if float(np.mean(np.abs(y - layout.ceiling_y) <= tol_frac * H)) >= min_on:
+            out.append(int(rid))
+    return out
+
+
 def beyond_window(masks: Dict[int, np.ndarray], window: Optional[np.ndarray], points_aligned: np.ndarray,
                   valid: np.ndarray, layout, min_inside: float = 0.7, min_beyond: float = 0.6) -> List[int]:
     """Detections that are the view through a window: the trees, cars and
@@ -262,6 +284,8 @@ def assemble_from_cache(models_dir: Path, image_rgb: np.ndarray,
         for rid in beyond_window(masks, (structural_masks or {}).get("window"), pm["points"] @ layout.R_total.T,
                                  pm["valid"], layout):
             structural.setdefault(rid, "view through a window")
+        for rid in on_ceiling(masks, pm["points"] @ layout.R_total.T, pm["valid"], layout):
+            structural.setdefault(rid, "ceiling")
         if layout.scene_type == "open" and "floor" not in (structural_masks or {}):
             P_al = pm["points"] @ layout.R_total.T
             N_al = rl.compute_normals(pm["points"], pm["valid"]) @ layout.R_total.T

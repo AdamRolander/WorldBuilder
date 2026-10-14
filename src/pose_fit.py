@@ -315,6 +315,7 @@ def share_instances(ev: SceneEvidence, objs: List[PlacedObject], image_small: np
                 continue
             m = ev.masks[o.id]
             if float(np.linalg.norm(_chroma(_mean_color(image_small, m)) - ex_color)) > max_color_dist:
+                o.r['share_rejected'] = "colour"
                 continue
             own = fit_score(ev, o.fast_verts, m)
             dims_o = np.sort(o.hi - o.lo)
@@ -322,15 +323,18 @@ def share_instances(ev: SceneEvidence, objs: List[PlacedObject], image_small: np
             same_shape = bool(np.all(np.abs(dims_o / np.maximum(dims_e, 1e-9) - 1.0) <= max_shape_diff))
             short = o.height < 0.7 * ex_h
             if not (same_shape or short):
+                o.r['share_rejected'] = "shape"
                 continue
             if not short or ex_flat:
                 # a complete instance must also *look* like the exemplar
                 sig = _crop_signature(image_small, m)
                 if sig is None or ex_sig is None or float(sig @ ex_sig) < (0.6 if ex_flat else 0.4):
+                    o.r['share_rejected'] = "looks different"
                     continue
             # a fragment is judged by its colours: the visible part of the same
             # chair is made of the same colours, a different object is not
             if _hist_similarity(_chroma_hist(image_small, m), ex_hist) < 0.6:
+                o.r['share_rejected'] = "colour make-up"
                 continue
             # where does it stand: on the floor if the exemplar does, else at its own bottom
             bottom = ex_full_lo[1] if ex.r.get('support') == 'floor' and ev.floor_y is not None else float(o.lo[1])
@@ -343,22 +347,29 @@ def share_instances(ev: SceneEvidence, objs: List[PlacedObject], image_small: np
                 copy = (ex_fast - c_e) @ _yaw(yaw).T + np.array([xz[0], bottom, xz[1]])
                 fragment = hidden_fraction(ev, copy, m) > 0.15 or any(touches_border(m).values())
                 if not fragment:
+                    o.r['share_rejected'] = "short but not hidden"
                     continue
             # A fragment only has to be explained nearly as well as its own
             # sliver explained it; a complete instance must be explained
             # *better*, otherwise swapping it gains nothing and risks a lot.
             if score < (0.8 * own if fragment else own + min_gain) or score < 0.15:
+                o.r['share_rejected'] = f"fit {score:.2f} vs own {own:.2f}"
                 continue
             # The occlusion-aware score excuses pixels hidden behind nearer
             # things, so a copy that is far too big can pass by burying its
             # excess behind its neighbours (a portrait copied onto a small
             # frame's mask). The plain silhouette IoU does not excuse that.
-            plain_own = mask_iou(splat(ev, o.fast_verts)[0], m)
-            lo_e, hi_e = ex_fast.min(0), ex_fast.max(0)
-            c_e = np.array([0.5 * (lo_e[0] + hi_e[0]), lo_e[1], 0.5 * (lo_e[2] + hi_e[2])])
-            copy_v = (ex_fast - c_e) @ _yaw(yaw).T + np.array([xz[0], bottom, xz[1]])
-            if mask_iou(splat(ev, copy_v)[0], m) < max(0.7 * plain_own, 0.12):
-                continue
+            # A fragment is exempt: a chair behind a table *is* mostly hidden,
+            # and what keeps a wrong fragment copy out is the colour make-up
+            # test above and, for flat things, their face.
+            if not fragment:
+                plain_own = mask_iou(splat(ev, o.fast_verts)[0], m)
+                lo_e, hi_e = ex_fast.min(0), ex_fast.max(0)
+                c_e = np.array([0.5 * (lo_e[0] + hi_e[0]), lo_e[1], 0.5 * (lo_e[2] + hi_e[2])])
+                copy_v = (ex_fast - c_e) @ _yaw(yaw).T + np.array([xz[0], bottom, xz[1]])
+                if mask_iou(splat(ev, copy_v)[0], m) < max(0.7 * plain_own, 0.12):
+                    o.r['share_rejected'] = "plain silhouette"
+                    continue
             undo[o.id] = (o.model, o.snapshot(), dict(o.r))
             # adopt the exemplar's mesh and pose, then turn and move it
             o.model = ex.model

@@ -339,6 +339,12 @@ def synthesize_fill(tex: np.ndarray, visible: np.ndarray, rows: bool = False,
             if per is not None:
                 return per, "tiled-periodic"
         if _texture_like(patch, rows=False) or regular:
+            # Grain is small and evenly spread; a chair leg's shadow or a crumb
+            # in the patch is an outlier that tiling would stamp everywhere.
+            base = np.median(flat.reshape(-1, 3), axis=0)
+            dev = flat - base
+            mad = float(np.median(np.abs(dev))) * 1.4826
+            flat = base + np.clip(dev, -max(3.0 * mad, 6.0), max(3.0 * mad, 6.0))
             fill = np.pad(flat, ((r0, th - r1), (c0, tw - c1), (0, 0)), mode="symmetric")
             return fill.astype(np.float32), "tiled"
         # Shadows and highlights make a tiled floor fail the test even when

@@ -533,7 +533,7 @@ def ground_masks(masks: Dict[int, np.ndarray], points_aligned: np.ndarray, norma
 
 
 def contained_parts(masks: Dict[int, np.ndarray], labels: Dict[int, str], min_inside: float = 0.85,
-                    group_cover: float = 0.7) -> Dict[int, int]:
+                    group_cover: float = 0.4) -> Dict[int, int]:
     """Same-label masks that are a part of, or a group of, other masks.
 
     SAM 3 sometimes returns both an object and a piece of it under one
@@ -542,9 +542,11 @@ def contained_parts(masks: Dict[int, np.ndarray], labels: Dict[int, str], min_in
     ones. IoU-based NMS keeps all of them because the IoU is low; stage 3
     then builds each as a full object in the same place. A mask that is
     ≥ ``min_inside`` inside a larger same-label mask is a part and is
-    dropped — unless the contained masks together cover ≥ ``group_cover`` of
+    dropped — unless two or more of them together cover ≥ ``group_cover`` of
     the larger one, in which case the larger one is the group and *it* is
-    dropped. Returns ``{dropped_id: id_it_duplicates}``.
+    dropped. (A row of chairs reconstructed from its group mask is one long
+    bar; the chairs in it are the objects, even if a few were not
+    segmented on their own.) Returns ``{dropped_id: id_it_duplicates}``.
     """
     ids = sorted(masks, key=lambda i: -int(masks[i].sum()))
     inside: Dict[int, List[int]] = {}
