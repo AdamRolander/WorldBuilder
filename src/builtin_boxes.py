@@ -181,6 +181,14 @@ def face_to_box(face: Dict, layout: rl.RoomLayout, points: np.ndarray, valid: np
     thin = False
     depth = abs(front - back)
     face_size = float(max(np.asarray(face["hi"]) - np.asarray(face["lo"])))
+    if axis != 1:
+        # A low built-in stands on the floor: when the lower part of a
+        # cabinet front is hidden (behind an island, below the frame), its
+        # box goes down to the floor rather than hovering. Upper cabinets
+        # (top in the upper part of the room) hang and are left alone.
+        H = float(dims[1])
+        if hi[1] < mn[1] + 0.6 * H and lo[1] > mn[1] + 0.02 * H:
+            lo[1] = mn[1]
     if axis != 1 and up is not None:
         # A vertical face (a counter or cabinet front) is at most as deep as
         # it is tall or wide, and no deeper than its top was seen to run. The seen
