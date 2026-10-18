@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "worldbuilder"
-version = "0.2.0"
+version = "0.3.0"
 description = "Turn a single photo of a room into a navigable, editable 3D scene (VLM + SAM 3 + SAM 3D Objects + MoGe layout)."
 readme = "README.md"
 license = {file = "LICENSE"}

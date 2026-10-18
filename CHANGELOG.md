@@ -5,6 +5,8 @@ versions follow [SemVer](https://semver.org/) (0.x: minor = features, patch = fi
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-10-17
+
 ### Added
 - Photo re-projection onto objects (`src/object_texture.py`): the side of each mesh the
   photo saw takes the photo's pixels (own mask, front surface, depth agreement).
@@ -52,8 +54,6 @@ versions follow [SemVer](https://semver.org/) (0.x: minor = features, patch = fi
   checks colour make-up, and a flat object's face, before copying a mesh.
 - Detections lying on the observed ceiling plane (tiles, grilles, flush panels) are the
   ceiling's surface.
-
-### Changed (earlier in this release)
 - The relief is exported as one mesh per connected piece (`room_relief_00`, …), each with
   its own cropped texture.
 - Placement is 2–3× faster (silhouette scoring works on the object's bounding box);
