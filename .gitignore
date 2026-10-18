@@ -270,3 +270,6 @@ private/
 
 # --- Isolated third-party installs (MoGe-2 for metric scale) ---
 third_party/
+
+# Local notes for Claude Code (kept out of the repo for now)
+CLAUDE.md
