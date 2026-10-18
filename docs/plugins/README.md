@@ -1,183 +1,68 @@
-# DCC integrations: Blender extension and Unreal plugin
+# Plugins
 
-Both integrations follow one rule: **the DCC add-on is a thin HTTP client;
-the models stay in the WorldBuilder server.** Reasons:
+WorldBuilder scenes can be opened in other tools. Each plugin is a small client of the
+WorldBuilder server you run yourself; the models never leave that server.
 
-* SAM 3 / SAM 3D weights are gated and under Meta's SAM License — they cannot
-  be redistributed inside an extension or a Fab listing (see the
-  licence notes in `LICENSE`).
-* The pipeline needs a 32 GB GPU and two conda environments; no add-on
-  sandbox will host that.
-* One server can serve Blender, Unreal, the web app and a future
-  RoomBuilder backend through the same API.
+| Plugin | Status | Install | Docs |
+| --- | --- | --- | --- |
+| **Blender** 4.2+ | Working. Passes Blender's extension validation and an end-to-end test on Blender 5.0.1 | zip from the [releases page](https://github.com/AdamRolander/WorldBuilder/releases) | [Blender](BLENDER.md) |
+| **MuJoCo / MJX** | Working. Exporter plus a Gymnasium wrapper | part of this repo (`pip install -e ".[robotics]"`) | [MuJoCo](MUJOCO.md) |
+| **Unreal Engine** 5.4+ | Scaffold, not yet compiled or tested | copy the plugin folder into your project | [Unreal](UNREAL.md) |
+| Anything that reads glTF | Works today: download `scene_lite.glb` | | [Usage: Outputs](../USAGE.md#outputs) |
 
-The server-side seams added for this are `GET /api/scenes/<id>` (manifest)
-and `GET /api/scenes/<id>/glb` (whole scene as one glTF binary with named
-nodes and vertex colours), produced by `src/scene_export.py`.
+## How the Plugins Work
+
+The pipeline needs a 24-32 GB NVIDIA card, two conda environments and model weights that are
+licensed separately by Meta. None of that fits inside a Blender add-on or an Unreal plugin,
+and the weights may not be redistributed anyway. So every plugin talks HTTP to the web app
+(`python -m webapp.server`), which may be on the same machine or another one on your network:
 
 ```
-photo ──► Blender add-on / Unreal plugin ──HTTP──► webapp/server.py ──► pipeline
-                     ▲                                        │
-                     └──────────── scene.glb ◄────────────────┘
+photo ──► plugin (Blender, Unreal, ...) ──HTTP──► webapp/server.py ──► pipeline (GPU)
+              ▲                                          │
+              └──────── scene_lite.glb / MuJoCo zip ◄────┘
 ```
 
----
+A side effect is that most improvements (placement, textures, the viewer's editor) reach
+plugin users with a `git pull` on the server and no plugin update.
 
-## Blender — `integrations/blender_worldbuilder/`
+The endpoints a plugin uses:
 
-Status: **scaffolded, untested in Blender** (no Blender on the GPU box yet).
-Files: `blender_manifest.toml` (Extensions-platform manifest),
-`__init__.py` (add-on: preferences, modal operator, sidebar panel).
-
-### Try it locally
-
-```bash
-# 1. GPU box: start the server (and the local VLM if you want fully local)
-conda activate worldbuilder-main && python -m webapp.server
-# 2. Zip the add-on folder and install it in Blender 4.2+:
-cd integrations && zip -r worldbuilder-0.1.0.zip blender_worldbuilder
-# Blender: Edit > Preferences > Get Extensions > ▾ > Install from Disk…
-# Then: 3D Viewport > N sidebar > WorldBuilder > "Generate scene from photo"
-```
-
-Legacy add-on install (Blender 3.6–4.1) works with the same zip via
-Preferences > Add-ons > Install.
-
-### Publishing on extensions.blender.org — what they require
-
-(From the platform's manifest schema and moderation rules; the docs site
-blocked automated fetching, so verify against
-<https://docs.blender.org/manual/en/latest/advanced/extensions/> before
-submitting.)
-
-| requirement | status |
+| Endpoint | What it returns |
 | --- | --- |
-| `blender_manifest.toml` with `schema_version, id, version, name, tagline, maintainer, type, blender_version_min, license` | done |
-| GPL-compatible license, SPDX identifier (`SPDX:MIT` ok) | done |
-| Declared `[permissions]` (`network`, `files`) with a one-line justification each | done |
-| No bundled binaries without wheels; wheels must be declared and platform-tagged | not needed (stdlib only) |
-| Must not download executable code at runtime | complies (downloads a GLB, data) |
-| Works offline or fails gracefully when the network is missing | error path reports "server unreachable" |
-| Account on extensions.blender.org, `blender --command extension validate` passes, moderation review (days–weeks) | **todo** |
-| Extensions must be self-contained: the add-on cannot *require* a paid or external service to be useful | Grey area — it requires *your own* server. State this prominently in the listing; free/open server code satisfies reviewers in comparable cases (render-farm and LLM-bridge add-ons exist on the platform). |
+| `POST /api/upload` | starts a job for a photo: `{job_id, scene_id}` |
+| `GET /api/jobs/<id>` | progress: `{status, stage, scene_id, error}` |
+| `GET /api/scenes` | finished scenes, newest first |
+| `GET /api/scenes/<id>` | manifest: objects, layout, file URLs |
+| `GET /api/scenes/<id>/glb?lite=1` | the whole scene as one GLB with named nodes and baked textures; edits saved in the viewer are applied |
+| `GET /api/scenes/<id>/mujoco[?mjx=1]` | a zip with a MuJoCo model of the scene |
 
-Nuances worth knowing:
+The full list is in [Usage](../USAGE.md#web-app).
 
-* Blender's Python is 3.11 and has no `requests`; the add-on uses `urllib`
-  and a hand-rolled multipart encoder for that reason.
-* Long blocking calls freeze the UI, so the operator is *modal* with a
-  timer and runs HTTP in a thread; only `bpy.ops.import_scene.gltf` runs on
-  the main thread.
-* glTF import puts every node under the scene root; the add-on moves the
-  new objects into a collection named after the scene id.
-* Units: scene coordinates are scale-invariant. `layout.json` carries
-  `estimated_metric_scale` (camera-height prior). Apply it as a collection
-  scale if you want metres (the add-on has a checkbox for this).
+## Review in the Browser, Then Import
 
----
+The browser viewer is the review step in front of every plugin. Open a scene there (Blender
+has a **Review in browser** button), remove or move objects, and **Save edits**. Every GLB and
+MuJoCo export the server hands out afterwards has the edits applied, so the next import into
+Blender, Unreal or MuJoCo is the corrected scene.
 
-## Unreal Engine — `integrations/unreal/WorldBuilderBridge/`
+## Where We'd Like Plugins Next
 
-Status: **scaffolded, uncompiled** (no UE install on this machine).
-Files: `WorldBuilderBridge.uplugin`, a minimal editor module
-(`Source/WorldBuilderBridge/...`) that adds *Tools ▸ WorldBuilder ▸ Generate
-scene from photo…*, and `Content/Python/worldbuilder_bridge.py` which does
-the work through the Python Editor Script Plugin and Interchange (glTF).
+Rough effort for a first working version, given that the server and the GLB already exist.
+Ideas and help on any of these are welcome; open an issue to claim one.
 
-### Try it locally
+| Target | Audience | Effort | Notes |
+| --- | --- | --- | --- |
+| **Godot** (Asset Library) | indie game developers | small | Native glTF import and `HTTPRequest` in GDScript; MIT is accepted. A port of the Blender add-on's flow. |
+| **Isaac Sim / Isaac Lab** | robotics, sim-to-real | small to medium | Imports MJCF and glTF already; a USD export with physics schemas would make it native. |
+| **Unity** (UPM package via git URL, later the Asset Store) | game developers, XR | medium | glTF through glTFast; C# `UnityWebRequest` client. |
+| **USD export** | film, Omniverse, Isaac | medium | `scene_lite.glb` to USD with named prims; no GPU needed to work on. |
+| **ROS 2 / Gazebo** (SDF or URDF) | robotics | medium | Static world from the room, models from the objects; collision geometry exists for MuJoCo. |
+| **Genesis** | robotics, RL | small | Loads MJCF; mainly a documented example. |
+| **Houdini, Maya, Cinema 4D** | VFX and motion design | medium each | Each has a Python API and glTF import; a thin client per tool. |
+| **SketchUp, Rhino** | architecture and interiors | medium | Ruby (SketchUp) or Python (Rhino 8) clients; interior designers are a natural audience. |
+| **ComfyUI** (custom node) | generative AI users | small | A node that sends an image to the server and returns the GLB; large, active audience. |
+| **Static web demo** | everyone | small | `viewer.html` and `scene_lite.glb` on GitHub Pages; no server, no GPU. |
 
-1. Copy `WorldBuilderBridge/` into `<YourProject>/Plugins/`.
-2. Enable *Python Editor Script Plugin*, *Editor Scripting Utilities*,
-   *Interchange* in the project (the `.uplugin` declares them as
-   dependencies so UE will prompt).
-3. Rebuild the project (the C++ module is tiny) or, to skip C++ entirely,
-   delete `Source/` and use it as a content-only plugin: in the Output Log
-   (Python) run
-
-   ```python
-   import sys; sys.path.append(r"<project>/Plugins/WorldBuilderBridge/Content/Python")
-   import worldbuilder_bridge as wb; wb.generate_and_import(r"C:/photos/room.jpg")
-   ```
-
-### Publishing on Fab — what Epic requires
-
-From the [Fab publishing docs](https://dev.epicgames.com/documentation/en-us/fab/publishing-assets-for-sale-or-free-download-in-fab)
-(fetched 2026-09-17) and community reports:
-
-| requirement | status |
-| --- | --- |
-| Epic publisher account (Fab seller onboarding, tax/payout even for free listings) | **todo** |
-| *Code plugins* must contain ≥1 code module and be submitted per supported engine version; a new `.uplugin`/source zip per version | module scaffolded; target 5.4 + 5.5 first |
-| Epic compiles the plugin with their toolchain; must build warning-clean on Win64 (Linux/Mac if listed). Test with *Package…* in the Plugins window | **todo** |
-| Fab Terms of Service + Epic Content Guidelines (no bundled third-party assets you don't own the rights to) | complies: no models/weights bundled |
-| Documentation URL, support URL, screenshots/video | docs URL set; media **todo** |
-| Free listings allowed | yes |
-| Review turnaround | reports range from days to several weeks |
-
-Nuances:
-
-* Interchange's glTF importer handles vertex colours (`COLOR_0`) but
-  materials will be plain; a *Vertex Color* material instance is worth
-  shipping in `Content/`.
-* Y-up → Z-up and metres → centimetres are handled by Interchange; the
-  Python applies `estimated_metric_scale` on top.
-* `generate_and_import` blocks the editor for the pipeline's duration.
-  The proper version is an Editor Utility Widget with a timer.
-
----
-
-## Status after the October 2026 pass
-
-* **Blender**: `blender --command extension validate` passes;
-  `blender --command extension build --source-dir integrations/blender_worldbuilder`
-  produces the installable zip. `scripts/test_blender_addon.py` runs the
-  whole flow inside `blender --background` (register → upload → poll →
-  download → import → render) and passed on Blender 5.0.1. New in add-on 0.2.0: lite GLB by default (tens of MB, baked
-  textures), "Import existing scene", metric-scale checkbox, every room
-  surface and the relief as separate named objects under one scene empty.
-  Not yet exercised: the UI panel by a human, and Blender 4.2 LTS.
-* **Unreal**: unchanged scaffold, untested. When you try it, import
-  `GET /api/scenes/<id>/glb?lite=1` rather than the full GLB: the lite file
-  has ordinary textured materials, which Interchange imports without the
-  vertex-colour material the full file needs.
-* **MuJoCo / MJX**: new, see `integrations/mujoco/README.md`.
-* **Server endpoints for clients**: `GET /api/scenes` (newest first),
-  `GET /api/scenes/<id>/glb?lite=1`, `GET /api/scenes/<id>/mujoco[?mjx=1]`.
-
-Add-on 0.3.0 adds **Review in browser**: it opens the scene in the web
-viewer, where objects can be removed, moved, turned and resized by typing
-values. After *Save edits* there, *Import existing scene* brings the
-corrected scene into Blender (the server applies the edits to the GLB it
-serves). If Blender runs on another computer than the server, start the
-server with `--host 0.0.0.0`.
-
-### Testing the Blender add-on (10 minutes)
-
-```bash
-# terminal 1 (worldbuilder-vlm env), only for the local detector
-python vlm_server/server.py
-# terminal 2 (worldbuilder-main env)
-python -m webapp.server
-# terminal 3: automated check first
-blender --background --python scripts/test_blender_addon.py -- \
-    --scene <an existing scene id> --render /tmp/wb.png        # no GPU work, ~5 s
-# then by hand: build and install the extension
-blender --command extension build --source-dir integrations/blender_worldbuilder --output-dir /tmp
-#   Blender > Edit > Preferences > Get Extensions > ▾ > Install from Disk… > /tmp/worldbuilder-0.3.0.zip
-#   3D Viewport > N > WorldBuilder > "Import existing scene" (leave the id empty for the newest)
-#   then "Generate scene from photo"
-```
-
-The server reads scenes from `outputs/` directly under the project root
-(`WORLDBUILDER_OUTPUTS` overrides); scenes in sub-folders such as
-`outputs/10-08-validation/` are not listed unless you point it there.
-
-## Planned
-
-* Test the Blender add-on end to end (needs Blender on a machine that can reach the server).
-* Register on extensions.blender.org; run `blender --command extension validate`; submit.
-* Metric-scale option + material presets in both bridges.
-* Non-blocking Unreal UI (Editor Utility Widget) with progress.
-* Fab publisher onboarding; build the plugin on 5.4/5.5 Win64.
-* Ship a vertex-colour material and a LOD/decimation option (SAM 3D meshes are dense).
-* Streaming: import objects as they finish instead of waiting for the whole scene (needs `/api/jobs/<id>/objects`).
+Two rules apply to all of them: never bundle SAM weights or SAM code in a plugin, and point
+users at their own server rather than one we host.
