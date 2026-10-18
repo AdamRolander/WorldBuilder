@@ -20,7 +20,7 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Image Recognition",
 ]
 # The heavy GPU stacks (torch, sam3, sam3d_objects, pytorch3d, kaolin, ...)
-# are installed per README §2; only WorldBuilder's own thin layer is listed.
+# are installed per docs/SETUP.md; only WorldBuilder's own thin layer is listed.
 dependencies = [
   "numpy>=1.26",
   "pillow>=10",

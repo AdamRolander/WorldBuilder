@@ -1,4 +1,4 @@
-# Hardware: what you need to run WorldBuilder
+# Hardware: What You Need to Run WorldBuilder
 
 Short version: **an NVIDIA card with 24 GB of VRAM** is the realistic
 minimum for the full pipeline; 32 GB is what it was developed on. Stage 4,
@@ -20,13 +20,13 @@ which includes PyTorch's cache and ~0.4 GB of desktop.
 | 3b metric scale (optional) | MoGe-2 ViT-L, subprocess | ~2 GB (est.) | — | <1 s on GPU; falls back to CPU when under 4 GB is free |
 | 4 assemble + exports | none | 0 | 0 | CPU, 20–100 s (pose search and instance sharing dominate) + ~25 s for the lite GLB |
 
-Only one large model is on the GPU at a time (the README's "VRAM dance").
+Only one large model is on the GPU at a time (the "VRAM dance" in [Setup](SETUP.md#the-vram-dance)).
 System RAM: 62 GB on the dev box; the parked models take roughly 30 GB of
 it, so treat 48 GB as the practical minimum and 64 GB as comfortable.
 Disk: ~15 GB of weights plus the Hugging Face cache for the VLM (~18 GB),
 and 0.8–4 GB per scene with the full-resolution meshes.
 
-### Per phase, twelve photos (2026-10-10)
+### Per Phase, Twelve Photos (2026-10-10)
 
 Every run now writes `metrics.json` (seconds per phase, time to the first
 object, seconds per object, device-wide and per-process memory peaks; see
@@ -49,7 +49,7 @@ includes PyTorch's cache, which grows into whatever memory is free on a
 32 GB card; the allocated figure (≤ 20.2 GB) is what a smaller card has to
 fit.
 
-## What that means for cards
+## What That Means for Cards
 
 | VRAM | examples | verdict |
 | --- | --- | --- |
@@ -67,7 +67,7 @@ same upstream reasons; WSL2 on Windows is plausible but untested.
 borrowing a machine: a 3090 or 4090 desktop is the target; a 4080 is not
 enough.
 
-## If the card is borderline
+## If the Card Is Borderline
 
 * Use `--detector gemini` (needs an API key and network): removes the
   ~21 GB VLM entirely, so only SAM 3D's ~19 GB matters.
@@ -81,7 +81,7 @@ enough.
   concluding it does not fit; fragmentation, not the peak, is the usual
   culprit near the limit.
 
-## No GPU at all
+## No GPU at All
 
 Everything after stage 3 runs on a laptop from a finished scene directory:
 
@@ -95,7 +95,7 @@ and the viewer, the Blender add-on and the MuJoCo environment only need the
 files a server produced. Issues labelled `no-gpu` in the tracker fit this setup, and rent-a-GPU options are a few dollars for
 an afternoon if you want to run the models once.
 
-## Reports from other machines
+## Reports From Other Machines
 
 | date | card | driver / CUDA | detector | photo → objects | wall-clock | peak allocated (seg / recon) | notes |
 | --- | --- | --- | --- | --- | --- | --- | --- |
