@@ -5,6 +5,15 @@ versions follow [SemVer](https://semver.org/) (0.x: minor = features, patch = fi
 
 ## [Unreleased]
 
+### Added
+- Documentation split into Setup, Usage, Troubleshooting and Plugins pages (Blender, MuJoCo,
+  Unreal, planned targets); the README is now an overview with a before/after animation
+  (`scripts/make_hero.py`).
+- `SECURITY.md` (private vulnerability reports) and `.github/CODEOWNERS`.
+
+### Changed
+- The Unreal bridge imports the lite GLB (baked textures) instead of the dense scene.
+
 ## [0.3.0] — 2026-10-17
 
 ### Added
