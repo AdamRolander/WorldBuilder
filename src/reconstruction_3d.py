@@ -69,7 +69,7 @@ class SAM3DReconstructor:
         if not Path(config_path).exists():
             raise FileNotFoundError(
                 f"SAM 3D config not found: {config_path}\n"
-                f"  Download the checkpoints per README §4 (the 'mv' step is easy to miss).")
+                f"  Download the checkpoints per docs/SETUP.md step 4 (the 'mv' step is easy to miss).")
 
         if (SAM3DReconstructor._shared_inference is not None
                 and SAM3DReconstructor._shared_config_path == config_path):
