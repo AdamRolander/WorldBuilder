@@ -23,13 +23,23 @@ On Blender 3.6 to 4.1 the same zip installs as a legacy add-on through
 
 ## Use
 
-Start the server on the GPU machine:
+Start the server on the GPU machine. For the fully local detector, the VLM server runs too,
+in its own terminal and environment (skip it if you use Gemini):
 
 ```bash
+# terminal 1: the local detector (Qwen3-VL), listens on 127.0.0.1:8765
+conda activate worldbuilder-vlm
+python vlm_server/server.py
+
+# terminal 2: the WorldBuilder server Blender talks to
 conda activate worldbuilder-main
 python -m webapp.server                  # this computer only
 python -m webapp.server --host 0.0.0.0   # if Blender runs on another computer
 ```
+
+The add-on only ever needs the second address (**Server URL**, port 5174); the web app finds
+the VLM server itself. The **Detector** preference takes a name, not a URL: leave it empty
+for the server's default, or type `qwen` (local) or `gemini` (cloud, needs `GEMINI_API_KEY`).
 
 Then in Blender, open the sidebar in the 3D Viewport (**N**) and the **WorldBuilder** tab:
 
@@ -58,6 +68,9 @@ Check one known dimension, such as a door or a counter, before relying on it.
 
 ## Troubleshooting
 
+- **"Local VLM offline"**: the web app is up but nothing is listening on port 8765. Start
+  `python vlm_server/server.py` in the `worldbuilder-vlm` environment (it takes about a minute
+  to load), or use the Gemini detector.
 - **"Server unreachable"**: the server isn't running, or it only listens on `127.0.0.1` and
   Blender is on another computer (start it with `--host 0.0.0.0`). **Check server** tells you
   which.
