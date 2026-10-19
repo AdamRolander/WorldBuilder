@@ -11,7 +11,7 @@ Exposes:
     GET  /api/vlm-status            proxies VLM server /health
     GET  /api/demos                 list of pre-baked scenes in outputs/
     POST /api/upload                accept image, queue pipeline job, return job_id
-    GET  /api/jobs/<job_id>         job state (stage 1-5, status, scene_id)
+    GET  /api/jobs/<job_id>         job state (stage 1-5, status, scene_id, progress: step of 4, objects, ETA)
     GET  /api/scenes/<scene>        scene manifest (objects, layout, files)
     GET  /api/scenes                finished scenes, newest first
     GET  /api/scenes/<scene>/glb    the scene as one GLB (?lite=1: decimated + baked textures;
@@ -94,6 +94,43 @@ def _derive_stage(output_dir: Path) -> int:
     return 5
 
 
+STEPS = ("Detecting objects", "Segmenting", "Building 3D objects", "Assembling the scene")
+ASSEMBLY_SECONDS = 60       # typical stage 4 on the reference photos; only used for the ETA
+
+
+def _progress(output_dir: Path, job: dict) -> dict:
+    """Four user-facing steps (detect, segment, 3D objects, assemble) and, during the
+    long one, objects done / total with an ETA from the seconds per object so far."""
+    from src import stage3_cache
+    if not (output_dir / "detected_objects.json").exists():
+        step = 1
+    elif not (output_dir / "segmentation_results.json").exists():
+        step = 2
+    elif not (stage3_cache.cache_dir(output_dir / "3d_models") / "raw.json").exists():
+        step = 3
+    elif not (output_dir / "viewer.html").exists():
+        step = 4
+    else:
+        step = 5
+    now = time.time()
+    if job.get("_step") != step:
+        job["_step"], job["_step_t"] = step, now
+    out = {"step": min(step, 4), "steps": len(STEPS), "name": STEPS[min(step, 4) - 1],
+           "step_seconds": round(now - job["_step_t"], 1),
+           "elapsed_seconds": round(now - job.get("_t0", now), 1),
+           "done": None, "total": None, "fraction": None, "eta_seconds": None}
+    if step == 3:
+        pr = stage3_cache.load_progress(output_dir / "3d_models")
+        if pr and pr.get("total"):
+            out.update(done=pr["done"], total=pr["total"], fraction=round(pr["done"] / pr["total"], 3))
+            if pr["done"]:
+                per = pr["seconds"] / pr["done"]
+                out["eta_seconds"] = round((pr["total"] - pr["done"]) * per + ASSEMBLY_SECONDS)
+    elif step == 4:
+        out["eta_seconds"] = max(0, round(ASSEMBLY_SECONDS - out["step_seconds"]))
+    return out
+
+
 def _prune_jobs():
     cutoff = time.time() - JOB_TTL_SEC
     with _jobs_lock:
@@ -111,7 +148,7 @@ def _run_job(job_id: str, image_path: Path, scene_id: str, detector: str | None)
                 from main import process_image as _pi
                 _process_image = _pi
             with _jobs_lock:
-                _jobs[job_id].update(status='running', stage=1)
+                _jobs[job_id].update(status='running', stage=1, _t0=time.time())
 
             stop_poller = threading.Event()
 
@@ -119,8 +156,10 @@ def _run_job(job_id: str, image_path: Path, scene_id: str, detector: str | None)
                 while not stop_poller.is_set():
                     s = _derive_stage(output_dir)
                     with _jobs_lock:
-                        if _jobs.get(job_id, {}).get('status') == 'running':
-                            _jobs[job_id]['stage'] = s
+                        job = _jobs.get(job_id, {})
+                        if job.get('status') == 'running':
+                            job['stage'] = s
+                            job['progress'] = _progress(output_dir, job)
                     time.sleep(1.0)
 
             t = threading.Thread(target=poll_stage, daemon=True)
@@ -245,7 +284,10 @@ def scene_manifest(scene_id):
     objects = [{"id": o["id"], "label": o["label"], "confidence": o.get("confidence"),
                 "file": f"/outputs/{scene_id}/3d_models/{Path(o['ply_path']).name}",
                 "supported_by": o.get("supported_by")} for o in data.get("objects", [])]
+    sizes = {k: round((d / f).stat().st_size / 1e6, 1) if (d / f).exists() else None
+             for k, f in (("lite_mb", "scene_lite.glb"), ("full_mb", "scene.glb"))}
     return jsonify({"scene_id": scene_id, "objects": objects, "failed": data.get("failed", []),
+                    "sizes": sizes,
                     "metadata": data.get("metadata", {}), "layout": layout,
                     "viewer": f"/outputs/{scene_id}/viewer.html",
                     "glb": f"/api/scenes/{scene_id}/glb" if (d / "scene.glb").exists() else None,
@@ -261,8 +303,14 @@ def list_scenes():
     for d in OUTPUTS_DIR.iterdir():
         rec = d / "reconstruction_results.json"
         if d.is_dir() and rec.exists():
+            try:
+                n_objects = len(json.loads(rec.read_text()).get("objects", []))
+            except ValueError:
+                n_objects = None
+            sizes = {k: round((d / f).stat().st_size / 1e6, 1) if (d / f).exists() else None
+                     for k, f in (("lite_mb", "scene_lite.glb"), ("full_mb", "scene.glb"))}
             scenes.append({"scene_id": d.name, "modified": rec.stat().st_mtime,
-                           "has_lite": (d / "scene_lite.glb").exists()})
+                           "has_lite": (d / "scene_lite.glb").exists(), "objects": n_objects, **sizes})
     scenes.sort(key=lambda s: -s["modified"])
     return jsonify({"scenes": scenes})
 

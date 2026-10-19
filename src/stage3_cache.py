@@ -74,6 +74,26 @@ def load_metric_scale(models_dir: Path) -> Optional[float]:
     return s if s > 0 else None
 
 
+def save_progress(models_dir: Path, done: int, total: int, seconds: float) -> None:
+    """How far stage 3 is, for clients that show progress (the web app, the Blender add-on).
+
+    Written after every object; failures to write are ignored, it is only a display aid."""
+    try:
+        p = cache_dir(models_dir) / "progress.json"
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"done": done, "total": total, "seconds": round(seconds, 1)}))
+        tmp.replace(p)
+    except OSError:
+        pass
+
+
+def load_progress(models_dir: Path) -> Optional[Dict]:
+    try:
+        return json.loads((cache_dir(models_dir) / "progress.json").read_text())
+    except (OSError, ValueError):
+        return None
+
+
 def save_raw(models_dir: Path, results: List[Dict], failed: List[Dict], source_image: str) -> Path:
     d = cache_dir(models_dir)
     d.mkdir(parents=True, exist_ok=True)
