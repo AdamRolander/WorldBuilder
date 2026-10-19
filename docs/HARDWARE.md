@@ -21,12 +21,33 @@ which includes PyTorch's cache and ~0.4 GB of desktop.
 | 4 assemble + exports | none | 0 | 0 | CPU, 20–100 s (pose search and instance sharing dominate) + ~25 s for the lite GLB |
 
 Only one large model is on the GPU at a time (the README's "VRAM dance").
-Wall-clock on the 5090: 175–430 s per photo for 18–44 objects — about 8 s
-per object in stage 3, 35 s for local detection, 5–13 s for segmentation.
 System RAM: 62 GB on the dev box; the parked models take roughly 30 GB of
 it, so treat 48 GB as the practical minimum and 64 GB as comfortable.
 Disk: ~15 GB of weights plus the Hugging Face cache for the VLM (~18 GB),
-and 0.8–2 GB per scene with the full-resolution meshes.
+and 0.8–4 GB per scene with the full-resolution meshes.
+
+### Per phase, twelve photos (2026-10-10)
+
+Every run now writes `metrics.json` (seconds per phase, time to the first
+object, seconds per object, device-wide and per-process memory peaks; see
+[BENCHMARKS.md](BENCHMARKS.md)). On twelve photos with 4–77 object
+instances each (industrial halls, rooms, outdoor scenes):
+
+| phase | seconds | device peak | notes |
+| --- | ---: | ---: | --- |
+| detect (local VLM) | 11–35, typically 30 | 18–22.5 GB | independent of scene size |
+| segment (SAM 3) | 1–10 | 6–10 GB | includes the first load when cold |
+| reconstruct (SAM 3D) | **4.5–6.7 per object** (median), 5–11 at the 90th percentile | 22–26.4 GB (17.8–20.2 GB allocated) | linear in the number of objects: 26 s for 4, 503 s for 77. This is the bottleneck |
+| metric scale (MoGe-2) | 4–13 | — | subprocess |
+| stage 4: layout, placement, room, world export | 4–90 | 0 | CPU; placement dominates, then photo re-projection |
+| exports: viewer, GLB, lite GLB | 4–45 | 0 | CPU; the lite GLB bake dominates |
+| **time to first object** | 23–85, typically 40 | | detection + segmentation + model wake-up |
+| **total** | 70 s (4 objects) to 870 s (77 objects) | **26.4 GB** | |
+
+The device peak during SAM 3D is higher than in the table above because it
+includes PyTorch's cache, which grows into whatever memory is free on a
+32 GB card; the allocated figure (≤ 20.2 GB) is what a smaller card has to
+fit.
 
 ## What that means for cards
 
@@ -34,7 +55,7 @@ and 0.8–2 GB per scene with the full-resolution meshes.
 | --- | --- | --- |
 | 32 GB+ | RTX 5090, A6000 (48), L40S (48), A100 | Works. This is the tested configuration. |
 | 24 GB | RTX 3090 / 3090 Ti, RTX 4090, A5000, L4 (cloud), A10G (cloud, 22.3 GB usable) | **Should work, untested.** SAM 3D's 19.2 GB allocated peak fits; the local VLM at ~21 GB is tight, so close other GPU apps or use the Gemini detector. Expect it to be slower than a 5090 (a 3090 maybe 2×). The first person to run this owes the table a row (task T23). |
-| 16 GB | RTX 4080, 4060 Ti 16 GB, 5070 Ti, A4000 | **Not as is.** SAM 3D does not fit. Would need half-precision or offloading inside SAM 3D (unexplored, roadmap `PIPE-15`), plus the Gemini detector or a 4-bit VLM. |
+| 16 GB | RTX 4080, 4060 Ti 16 GB, 5070 Ti, A4000 | **Not as is.** SAM 3D does not fit. Would need half-precision or offloading inside SAM 3D (unexplored), plus the Gemini detector or a 4-bit VLM. |
 | ≤ 12 GB | RTX 3060, 4070, laptops | No for the models. Fine for everything downstream of them. |
 
 **It has to be NVIDIA.** SAM 3 hard-codes CUDA tensors, and SAM 3D depends
@@ -71,8 +92,7 @@ python -m src.mujoco_export outputs/<scene> --stabilize
 ```
 
 and the viewer, the Blender add-on and the MuJoCo environment only need the
-files a server produced. See [CONTRIBUTOR_TASKS.md](CONTRIBUTOR_TASKS.md)
-for work that fits this setup, and rent-a-GPU options are a few dollars for
+files a server produced. Issues labelled `no-gpu` in the tracker fit this setup, and rent-a-GPU options are a few dollars for
 an afternoon if you want to run the models once.
 
 ## Reports from other machines

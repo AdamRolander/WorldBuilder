@@ -36,6 +36,23 @@ def _load_world_mesh(ply_path: Path, name: str) -> Optional[trimesh.Trimesh]:
     return out
 
 
+def _make_translucent(mesh: trimesh.Trimesh, alpha: float = 0.45) -> None:
+    """Glass: blend instead of opaque, for any importer that reads glTF alpha."""
+    vis = mesh.visual
+    if vis.kind == "texture" and getattr(vis, "material", None) is not None:
+        mat = vis.material
+        if not isinstance(mat, trimesh.visual.material.PBRMaterial):
+            mat = mat.to_pbr()
+        mat.alphaMode = "BLEND"
+        mat.baseColorFactor = [255, 255, 255, int(255 * alpha)]
+        mat.doubleSided = True
+        vis.material = mat
+    elif vis.kind == "vertex":
+        c = np.asarray(vis.vertex_colors).copy()
+        c[:, 3] = int(255 * alpha)
+        mesh.visual.vertex_colors = c
+
+
 def export_scene_glb(output_dir: Path, results: List[Dict], room_file: str = "3d_models/room.ply",
                      filename: str = "scene.glb", include_room: bool = True,
                      lite_faces: Optional[int] = None) -> Optional[Path]:
@@ -75,7 +92,9 @@ def export_scene_glb(output_dir: Path, results: List[Dict], room_file: str = "3d
                              tex_size=texture_budget(ext, scene_extent or 4 * ext))
             lite.metadata.update(mesh.metadata)
             mesh = lite
-        mesh.metadata.update({"label": r.get("label"), "confidence": r.get("confidence"),
+        if r.get("glass"):
+            _make_translucent(mesh)
+        mesh.metadata.update({"label": r.get("label"), "confidence": r.get("confidence"), "glass": bool(r.get("glass")),
                               "supported_by": r.get("supported_by"), "support": r.get("support")})
         scene.add_geometry(mesh, node_name=name, geom_name=name)
         n += 1

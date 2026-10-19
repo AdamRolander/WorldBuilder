@@ -19,7 +19,7 @@ file path, so keep it dependency-free (stdlib only).
 # pipeline works without it.
 DETECTION_FIELDS = ("id", "label", "description", "expected_instances", "bbox_2d")
 
-DETECTION_PROMPT = """You are helping build a 3D model of the scene in this photo. List every distinct TYPE of physical object that a 3D artist would model as a separate movable asset.
+DETECTION_PROMPT = """You are helping build a 3D model of the scene in this photo. List every distinct TYPE of physical object that a 3D artist would model as a separate asset: movable things, and also built-in furniture (a kitchen island, a run of base cabinets, a wall cabinet, a bar counter, a shelving unit, a vanity, a workbench, a range hood). Not the room itself.
 
 Return a JSON array. Each entry has:
 - "id": sequential integer starting at 1
@@ -30,8 +30,9 @@ Return a JSON array. Each entry has:
 
 Rules:
 - One entry per object TYPE. If there are six identical chairs, output "chair" once with expected_instances "multiple".
-- Include furniture, appliances, fixtures, decor, plants, tools, equipment, vehicles, and outdoor objects (trees, benches, play structures).
-- Do NOT list walls, floors, ceilings, windows, doors, countertops, or other architecture — those are reconstructed separately.
+- Include furniture, built-in furniture (cabinets, counters, islands, shelving, bars, vanities, benches), appliances, fixtures, decor, plants, tools, equipment, vehicles, and outdoor objects (trees, benches, play structures).
+- A built-in is listed as one piece of furniture ("kitchen cabinets", "bar counter"), not as its doors, drawers or countertop.
+- Do NOT list walls, floors, ceilings, windows, doors, or other architecture — those are reconstructed separately.
 - Do NOT list people or animals.
 - Do NOT list parts of an object as separate objects (a chair's legs, a lamp's shade).
 - Small clutter counts if it is clearly visible (mug, book, bottle), but stop at 25 entries, most prominent first.

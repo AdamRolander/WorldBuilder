@@ -5,7 +5,7 @@ back a textured mesh (as a GLB) and a pose (translation, quaternion, scale)
 in the camera frame. Then ``src/room_layout.py`` recovers the room from the
 scene point map and ``src/room_generator.py`` places the objects.
 
-What changed from the demo-era version (docs/AUDIT.md §3):
+What changed from the demo-era version:
 
 * **One point map per scene, not per object.** SAM 3D runs MoGe on the whole
   image inside every call. We compute it once via the pipeline's own
@@ -31,7 +31,7 @@ from typing import Dict, List, Optional
 import numpy as np
 from PIL import Image
 
-from src import stage3_cache
+from src import profiling, stage3_cache
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _SAM3D_REPO = _PROJECT_ROOT / "sam3d_objects_repo"
@@ -215,7 +215,8 @@ class SAM3DReconstructor:
         if use_shared:
             try:
                 t0 = time.time()
-                scene_pm = self.compute_scene_pointmap(image)
+                with profiling.phase("pointmap"):
+                    scene_pm = self.compute_scene_pointmap(image)
                 print(f"✓ Scene point map {tuple(scene_pm['pointmap'].shape[:2])} "
                       f"in {time.time() - t0:.1f}s (shared across {len(segmentation_results)} objects)")
             except Exception as e:
@@ -239,13 +240,14 @@ class SAM3DReconstructor:
                     raise ValueError("mask too small")
 
                 pm_arg = scene_pm["pointmap"] if scene_pm is not None else None
-                try:
-                    output = self.inference(image, mask, seed=seed, pointmap=pm_arg)
-                except Exception as e:
-                    if pm_arg is None:
-                        raise
-                    print(f"  ⚠️  shared-pointmap path failed ({str(e)[:80]}); retrying with per-object MoGe")
-                    output = self.inference(image, mask, seed=seed)
+                with profiling.phase("reconstruct"):
+                    try:
+                        output = self.inference(image, mask, seed=seed, pointmap=pm_arg)
+                    except Exception as e:
+                        if pm_arg is None:
+                            raise
+                        print(f"  ⚠️  shared-pointmap path failed ({str(e)[:80]}); retrying with per-object MoGe")
+                        output = self.inference(image, mask, seed=seed)
 
                 translation = output['translation'].cpu().numpy()[0]
                 rotation = output['rotation'].cpu().numpy()[0]
@@ -264,6 +266,7 @@ class SAM3DReconstructor:
                     'mask_path': seg.get('mask_path'),
                     'seconds': round(time.time() - t0, 2),
                 })
+                profiling.mark("first_object")
                 print(f"  ✓ pose t={np.round(translation, 3).tolist()} "
                       f"s={np.round(scale, 3).tolist()} ({time.time() - t0:.1f}s)")
                 del output
@@ -289,7 +292,8 @@ class SAM3DReconstructor:
             stage3_cache.save_pointmap(
                 output_path, scene_pm["pointmap"].detach().float().cpu().numpy(),
                 scene_pm["valid"], scene_pm["intrinsics"], (H, W))
-        self._estimate_metric_scale(output_path)
+        with profiling.phase("metric_scale"):
+            self._estimate_metric_scale(output_path)
         if results:
             from src.scene_assembly import assemble_from_cache
             try:

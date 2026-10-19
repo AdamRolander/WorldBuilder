@@ -21,7 +21,7 @@ import numpy as np
 from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from src import stage3_cache  # noqa: E402
+from src import profiling, stage3_cache  # noqa: E402
 from src.scene_assembly import assemble_from_cache, finalize_scene, load_structural_masks  # noqa: E402
 
 
@@ -32,6 +32,7 @@ def replay(scene: Path, placement=None, build_room=True, quiet=False, lite=True)
         raise SystemExit(f"{scene}: no stage-3 cache (3d_models/stage3/raw.json)")
     image = np.asarray(Image.open(raw["source_image"]).convert("RGB"))
     t = time.time()
+    profiling.start(sample_gpu=False)
     results, failed = assemble_from_cache(models, image, load_structural_masks(scene / "masks") or None,
                                           build_room=build_room, verbose=not quiet, placement=placement)
     meta = {}

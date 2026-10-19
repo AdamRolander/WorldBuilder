@@ -13,7 +13,7 @@ photo.jpg
 detected_objects_raw.json  ── src/detection_postprocess.py ──▶ detected_objects.json
    │        [{id, label, description, expected_instances, bbox_2d?}]
    ▼  stage 2  src/segmentation.py (SAM 3)
-segmentation_results.json + masks/*.png (+ masks/structural_{floor,wall,ceiling}.png)
+segmentation_results.json + masks/*.png (+ masks/structural_{floor,wall,ceiling,window}.png)
    │        [{id, label, mask_path, bbox, confidence, prompt_used, source, area_px}]
    ▼  stage 3  src/reconstruction_3d.py (SAM 3D Objects; MoGe point map computed once)
 3d_models/stage3/  (src/stage3_cache.py — everything below this line is CPU and replayable)
@@ -22,11 +22,15 @@ segmentation_results.json + masks/*.png (+ masks/structural_{floor,wall,ceiling}
    │        pointmap.npz       scene point map (camera-frame world), validity, intrinsics
    ▼  stage 4  src/scene_assembly.py
    │   4a layout     src/room_layout.py    floor, gravity (all surfaces), yaw, walls, ceiling → layout.json
+   │       clean-up  src/scene_assembly.py  parts and group masks, structural detections (floor, ceiling,
+   │                                       views through a window), glass
    │   4b placement  src/placement.py      depth refit, silhouette pose search (src/pose_fit.py), contact
-   │                                       support, settling, instance sharing, walls, visibility, duplicates
+   │                                       support (proxy boxes for failed supporters), settling, upright,
+   │                                       squaring, instance sharing, walls (contact, gap closing),
+   │                                       restacking, visibility, duplicates
    │   4c room       src/room_texture.py   textured shell quads (predicted where unseen) + photo relief,
    │                 src/builtin_boxes.py  solid boxes behind the relief → room.glb (+ room.ply)
-   ▼  exports  reconstruction_results.json · world-space PLYs · scene_combined.ply
+   ▼  exports  reconstruction_results.json · world-space PLYs · metrics.json
               scene.glb / scene_lite.glb (src/scene_export.py, src/mesh_bake.py)
               viewer.html (src/viewer_generator.py) · mujoco/scene.xml (src/mujoco_export.py)
 ```
@@ -64,15 +68,15 @@ scenes, and can be re-run on any finished scene with
 
 | decision | why |
 | --- | --- |
-| One prompt file for all detectors | the label becomes SAM 3's text prompt; backends must be steered identically (AUDIT §1.2) |
+| One prompt file for all detectors | the label becomes SAM 3's text prompt; backends must be steered identically |
 | Detector output is treated as untrusted | local models loop, invent parts, bake counts into labels; `clean_detections` is the safety net |
-| Our threshold is pushed into `Sam3Processor` | its default 0.5 pre-filter made every lower threshold dead code (AUDIT §2.1) |
+| Our threshold is pushed into `Sam3Processor` | its default 0.5 pre-filter made every lower threshold dead code |
 | Point map computed once, passed to every SAM 3D call | saves N−1 MoGe passes and is the input to the layout stage |
 | Layout before placement | gravity alignment must precede any "up"-based heuristic; the floor plane replaces "lowest object" as the floor |
-| Placement asks the photo, not the boxes | per object: depth from the point map under its mask, support from the surface under the mask's bottom edge, and every move kept only if the silhouette still matches the mask. Box-overlap and label-list rules (the September version, still in `room_generator.py` as the no-point-map fallback) moved more objects wrong than right (VALIDATION §4.1) |
+| Placement asks the photo, not the boxes | per object: depth from the point map under its mask, support from the surface under the mask's bottom edge, and every move kept only if the silhouette still matches the mask. Box-overlap and label-list rules (the September version, still in `room_generator.py` as the no-point-map fallback) moved more objects wrong than right |
 | Gravity from all surfaces | a floor mask that spans a rug, a step or a shower tray tilts a fitted plane; walls and table tops outvote it |
 | Strong walls override object bounds | thousands of point-map votes beat one noisy per-object depth; objects are nudged back inside (capped) |
-| Room = textured shell + relief | planes get real textures at photo resolution (unseen parts continue the visible material); what is neither object nor plane (counters, cabinets, beams) is meshed from the point map. A prior-placed plane never inherits pixels from geometry behind it; an observed wall does (windows) |
+| Room = textured shell + relief | planes get real textures at photo resolution (unseen parts continue the visible material: regular patterns by whole periods, others by their fine detail, with the local colour of the seen surface around each hidden patch); what is neither object nor plane (counters, cabinets, beams) is meshed from the point map. A prior-placed plane never inherits pixels from geometry behind it; an observed wall does (windows), but a window never teaches a wall its material |
 | Stage 3 output is immutable | meshes, raw poses and the point map are cached, so stage 4 is a pure function of files and can be replayed, compared (`--placement legacy|raw`) and developed without a GPU |
 | Thin DCC clients over HTTP | SAM licence, GPU requirements, one server for every consumer |
 
@@ -95,7 +99,7 @@ scenes, and can be re-run on any finished scene with
   (`scripts/estimate_metric_scale.py` does, with MoGe-2) sets it;
   everything else reads it from `layout.json`.
 * **Progress hooks**: the webapp polls the filesystem; a callback in
-  `process_image` (CODE-3) would remove that.
+  `process_image` would remove that.
 
 ## 5. Files that matter when debugging
 

@@ -74,6 +74,12 @@ def find_faces(points: np.ndarray, keep: np.ndarray, layout: rl.RoomLayout,
                 used[max(0, b - 1):b + 2] = True
                 near = sel & (np.abs(c - 0.5 * (edges[b] + edges[b + 1])) < 1.5 * bin_w)
                 coord = float(np.median(c[near]))
+                if sign * coord >= 0:
+                    # The camera is at the origin: a plane on this side of it
+                    # with this normal faces away and cannot have been seen.
+                    # Such pixels are noisy normals on a thin edge (the lip of
+                    # a counter seen almost edge-on), not a surface to extrude.
+                    continue
                 lab, n = ndimage.label(ndimage.binary_closing(near, iterations=2))
                 for i in range(1, n + 1):
                     comp = (lab == i) & near
@@ -101,8 +107,53 @@ def find_faces(points: np.ndarray, keep: np.ndarray, layout: rl.RoomLayout,
     return faces[:max_faces]
 
 
+def observed_top_depth(face: Dict, front: float, points: np.ndarray, up: np.ndarray, room: float,
+                       max_depth: float, gap_frac: float = 0.03, image: Optional[np.ndarray] = None,
+                       color_tol: float = 40.0) -> Optional[float]:
+    """How far behind a vertical face the photo saw its top surface run.
+
+    A counter front says nothing about how deep the counter is; its top
+    does. Upward-facing points just above the face's top edge, within its
+    width and behind it, are the top. Their distances behind the face are
+    sorted and cut at the first gap: a monocular depth map draws a smooth
+    ramp across a hidden aisle to the next counter, but sparsely, so the
+    ramp shows up as gaps. Where the ramp is dense enough to have no gap
+    (a bar counter with the back counter at the same height behind it),
+    the photo still tells them apart: with ``image`` (point-map resolution)
+    the top is grown in the image from its front edge only while its colour
+    stays that of the front edge. Returns None when no top was seen (a
+    cabinet above eye height)."""
+    axis, sign = face["axis"], face["sign"]
+    others = [a for a in range(3) if a != axis]
+    k_y = others.index(1)
+    k_l = 1 - k_y
+    top_y = face["hi"][k_y]
+    lat = points[..., others[k_l]]
+    behind = (front - points[..., axis]) * sign
+    with np.errstate(invalid="ignore"):
+        sel = up & (np.abs(points[..., 1] - top_y) < 0.04 * room) \
+            & (lat >= face["lo"][k_l]) & (lat <= face["hi"][k_l]) & (behind > -0.01 * room) & (behind < max_depth)
+    if image is not None and int(sel.sum()) >= 30:
+        from scipy import ndimage
+        b = behind[sel]
+        seed = sel & (behind <= np.percentile(b, 10))
+        col = np.median(image[seed].reshape(-1, 3).astype(np.float32), axis=0)
+        same = sel & (np.abs(image.astype(np.float32) - col).mean(axis=-1) < color_tol)
+        lab, _ = ndimage.label(ndimage.binary_closing(same, iterations=1) & sel)
+        ids = np.unique(lab[seed & (lab > 0)])
+        if len(ids):
+            sel = np.isin(lab, ids)
+    t = np.sort(behind[sel])
+    if len(t) < 30:
+        return None
+    gaps = np.flatnonzero(np.diff(t) > gap_frac * room)
+    end = t[gaps[0]] if len(gaps) else t[-1]
+    return float(max(end, 0.0))
+
+
 def face_to_box(face: Dict, layout: rl.RoomLayout, points: np.ndarray, valid: np.ndarray,
-                inset_frac: float = 0.008, slab_frac: float = 0.04) -> Dict:
+                inset_frac: float = 0.008, slab_frac: float = 0.04, max_depth_ratio: float = 1.5,
+                up: Optional[np.ndarray] = None, image: Optional[np.ndarray] = None) -> Dict:
     """Extrude a face away from its normal to the room's shell.
 
     Returns ``{"min", "max", "axis", "sign", "thin"}``. The box is thinned
@@ -129,7 +180,40 @@ def face_to_box(face: Dict, layout: rl.RoomLayout, points: np.ndarray, valid: np
 
     thin = False
     depth = abs(front - back)
+    face_size = float(max(np.asarray(face["hi"]) - np.asarray(face["lo"])))
+    if axis != 1:
+        # A low built-in stands on the floor: when the lower part of a
+        # cabinet front is hidden (behind an island, below the frame), its
+        # box goes down to the floor rather than hovering. Upper cabinets
+        # (top in the upper part of the room) hang and are left alone.
+        H = float(dims[1])
+        if hi[1] < mn[1] + 0.6 * H and lo[1] > mn[1] + 0.02 * H:
+            lo[1] = mn[1]
+    if axis != 1 and up is not None:
+        # A vertical face (a counter or cabinet front) is at most as deep as
+        # it is tall or wide, and no deeper than its top was seen to run. The seen
+        # top itself is a horizontal face with its own box down to the floor.
+        k_y = others.index(1)
+        height = float(face["hi"][k_y] - face["lo"][k_y])
+        width = float(face["hi"][1 - k_y] - face["lo"][1 - k_y])
+        seen = observed_top_depth(face, face["coord"], points, up, room, depth, image=image)
+        limit = max(min(height, width), 0.04 * room)
+        if seen is not None and seen > 0.02 * room:
+            limit = min(limit, seen + 0.01 * room)
+        if limit < depth:
+            b = front - sign * limit
+            lo[axis], hi[axis] = min(front, b), max(front, b)
+            depth = limit
     if axis != 1 and depth > 0.45 * dims[axis]:
+        thin = True
+    elif depth > max_depth_ratio * face_size:
+        # A solid is not much deeper than its visible face is wide or tall.
+        # The top of a chair back or the end of a desk, read as a small
+        # face in mid-room, used to be extruded all the way to the far
+        # wall: a rod across the classroom. It becomes a block as deep as
+        # it is large instead.
+        b = front - sign * max_depth_ratio * face_size
+        lo[axis], hi[axis] = min(front, b), max(front, b)
         thin = True
     else:
         # free-space check: observed points strictly inside the box
@@ -143,6 +227,23 @@ def face_to_box(face: Dict, layout: rl.RoomLayout, points: np.ndarray, valid: np
             "pixels": face["pixels"]}
 
 
+def occupied_fraction(box: Dict, object_boxes: List[Tuple[np.ndarray, np.ndarray]], tol: float, n: int = 6) -> float:
+    """Share of a box's volume that lies inside the bounding box of a placed
+    object. Where a reconstructed object already stands (a vanity, a toilet),
+    the background surfaces around it are parts of that object the mask
+    missed, and a solid block there would bury it."""
+    if not object_boxes:
+        return 0.0
+    lo, hi = np.asarray(box["min"], float), np.asarray(box["max"], float)
+    t = (np.arange(n) + 0.5) / n
+    g = np.stack(np.meshgrid(t, t, t, indexing="ij"), axis=-1).reshape(-1, 3)
+    pts = lo + g * (hi - lo)
+    inside = np.zeros(len(pts), bool)
+    for omn, omx in object_boxes:
+        inside |= np.all((pts >= omn - tol) & (pts <= omx + tol), axis=1)
+    return float(inside.mean())
+
+
 def _contained(a: Dict, b: Dict, tol: float) -> bool:
     return bool(np.all(np.asarray(a["min"]) >= np.asarray(b["min"]) - tol)
                 and np.all(np.asarray(a["max"]) <= np.asarray(b["max"]) + tol))
@@ -150,8 +251,9 @@ def _contained(a: Dict, b: Dict, tol: float) -> bool:
 
 def build_builtins(points_aligned: np.ndarray, keep: np.ndarray, valid: np.ndarray, layout: rl.RoomLayout,
                    K: np.ndarray, image_rgb: np.ndarray, depth: np.ndarray,
-                   blocked: Optional[np.ndarray] = None, texel_density: Optional[float] = None
-                   ) -> Tuple[Dict, List[Dict]]:
+                   blocked: Optional[np.ndarray] = None, texel_density: Optional[float] = None,
+                   object_boxes: Optional[List[Tuple[np.ndarray, np.ndarray]]] = None,
+                   max_occupied: float = 0.5) -> Tuple[Dict, List[Dict]]:
     """Meshes (``room_builtin_<i>_face`` textured, ``room_builtin_<i>_body``
     flat) and the list of boxes (for ``layout.json`` and physics export)."""
     import trimesh
@@ -159,11 +261,15 @@ def build_builtins(points_aligned: np.ndarray, keep: np.ndarray, valid: np.ndarr
     mn, mx = np.asarray(layout.bounds_min, float), np.asarray(layout.bounds_max, float)
     room = float(np.max(mx - mn))
     faces = find_faces(points_aligned, keep, layout)
-    boxes = [face_to_box(f, layout, points_aligned, valid) for f in faces]
+    up = valid & (rl.compute_normals(points_aligned.astype(np.float64), valid)[..., 1] > 0.8)
+    small = np.asarray(Image.fromarray(image_rgb).resize(valid.shape[::-1], Image.BILINEAR))
+    boxes = [face_to_box(f, layout, points_aligned, valid, up=up, image=small) for f in faces]
     kept: List[Tuple[Dict, Dict]] = []
     for f, b in zip(faces, boxes, strict=True):                 # larger faces first
         if any(_contained(b, kb, 0.01 * room) for _, kb in kept):
             continue
+        if occupied_fraction(b, object_boxes or [], 0.02 * room) > max_occupied:
+            continue                                            # a placed object is already the solid here
         kept.append((f, b))
     if texel_density is None:
         texel_density = 1024.0 / room

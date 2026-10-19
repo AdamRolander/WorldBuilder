@@ -12,8 +12,7 @@ the previous version re-implemented it on the GPU through pytorch3d three
 times). Mesh vertices are loaded once per object and cached, because the
 poses change during assembly but the geometry does not.
 
-Changes versus the demo-era code (details and measurements in
-docs/AUDIT.md):
+Changes versus the demo-era code:
 
 * **Keyword matching is token-based.** ``'table' in 'table lamp'`` used to
   force table lamps, tablets and bedside lamps onto the floor.

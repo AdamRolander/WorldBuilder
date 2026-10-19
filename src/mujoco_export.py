@@ -111,6 +111,8 @@ def export_mujoco(scene_dir: Path, out_dir: Optional[Path] = None, scale: Option
         from src.scene_export import export_scene_lite
         log("  building scene_lite.glb (decimated meshes with baked textures)...")
         export_scene_lite(scene_dir, rec["objects"])
+    from src.scene_edits import edited_glb
+    lite = edited_glb(scene_dir, lite=True) or lite          # the user's corrections, if any
     glb = trimesh.load(str(lite), process=False)
 
     s = float(scale if scale else layout.get("estimated_metric_scale", 1.0))
@@ -231,7 +233,7 @@ def export_mujoco(scene_dir: Path, out_dir: Optional[Path] = None, scale: Option
     for gname, geom in glb.geometry.items():
         if not gname.startswith("room"):
             continue
-        if (gname == "room_relief" or gname.startswith("room_builtin")) and (not include_relief or mjx):
+        if (gname.startswith("room_relief") or gname.startswith("room_builtin")) and (not include_relief or mjx):
             continue
         name = _safe(gname)
         vis = add_visual(name, geom, to_mj(geom.vertices))

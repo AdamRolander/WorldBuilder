@@ -26,7 +26,7 @@ def test_fill_keeps_what_was_seen_and_continues_the_material():
     vis = np.zeros((th, tw), bool)
     vis[20:90, 30:120] = True
     out, how = rt.fill_hidden(np.where(vis[..., None], tex, 0).astype(np.uint8), vis)
-    assert how == "tiled"
+    assert how.startswith("tiled")
     # well inside the seen area nothing changes
     np.testing.assert_array_equal(out[40:70, 50:100], tex[40:70, 50:100])
     # the unseen area carries the same two-tone material, not black and not a flat colour
@@ -98,14 +98,44 @@ def test_relief_meshes_a_counter_but_not_the_shell_or_objects():
     owner = np.zeros(valid.shape, np.int32)
     obj = np.zeros_like(valid); obj[int(0.78 * Hh):int(0.82 * Hh), int(0.45 * Ww):int(0.5 * Ww)] = True
     owner[obj] = 7                                # a small object on the counter
-    mesh, stats = rt.build_relief(P_a, valid, owner, layout, colors)
-    assert mesh is not None and stats["faces"] > 50
+    meshes, stats = rt.build_relief(P_a, valid, owner, layout, colors)
+    assert meshes and stats["faces"] > 50 and stats["pieces"] == len(meshes)
+    assert all(n.startswith("room_relief_") for n in meshes)
+    mesh = meshes["room_relief_00"]
     V = np.asarray(mesh.vertices)
     assert np.all(V[:, 1] > layout.floor_y + 0.3)                  # only the counter, not the floor
     assert stats["filled_hole_px"] > 0                              # the object's hole was closed
     cen = mesh.triangles_center
     assert np.mean(np.sum(mesh.face_normals * -cen, axis=1) > 0) > 0.95   # faces look at the camera
     assert mesh.visual.uv.min() >= 0 and mesh.visual.uv.max() <= 1
+
+
+def test_relief_has_no_sheet_between_a_near_and_a_far_surface():
+    """A raised block whose rim pixels are blends of block and floor (as a
+    depth estimator produces them), and a small object straddling the rim.
+    Neither may produce triangles that run along the viewing rays."""
+    from scipy import ndimage
+    R, P_cam, valid, colors, depth, hit, layout = _layout()
+    P_a = (P_cam @ layout.R_total.T).copy()
+    Hh, Ww = valid.shape
+    block = np.zeros_like(valid)
+    block[int(0.70 * Hh):int(0.9 * Hh), int(0.3 * Ww):int(0.7 * Ww)] = True
+    block &= hit == "floor"
+    P_a[block, 1] += 0.5
+    w_blend = ndimage.gaussian_filter(block.astype(np.float32), 0.8)       # soft rim, 0..1
+    rim = (w_blend > 0.02) & (w_blend < 0.98) & (hit == "floor")
+    P_a[rim, 1] = (P_cam @ layout.R_total.T)[rim, 1] + 0.5 * w_blend[rim]
+    owner = np.zeros(valid.shape, np.int32)
+    obj = np.zeros_like(valid)
+    obj[int(0.67 * Hh):int(0.73 * Hh), int(0.45 * Ww):int(0.5 * Ww)] = True       # half on, half off
+    owner[obj] = 3
+    meshes, stats = rt.build_relief(P_a, valid, owner, layout, colors)
+    assert meshes
+    for m in meshes.values():
+        # nothing between the two levels: the ramp from the floor up to the block is gone
+        assert np.all(np.asarray(m.vertices)[:, 1] > layout.floor_y + 0.3)
+        tri = np.asarray(m.vertices)[np.asarray(m.faces)]
+        assert float((tri[:, :, 1].max(1) - tri[:, :, 1].min(1)).max()) < 0.15
 
 
 def test_wall_prediction_is_layered_and_ignores_a_minority_material():
@@ -120,7 +150,7 @@ def test_wall_prediction_is_layered_and_ignores_a_minority_material():
     vis = np.zeros((th, tw), bool)
     vis[:, :108] = True
     fill, how = rt.synthesize_fill(tex.astype(np.uint8), vis, rows=True)
-    assert how == "tiled"
+    assert how.startswith("tiled")
     far = fill[:, 180:]
     assert far[10:50, :, 0].mean() > 160 and far[10:50, :, 2].mean() < 130     # paper, not the white panel
     assert abs(far[70:110, :, 0].mean() - 120) < 12                            # panelling below
@@ -138,7 +168,7 @@ def test_blurry_texels_are_predicted_when_the_surface_can_be():
     quality = np.ones((th, tw)); quality[:, 110:] = 0.05           # the right third was seen at a grazing angle
     smeared = tex.copy(); smeared[:, 110:] = 128                    # ...and is a smear in the photo
     out, how = rt.fill_hidden(smeared, vis, quality=quality)
-    assert how == "tiled"
+    assert how.startswith("tiled")
     assert out[:, 130:].astype(float).std() > 8                     # the pattern is back
     np.testing.assert_array_equal(out[20:70, 20:80], smeared[20:70, 20:80])
 
@@ -163,3 +193,32 @@ def test_builtin_box_under_a_counter_top():
     depth_a = np.where(valid, ((P_a @ layout.R_total) @ rl.OPENCV_TO_WORLD.T)[..., 2], np.nan)
     meshes, boxes = bb.build_builtins(P_a, counter, valid, layout, K, colors, depth_a)
     assert boxes and any(n.endswith("_face") for n in meshes) and any(n.endswith("_body") for n in meshes)
+
+
+def test_regular_pattern_is_tiled_in_phase_and_a_window_edge_is_not_a_material():
+    y, x = np.mgrid[:120, :200]
+    checker = ((((x // 20) + (y // 20)) % 2) * 200 + 30).astype(np.uint8)
+    checker = np.stack([checker] * 3, -1)
+    assert rt._stationary(checker)
+    pr, pc = rt._period(checker)
+    assert pr % 40 == 0 and pc % 40 == 0                    # whole periods of the 40-px pattern
+    # tiled from a patch that sits at (r0, c0) = (40, 60) in a larger plane: same phase everywhere
+    tiled = rt._tile_periodic(checker[40:120, 60:200], 40, 60, 300, 400)
+    yy, xx = np.mgrid[:300, :400]
+    expect = ((((xx // 20) + (yy // 20)) % 2) * 200 + 30)
+    assert np.mean(np.abs(tiled[..., 0] - expect) < 1) > 0.97
+    half_window = np.full((120, 200, 3), 180, np.uint8)
+    half_window[:, :100] = 60
+    assert not rt._stationary(half_window)
+
+
+def test_hidden_patch_takes_the_colour_around_it():
+    th, tw = 120, 200
+    ramp = np.linspace(80, 200, tw)[None, :, None] * np.ones((th, 1, 3))   # light falling off across a wall
+    tex = ramp.astype(np.uint8)
+    vis = np.ones((th, tw), bool)
+    vis[40:80, 150:180] = False                                 # a lamp in front of the bright end
+    fill = np.full((th, tw, 3), float(np.median(tex)), np.float32)
+    out = rt._match_local(tex, fill, vis)
+    hole = out[40:80, 150:180].mean()
+    assert abs(hole - tex[40:80, 150:180].mean()) < 15          # the bright end's colour, not the average

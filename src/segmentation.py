@@ -3,8 +3,7 @@
 Given the cleaned stage-1 object list, produce one binary mask per physical
 object instance. This is the hand-off that decides what SAM 3D gets to
 reconstruct, so most of the "the local VLM misses objects" complaints land
-here rather than in the VLM itself. Design notes (see docs/AUDIT.md §2 for
-the measurements behind them):
+here rather than in the VLM itself. Design notes:
 
 * ``Sam3Processor`` pre-filters detections at its own ``confidence_threshold``
   (default 0.5) *before* we ever see them. The old code then applied a 0.35
@@ -226,8 +225,8 @@ class SAM3Segmenter:
         min_mask_pixels: int = 100,
         max_mask_fraction: float = 0.6,
         prompt_strategy: str = "union",     # "union" | "label" | "description"
-        single_keep_ratio: float = 0.85,    # 1.0 reproduces the old hard top-1
-        max_instances_per_label: int = 12,
+        single_keep_ratio: float = 0.7,     # 1.0 reproduces the old hard top-1; the VLM calls many repeated things "single"
+        max_instances_per_label: int = 24,
         nms_iou: float = 0.5,
         use_box_fallback: bool = True,
     ) -> List[Dict]:
@@ -282,6 +281,18 @@ class SAM3Segmenter:
                                           "prompt_used": p, "source": "text"})
                     print(f"  '{p}': {len(scores)} candidate(s)"
                           + (f", best={scores.max():.2f}" if len(scores) else ""))
+
+                # SAM 3 knows short nouns best: "dining chair" can find nothing
+                # where "chair" finds all four stools. The head noun is tried
+                # before the single-box fallback.
+                head = label.split()[-1] if len(label.split()) > 1 else None
+                if not per_label and head and head.lower() not in (q.lower() for q in prompts):
+                    masks, scores, boxes = self.query_text(state, head)
+                    for m, sc in zip(masks, scores, strict=False):
+                        per_label.append({"label": label, "description": description,
+                                          "mask_array": m, "confidence": float(sc),
+                                          "prompt_used": head, "source": "text-head"})
+                    print(f"  '{head}' (head noun): {len(scores)} candidate(s)")
 
                 if not per_label and use_box_fallback and bbox_hint:
                     masks, scores, boxes = self.query_box(state, bbox_hint, W, H)
