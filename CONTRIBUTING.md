@@ -9,8 +9,8 @@ here is how to work on it without fighting it.
   should already say *what*.
 * Anything that touches geometry or a placement heuristic needs a test in
   `tests/` that fails without the change. CPU-only tests run everywhere;
-  GPU behaviour is verified manually per `docs/VALIDATION.md` and the
-  before/after numbers go in the PR.
+  GPU behaviour is verified manually (re-run a few photos, compare
+  `scripts/audit_scene.py` scores) and the before/after numbers go in the PR.
 * Prompt changes go in `src/prompts.py` only — both detector backends read
   it. Run `scripts/bench_detectors.py` before and after.
 * Keep the heavy stacks out of `pyproject.toml`; they are installed per

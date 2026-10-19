@@ -1,4 +1,4 @@
-"""Metric scale for a scene from MoGe-2 (roadmap PIPE-6).
+"""Metric scale for a scene from MoGe-2.
 
     python scripts/estimate_metric_scale.py outputs/<scene> [more scenes...]
 

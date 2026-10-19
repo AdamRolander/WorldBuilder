@@ -1,9 +1,73 @@
 # Changelog
 
 All notable changes to WorldBuilder. Format follows [Keep a Changelog](https://keepachangelog.com/);
-versions follow SemVer once `v0.2.0` is tagged.
+versions follow [SemVer](https://semver.org/) (0.x: minor = features, patch = fixes).
 
-## [Unreleased] — branch `audit-and-roadmap`
+## [Unreleased]
+
+## [0.3.0] — 2026-10-17
+
+### Added
+- Photo re-projection onto objects (`src/object_texture.py`): the side of each mesh the
+  photo saw takes the photo's pixels (own mask, front surface, depth agreement).
+- Open scenes: sky in the upper frame, or no ceiling and no wall observed, means no
+  invented walls; uneven ground is meshed as terrain; the viewer uses the sky's colour.
+- `metrics.json` per scene (`src/profiling.py`): seconds per phase, time to first object,
+  seconds per object, device-wide and per-process GPU memory peaks, output sizes.
+- `scripts/benchmark.py` and `docs/BENCHMARKS.md`: one table per run and a baseline
+  comparison that fails on regressions; `scripts/clone_scene.py`.
+- Viewer: loads `scene_lite.glb` by default, hover highlighting, typed position /
+  rotation / scale, one checkbox per piece of built-in structure, edits saved to
+  `edits.json` (`src/scene_edits.py`) and applied by the GLB endpoints and MuJoCo export.
+- Blender add-on 0.3.0: "Review in browser".
+- A `window` structural mask (SAM 3). Windows are painted on the wall where seen but never
+  teach a wall its material; detections that are the view through a window (trees,
+  buildings, blinds in the frame) are left to the wall; window regions that are the glass
+  of a cabinet or a display case are not windows. `scripts/add_structural_masks.py` adds
+  the mask to scenes segmented before it existed.
+- Glass: an object the photo sees through and that the detector describes as glass is
+  exported translucent, and the walls behind it keep their texture.
+- Placement: resting objects stand upright; objects follow a supporter that later moved;
+  objects against a wall are squared to it, and long furniture to the room's axes; wall
+  contact climbs over an object's own (unsegmented) top surface; a short mesh whose mask
+  reaches down to its support is lengthened down to it.
+- A detected supporter whose reconstruction misses its mask is replaced by a box fitted to
+  the photo's points instead of being dropped, so what stands on it does not float.
+- Segmentation tries a label's head noun ("chair" for "dining chair") before the box fallback.
+- `scripts/detect_only.py`: stage 1 for a batch, so the VLM server can be stopped before
+  SAM 3 / SAM 3D load.
+
+### Changed
+
+- The detector is told that built-in furniture (islands, cabinet runs, shelving, vanities,
+  range hoods) is an asset too; up to 24 instances per label (was 12).
+- Room fill: hidden patches take the local colour of the seen surface around them (no
+  silhouettes of lamps and chairs on the walls); regular floor and ceiling patterns tile
+  by whole periods in phase with the seen part; other materials tile only their fine
+  detail; an unseen ceiling takes the colour of the walls' top band instead of white.
+- Built-in blocks: a vertical face is extruded no deeper than it is tall or wide, nor
+  deeper than its top was seen to run (a bar counter no longer reaches the back wall).
+- Photo re-projection onto objects only where the photographed side is flat or a shallow
+  facade facing the camera (bookcases keep their books; sofas keep SAM 3D's texture).
+- Same-label masks: a mask containing two or more same-label masks is a group and is
+  dropped for its members (a row of chairs is no longer one long bar); instance sharing
+  checks colour make-up, and a flat object's face, before copying a mesh.
+- Detections lying on the observed ceiling plane (tiles, grilles, flush panels) are the
+  ceiling's surface.
+- The relief is exported as one mesh per connected piece (`room_relief_00`, …), each with
+  its own cropped texture.
+- Placement is 2–3× faster (silhouette scoring works on the object's bounding box);
+  results are identical.
+- The web server listens on `127.0.0.1` unless `--host` / `WORLDBUILDER_HOST` says otherwise.
+- Headless renders are unlit, matching the browser viewer.
+- `scene_combined.ply` is no longer written unless `WORLDBUILDER_COMBINED=1` (nothing read it;
+  it doubled each scene's size on disk).
+
+### Fixed
+- Spikes in the relief: sheets along the viewing rays at depth edges and across the holes
+  left by small objects.
+
+## [0.2.0] — 2026-10-08
 
 ### Added (October 2026, second pass)
 - Silhouette pose search with an occlusion- and depth-aware score (`src/pose_fit.py`);
@@ -46,7 +110,7 @@ versions follow SemVer once `v0.2.0` is tagged.
   results metadata.
 - Blender add-on 0.2.0: lite download, import existing scene, metric-scale option;
   `scripts/test_blender_addon.py` end-to-end test.
-- Docs: `HARDWARE.md`, `CONTRIBUTOR_TASKS.md`, `integrations/mujoco/README.md`;
+- Docs: `HARDWARE.md`, `integrations/mujoco/README.md`;
   60 CPU tests.
 
 ### Fixed (October 2026)
@@ -71,8 +135,7 @@ versions follow SemVer once `v0.2.0` is tagged.
   picker and GLB download; viewer shows textured room, supports, failures, point cloud.
 - Blender extension and Unreal plugin scaffolds (`integrations/`).
 - CPU test suite (39 tests), ruff config, CI workflow, `pyproject.toml`, LICENSE (MIT),
-  CITATION.cff, CONTRIBUTING.md, docs (architecture, audit, roadmap, validation,
-  integrations).
+  CITATION.cff, CONTRIBUTING.md, docs (architecture, integrations).
 - Scripts: `bench_detectors.py`, `plot_scene.py`, `regen_viewer.py` (moved).
 
 ### Changed

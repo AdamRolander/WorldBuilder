@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "worldbuilder"
-version = "0.2.0"
+version = "0.3.0"
 name = "WorldBuilder"
 tagline = "Turn a photo of a room into a 3D scene"
 maintainer = "Adam Rolander <arolander@ucsd.edu>"

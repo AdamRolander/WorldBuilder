@@ -14,7 +14,10 @@ Exposes:
     GET  /api/jobs/<job_id>         job state (stage 1-5, status, scene_id)
     GET  /api/scenes/<scene>        scene manifest (objects, layout, files)
     GET  /api/scenes                finished scenes, newest first
-    GET  /api/scenes/<scene>/glb    the scene as one GLB (?lite=1: decimated + baked textures)
+    GET  /api/scenes/<scene>/glb    the scene as one GLB (?lite=1: decimated + baked textures;
+                                    manual edits applied unless ?raw=1)
+    GET  /api/scenes/<scene>/edits  manual corrections saved from the viewer
+    POST /api/scenes/<scene>/edits  replace them (JSON; validated and clamped)
     GET  /api/scenes/<scene>/mujoco zip with a MuJoCo MJCF model of the scene
     GET  /outputs/<scene>/...       static access to reconstruction outputs
 
@@ -280,9 +283,35 @@ def scene_glb(scene_id):
             (export_scene_lite if lite else export_scene_glb)(d, data["objects"])
         except Exception as e:
             return jsonify({"error": f"GLB export failed: {e}"}), 500
+    if request.args.get("raw", "0") not in ("1", "true"):
+        try:
+            from src.scene_edits import edited_glb
+            edited = edited_glb(d, lite=lite)
+            if edited is not None:
+                name = edited.name
+        except Exception as e:
+            return jsonify({"error": f"Applying edits failed: {e}"}), 500
     return send_from_directory(d, name, as_attachment=True,
                                download_name=f"{scene_id}{'_lite' if lite else ''}.glb",
                                mimetype="model/gltf-binary")
+
+
+@app.route("/api/scenes/<scene_id>/edits", methods=["GET", "POST"])
+def scene_edits_route(scene_id):
+    """Manual corrections from the viewer (``src/scene_edits.py``). The body
+    is treated as untrusted: only known numeric fields survive, clamped."""
+    from src import scene_edits
+    d = _safe_child(OUTPUTS_DIR, scene_id)
+    if not (d / "reconstruction_results.json").exists():
+        abort(404)
+    if request.method == "GET":
+        return jsonify(scene_edits.load(d) or {"version": 1, "objects": {}, "hidden_nodes": []})
+    if request.content_length is not None and request.content_length > 2 * 1024 * 1024:
+        return jsonify({"error": "edits too large"}), 413
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "expected a JSON object"}), 400
+    return jsonify(scene_edits.save(d, data))
 
 
 @app.route("/api/scenes/<scene_id>/mujoco")
@@ -316,7 +345,10 @@ def scene_mujoco(scene_id):
 if __name__ == "__main__":
     import argparse
     p = argparse.ArgumentParser()
-    p.add_argument("--host", default="0.0.0.0", help="0.0.0.0 so a headset on the LAN can reach it")
+    p.add_argument("--host", default=os.environ.get("WORLDBUILDER_HOST", "127.0.0.1"),
+                   help="interface to listen on. The server has no authentication: the default only "
+                        "accepts connections from this machine. Use 0.0.0.0 on a network you trust "
+                        "(a headset or another computer on the LAN).")
     p.add_argument("--port", type=int, default=5174)
     args = p.parse_args()
     print(f"\n  Static dir: {STATIC_DIR}\n  Outputs:    {OUTPUTS_DIR}\n  VLM URL:    {VLM_URL}")

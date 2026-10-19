@@ -31,7 +31,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 LOCAL_DETECTOR_ALIASES = ("qwen", "vlm", "local")
-STRUCTURAL_PROMPTS = ("floor", "wall", "ceiling")
+# "window" is not a room surface: its mask keeps the view outside out of the
+# wall's material and marks detections that are the window or seen through it.
+STRUCTURAL_PROMPTS = ("floor", "wall", "ceiling", "window")
 
 
 def detector_kind(override: Optional[str] = None) -> str:
@@ -69,6 +71,8 @@ def process_image(image_path: str, output_dir: str = "outputs", detector: Option
     timings: Dict[str, float] = {}
     vram_peak_gb: Dict[str, float] = {}
     kind = detector_kind(detector)
+    from src import profiling
+    prof = profiling.start()
 
     def _mark_vram(stage: str):
         """Peak VRAM this process allocated during a stage (the local VLM
@@ -92,7 +96,8 @@ def process_image(image_path: str, output_dir: str = "outputs", detector: Option
         objects = json.loads(det_file.read_text())
         print(f"  ↺ reusing {det_file} ({len(objects)} types)")
     else:
-        raw_objects = build_detector(kind).detect_objects(image_path)
+        with prof.phase("detect"):
+            raw_objects = build_detector(kind).detect_objects(image_path)
         from src.detection_postprocess import clean_detections
         objects = clean_detections(raw_objects, image_size=image_size)
         _write_json(det_file, objects)
@@ -116,12 +121,14 @@ def process_image(image_path: str, output_dir: str = "outputs", detector: Option
         print(f"  ↺ reusing {seg_file} ({len(segments)} instances)")
     else:
         from src.segmentation import SAM3Segmenter
-        segmenter = SAM3Segmenter()
-        segmenter._to_device("cuda")
+        with prof.phase("load_sam3"):
+            segmenter = SAM3Segmenter()
+            segmenter._to_device("cuda")
         try:
-            segments = segmenter.segment_objects(image_path, objects, output_dir=str(output_path / "masks"))
-            if structural:
-                structural_masks = segment_structural(segmenter, image_path, output_path / "masks")
+            with prof.phase("segment"):
+                segments = segmenter.segment_objects(image_path, objects, output_dir=str(output_path / "masks"))
+                if structural:
+                    structural_masks = segment_structural(segmenter, image_path, output_path / "masks")
         finally:
             segmenter._to_device("cpu")
         _write_json(seg_file, [{k: v for k, v in s.items() if k != "mask_array"} for s in segments])
@@ -134,8 +141,9 @@ def process_image(image_path: str, output_dir: str = "outputs", detector: Option
     t0 = time.time()
     print("\n[3/4] Generating 3D assets with SAM 3D Objects...")
     from src.reconstruction_3d import SAM3DReconstructor
-    reconstructor = SAM3DReconstructor()
-    reconstructor._to_device("cuda")
+    with prof.phase("load_sam3d"):
+        reconstructor = SAM3DReconstructor()
+        reconstructor._to_device("cuda")
     try:
         all_results = reconstructor.reconstruct_objects(
             image_path, segments, output_dir=str(output_path / "3d_models"),
@@ -146,6 +154,7 @@ def process_image(image_path: str, output_dir: str = "outputs", detector: Option
     failed = [r for r in all_results if r.get("status") != "ok"]
     timings["reconstruct_and_assemble"] = time.time() - t0
     _mark_vram("reconstruct")
+    prof.stop()
     print("\n[4/4] Writing viewer and exports...")
     from src.scene_assembly import finalize_scene
     finalize_scene(output_path, assets_3d, failed, {
@@ -203,6 +212,18 @@ def segment_structural(segmenter, image_path: str, mask_dir: Path) -> Dict[str, 
         out[prompt] = union
         Image.fromarray(union.astype(np.uint8) * 255).save(mask_dir / f"structural_{prompt}.png")
         print(f"  structural '{prompt}': {len(scores)} mask(s), {100 * union.mean():.0f}% of frame")
+    if "floor" not in out:
+        # Outdoors nothing is called a floor. The layout stage needs the
+        # surface things stand on, whatever it is made of.
+        try:
+            masks, scores, _ = segmenter.query_text(state, "ground")
+            if len(scores):
+                union = np.any(masks, axis=0)
+                out["floor"] = union
+                Image.fromarray(union.astype(np.uint8) * 255).save(mask_dir / "structural_floor.png")
+                print(f"  structural 'ground' (no floor found): {len(scores)} mask(s), {100 * union.mean():.0f}% of frame")
+        except Exception as e:
+            print(f"  structural 'ground': error {str(e)[:80]}")
     return out
 
 

@@ -131,7 +131,7 @@ def import_glb(glb_path: str, scene_id: str, metric_scale: float = 1.0):
 def generate_and_import(photo_path: str, detector: str | None = None, server: str = SERVER):
     """One call: photo in, actors in the level. Blocks the editor while the
     pipeline runs (3–10 min on a 5090); fine for a first integration, an
-    async Editor Utility Widget is the follow-up (ROADMAP DCC-4)."""
+    async Editor Utility Widget is the follow-up."""
     _log(f"uploading {photo_path} to {server}")
     job = upload(photo_path, detector, server)
     wait_for_job(job["job_id"], server)
