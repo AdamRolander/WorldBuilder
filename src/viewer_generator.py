@@ -50,7 +50,12 @@ _TEMPLATE = r"""<!DOCTYPE html>
   #edit { top:10px; right:10px; width:300px; display:none; }
   #edit .grid { display:grid; grid-template-columns:62px repeat(3, 1fr); gap:4px; align-items:center; margin-bottom:6px; }
   #edit input[type=number] { width:100%; box-sizing:border-box; padding:3px 4px; }
-  #edit .axis { color:#aaa; font-size:11px; text-align:center; }
+  #edit .axis { color:#aaa; font-size:11px; text-align:center; font-weight:600; }
+  #edit .axis.x { color:#ff6b6b; } #edit .axis.y { color:#6ddc6d; } #edit .axis.z { color:#6fa8ff; }
+  #edit .mode { cursor:pointer; border-radius:3px; padding:1px 2px; }
+  #edit .mode:hover { background:rgba(255,255,255,.08); }
+  #edit .mode.on { background:rgba(102,204,255,.22); }
+  #edit .hint { color:#888; font-size:11px; margin-top:6px; }
   #edit .btns { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; }
   #edit .dim { color:#aaa; font-size:11px; margin:4px 0; }
   #bar { bottom:12px; right:12px; display:none; gap:8px; align-items:center; }
@@ -82,10 +87,10 @@ _TEMPLATE = r"""<!DOCTYPE html>
   <h3 id="edit-title">Object</h3>
   <div class="dim" id="edit-dim"></div>
   <div class="grid">
-    <span></span><span class="axis">X</span><span class="axis">Y (up)</span><span class="axis">Z</span>
-    <span>Position</span><input type="number" id="px" step="0.01"><input type="number" id="py" step="0.01"><input type="number" id="pz" step="0.01">
-    <span>Rotation°</span><input type="number" id="rx" step="5"><input type="number" id="ry" step="5"><input type="number" id="rz" step="5">
-    <span>Scale</span><input type="number" id="sx" step="0.05" min="0.01"><input type="number" id="sy" step="0.05" min="0.01"><input type="number" id="sz" step="0.05" min="0.01">
+    <span></span><span class="axis x">X</span><span class="axis y">Y (up)</span><span class="axis z">Z</span>
+    <span class="mode on" data-mode="p" title="Show which way +X, +Y and +Z move the object">Position</span><input type="number" id="px" step="0.01"><input type="number" id="py" step="0.01"><input type="number" id="pz" step="0.01">
+    <span class="mode" data-mode="r" title="Show which way a positive angle turns the object">Rotation°</span><input type="number" id="rx" step="5"><input type="number" id="ry" step="5"><input type="number" id="rz" step="5">
+    <span class="mode" data-mode="s" title="Show the scale axes">Scale</span><input type="number" id="sx" step="0.05" min="0.01"><input type="number" id="sy" step="0.05" min="0.01"><input type="number" id="sz" step="0.05" min="0.01">
   </div>
   <label><input type="checkbox" id="uniform" checked> uniform scale</label>
   <div class="btns">
@@ -94,6 +99,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
     <button id="btn-remove">Remove</button>
     <button id="btn-close">Close</button>
   </div>
+  <div class="hint">Shift-click objects to select several and change them together. Esc clears.</div>
 </div>
 <div id="bar" class="panel">
   <span id="status"></span>
@@ -329,7 +335,7 @@ OBJECTS.forEach(o => {
   row.addEventListener('mouseenter', () => setHot(o.id));
   row.addEventListener('mouseleave', () => setHot(null));
   row.querySelector('input').addEventListener('change', e => { edit(o.id).hidden = !e.target.checked; applyEdit(o.id); markDirty(); });
-  row.querySelector('.name').addEventListener('click', () => select(o.id));
+  row.querySelector('.name').addEventListener('click', ev => select(o.id, ev.shiftKey));
 });
 FAILED.forEach(f => {
   const l = document.createElement('div'); l.className = 'failed';
@@ -371,7 +377,9 @@ function tint(nodes, on) {
 }
 let hotId = null, selId = null, hotBuiltin = null;
 const hotBox = new THREE.BoxHelper(undefined, 0xffc850); hotBox.visible = false; scene.add(hotBox);
-const selBox = new THREE.BoxHelper(undefined, 0x66ccff); selBox.visible = false; scene.add(selBox);
+const selBox3 = new THREE.Box3();
+const selBox = new THREE.Box3Helper(selBox3, 0x66ccff); selBox.visible = false; scene.add(selBox);
+const selected = new Set();      // every selected id; selId is the one whose values the panel shows
 function setHot(id) {
   if (hotId === id) return;
   if (hotId !== null && items[hotId] && items[hotId].pivot) { tint([items[hotId].pivot], false); items[hotId].row.classList.remove('hot'); }
@@ -421,7 +429,7 @@ renderer.domElement.addEventListener('pointermove', e => {
 renderer.domElement.addEventListener('pointerup', e => {
   if (!downAt || Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 4) return;   // a drag, not a click
   const p = pick(e);
-  if (p && p.id !== undefined) select(p.id);
+  if (p && p.id !== undefined) select(p.id, e.shiftKey);
   else if (p && p.builtin && e.shiftKey) { setBuiltin(p.builtin, false); markDirty(); }   // shift-click hides a built-in
 });
 
@@ -438,49 +446,171 @@ function applyEdit(id) {
   it.pivot.visible = !e.hidden;
   it.row.querySelector('input').checked = !e.hidden;
   it.row.classList.toggle('edited', !isIdentity(e));
-  if (selId === id) selBox.setFromObject(it.pivot);
+  if (selected.has(id)) updateSelection();
   if (hotId === id) hotBox.setFromObject(it.pivot);
 }
 const F = id => document.getElementById(id);
 const fields = { p: ['px','py','pz'], r: ['rx','ry','rz'], s: ['sx','sy','sz'] };
-function select(id) {
-  if (selId !== null && items[selId]) items[selId].row.classList.remove('sel');
-  selId = id;
-  const it = id !== null ? items[id] : null;
-  F('edit').style.display = it && it.pivot ? 'block' : 'none';
-  selBox.visible = !!(it && it.pivot);
-  if (!it || !it.pivot) return;
-  it.row.classList.add('sel');
-  selBox.setFromObject(it.pivot);
-  F('edit-title').textContent = `${it.label} #${id}`;
+// ------------------------------------------------------------ axis hints
+// A small gizmo on the selection: arrows for +X/+Y/+Z (position), arcs with the
+// direction a positive angle turns (rotation), or double arrows (scale). Click
+// Position / Rotation° / Scale to switch; the axis being typed in is highlighted.
+const AXES = [new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)];
+const AXIS_RGB = [0xff6b6b, 0x6ddc6d, 0x6fa8ff], AXIS_NAME = ['X', 'Y', 'Z'];
+const gizmo = new THREE.Group(); gizmo.visible = false; scene.add(gizmo);
+let gizmoMode = 'p', gizmoAxis = -1, gizmoSize = 1;
+function overlay(o, opacity) {        // always drawn on top, so it shows through the object
+  o.traverse(m => { if (m.material) { m.material.depthTest = false; m.material.transparent = true; m.material.opacity = opacity; } m.renderOrder = 999; });
+  return o;
+}
+function textSprite(text, color, h) {
+  const c = document.createElement('canvas'); c.width = 160; c.height = 64;
+  const g = c.getContext('2d');
+  g.font = 'bold 40px system-ui, sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.lineWidth = 7; g.strokeStyle = 'rgba(0,0,0,.85)'; g.strokeText(text, 80, 32);
+  g.fillStyle = '#' + new THREE.Color(color).getHexString(); g.fillText(text, 80, 32);
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c) }));
+  sp.scale.set(h * 2.5, h, 1);
+  return sp;
+}
+function buildGizmo() {
+  gizmo.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material) { if (o.material.map) o.material.map.dispose(); o.material.dispose(); } });
+  gizmo.clear();
+  const L = Math.max(0.6 * gizmoSize, 0.2), head = 0.16 * L, txt = 0.12 * L;
+  AXES.forEach((a, i) => {
+    if (gizmoMode === 'r' && gizmoAxis >= 0 && gizmoAxis !== i) return;     // one ring at a time while typing an angle
+    const col = AXIS_RGB[i], op = (gizmoAxis < 0 || gizmoAxis === i) ? 1.0 : 0.3;
+    const parts = new THREE.Group();
+    if (gizmoMode === 'p') {
+      parts.add(new THREE.ArrowHelper(a, new THREE.Vector3(), L, col, head, head * 0.55));
+      const neg = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), a.clone().multiplyScalar(-0.45 * L)]),
+                                 new THREE.LineBasicMaterial({ color: col }));
+      parts.add(neg);
+      const plus = textSprite('+' + AXIS_NAME[i], col, txt); plus.position.copy(a).multiplyScalar(L + 1.2 * txt); parts.add(plus);
+      const minus = textSprite('−' + AXIS_NAME[i], col, 0.75 * txt); minus.position.copy(a).multiplyScalar(-0.45 * L - txt); parts.add(minus);
+    } else if (gizmoMode === 'r') {
+      // positive angle = counter-clockwise seen from the + end of the axis (right-hand rule)
+      const u = AXES[(i + 1) % 3], v = AXES[(i + 2) % 3], r = 0.75 * L, end = 1.6 * Math.PI, pts = [];
+      for (let k = 0; k <= 48; k++) { const t = end * k / 48; pts.push(u.clone().multiplyScalar(r * Math.cos(t)).add(v.clone().multiplyScalar(r * Math.sin(t)))); }
+      parts.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color: col })));
+      const tangent = u.clone().multiplyScalar(-Math.sin(end)).add(v.clone().multiplyScalar(Math.cos(end))).normalize();
+      const cone = new THREE.Mesh(new THREE.ConeGeometry(head * 0.45, head, 12), new THREE.MeshBasicMaterial({ color: col }));
+      cone.position.copy(pts[pts.length - 1]);
+      cone.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), tangent);
+      parts.add(cone);
+      const lbl = textSprite('+' + AXIS_NAME[i], col, txt); lbl.position.copy(pts[pts.length - 1]).addScaledVector(tangent, 1.5 * txt); parts.add(lbl);
+      parts.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([a.clone().multiplyScalar(-0.3 * L), a.clone().multiplyScalar(0.3 * L)]),
+                               new THREE.LineBasicMaterial({ color: col })));
+    } else {
+      [1, -1].forEach(sg => parts.add(new THREE.ArrowHelper(a.clone().multiplyScalar(sg), new THREE.Vector3(), 0.8 * L, col, head * 0.8, head * 0.45)));
+      const lbl = textSprite(AXIS_NAME[i], col, txt); lbl.position.copy(a).multiplyScalar(0.8 * L + txt); parts.add(lbl);
+    }
+    gizmo.add(overlay(parts, op));
+  });
+}
+function setGizmoMode(mode, axis) {
+  gizmoMode = mode; gizmoAxis = axis === undefined ? -1 : axis;
+  document.querySelectorAll('#edit .mode').forEach(el => el.classList.toggle('on', el.dataset.mode === mode));
+  buildGizmo();
+}
+document.querySelectorAll('#edit .mode').forEach(el => el.addEventListener('click', () => setGizmoMode(el.dataset.mode)));
+
+// ------------------------------------------------------------ selection
+function updateSelection() {
+  selBox3.makeEmpty();
+  selected.forEach(id => { const pv = items[id] && items[id].pivot; if (pv && pv.visible) selBox3.expandByObject(pv); });
+  const any = !selBox3.isEmpty();
+  selBox.visible = gizmo.visible = any;
+  if (!any) return;
+  const size = selBox3.getSize(new THREE.Vector3());
+  selBox3.getCenter(gizmo.position);
+  const s = Math.max(size.x, size.y, size.z);
+  if (Math.abs(s - gizmoSize) > 1e-6 || !gizmo.children.length) { gizmoSize = s; buildGizmo(); }
+}
+// shift (additive): add the object, or take it out again if it is already selected
+function select(id, additive) {
+  if (!additive) { selected.forEach(i => items[i] && items[i].row.classList.remove('sel')); selected.clear(); selId = null; }
+  if (id !== null && items[id] && items[id].pivot) {
+    if (additive && selected.has(id)) {
+      selected.delete(id); items[id].row.classList.remove('sel');
+      if (selId === id) selId = selected.size ? [...selected].pop() : null;
+    } else { selected.add(id); items[id].row.classList.add('sel'); selId = id; }
+  }
+  F('edit').style.display = selId !== null ? 'block' : 'none';
+  updateSelection();
+  if (selId === null) return;
+  const it = items[selId];
+  F('edit-title').textContent = selected.size > 1 ? `${selected.size} objects selected` : `${it.label} #${selId}`;
   refreshPanel();
 }
+addEventListener('keydown', e => { if (e.key === 'Escape' && !(e.target && e.target.tagName === 'INPUT')) select(null); });
 function refreshPanel() {
   const it = items[selId], e = edit(selId);
   fields.p.forEach((f, i) => F(f).value = ((it.home.getComponent(i) + e.translate[i] - ORIGIN[i]) * UNIT).toFixed(2));
-  fields.r.forEach((f, i) => F(f).value = e.rotate_deg[i]);
+  fields.r.forEach((f, i) => F(f).value = +e.rotate_deg[i].toFixed(2));
   fields.s.forEach((f, i) => F(f).value = e.scale[i].toFixed(2));
-  F('edit-dim').textContent = `size ${fields.s.map((_, i) => (it.size.getComponent(i) * e.scale[i] * UNIT).toFixed(2)).join(' × ')} ${UNIT_NAME}. Position: centre, in ${UNIT_NAME}; Y is height above the floor.`;
+  F('edit-dim').textContent = selected.size > 1
+    ? `Values shown are ${it.label} #${selId}'s. A change moves every selected object by the same amount; turning and scaling act about the middle of the group.`
+    : `size ${fields.s.map((_, i) => (it.size.getComponent(i) * e.scale[i] * UNIT).toFixed(2)).join(' × ')} ${UNIT_NAME}. Position: centre, in ${UNIT_NAME}; Y is height above the floor.`;
+}
+function pivotPos(id) { const it = items[id], e = edit(id); return it.home.clone().add(new THREE.Vector3(...e.translate)); }
+function setPivotPos(id, p) { edit(id).translate = p.clone().sub(items[id].home).toArray(); }
+function groupCentre() { updateSelection(); return selBox3.getCenter(new THREE.Vector3()); }
+function rotateGroup(ids, k, deg) {
+  const c = groupCentre(), q = new THREE.Quaternion().setFromAxisAngle(AXES[k], THREE.MathUtils.degToRad(deg)), r = THREE.MathUtils.degToRad;
+  ids.forEach(id => {
+    const e = edit(id);
+    setPivotPos(id, pivotPos(id).sub(c).applyQuaternion(q).add(c));
+    if ([0, 1, 2].every(j => j === k || Math.abs(e.rotate_deg[j]) < 1e-9)) { e.rotate_deg[k] += deg; return; }   // stays a one-axis turn
+    const qo = new THREE.Quaternion().setFromEuler(new THREE.Euler(r(e.rotate_deg[0]), r(e.rotate_deg[1]), r(e.rotate_deg[2]), 'XYZ'));
+    const eu = new THREE.Euler().setFromQuaternion(q.clone().multiply(qo), 'XYZ');
+    e.rotate_deg = [eu.x, eu.y, eu.z].map(v => +THREE.MathUtils.radToDeg(v).toFixed(3));
+  });
+}
+function scaleGroup(ids, ratios) {
+  const c = groupCentre();
+  ids.forEach(id => {
+    const e = edit(id), p = pivotPos(id);
+    setPivotPos(id, new THREE.Vector3(...[0, 1, 2].map(j => c.getComponent(j) + (p.getComponent(j) - c.getComponent(j)) * ratios[j])));
+    e.scale = e.scale.map((v, j) => Math.max(0.01, v * ratios[j]));
+  });
 }
 function fromPanel(changed) {
   if (selId === null) return;
-  const it = items[selId], e = edit(selId), num = (f, d) => { const v = parseFloat(F(f).value); return Number.isFinite(v) ? v : d; };
-  fields.p.forEach((f, i) => e.translate[i] = num(f, 0) / UNIT + ORIGIN[i] - it.home.getComponent(i));
-  fields.r.forEach((f, i) => e.rotate_deg[i] = num(f, 0));
-  if (F('uniform').checked && changed && changed.startsWith('s')) {
-    const v = Math.max(0.01, num(changed, 1)); e.scale = [v, v, v];
-  } else fields.s.forEach((f, i) => e.scale[i] = Math.max(0.01, num(f, 1)));
-  applyEdit(selId); refreshPanel(); markDirty();
+  const it = items[selId], e = edit(selId), ids = [...selected];
+  const num = (f, d) => { const v = parseFloat(F(f).value); return Number.isFinite(v) ? v : d; };
+  const kind = changed[0], k = 'xyz'.indexOf(changed[1]);
+  if (kind === 'p') {
+    const d = num(changed, 0) / UNIT + ORIGIN[k] - it.home.getComponent(k) - e.translate[k];
+    ids.forEach(id => edit(id).translate[k] += d);
+  } else if (kind === 'r') {
+    const d = num(changed, 0) - e.rotate_deg[k];
+    if (ids.length === 1) e.rotate_deg[k] += d; else rotateGroup(ids, k, d);
+  } else {
+    const v = Math.max(0.01, num(changed, 1)), ratio = v / e.scale[k];
+    if (ids.length === 1) {
+      if (F('uniform').checked) e.scale = [v, v, v]; else e.scale[k] = v;
+    } else scaleGroup(ids, F('uniform').checked ? [ratio, ratio, ratio] : [0, 1, 2].map(j => j === k ? ratio : 1));
+  }
+  ids.forEach(applyEdit); updateSelection(); refreshPanel(); markDirty();
 }
-[...fields.p, ...fields.r, ...fields.s].forEach(f => F(f).addEventListener('change', () => fromPanel(f)));
-F('btn-reset').addEventListener('click', () => { if (selId === null) return; delete edits[selId]; applyEdit(selId); refreshPanel(); markDirty(); });
-F('btn-remove').addEventListener('click', () => { if (selId === null) return; edit(selId).hidden = true; applyEdit(selId); markDirty(); select(null); });
+[...fields.p, ...fields.r, ...fields.s].forEach(f => {
+  F(f).addEventListener('change', () => fromPanel(f));
+  ['focus', 'pointerdown'].forEach(ev => F(f).addEventListener(ev, () => setGizmoMode(f[0], 'xyz'.indexOf(f[1]))));
+});
+F('btn-reset').addEventListener('click', () => {
+  if (selId === null) return;
+  selected.forEach(id => { delete edits[id]; applyEdit(id); }); updateSelection(); refreshPanel(); markDirty();
+});
+F('btn-remove').addEventListener('click', () => {
+  if (selId === null) return;
+  selected.forEach(id => { edit(id).hidden = true; applyEdit(id); }); markDirty(); select(null);
+});
 F('btn-close').addEventListener('click', () => select(null));
 F('btn-floor').addEventListener('click', () => {
   if (selId === null || !LAYOUT || LAYOUT.floor_y === undefined) return;
-  const it = items[selId], e = edit(selId);
-  const low = new THREE.Box3().setFromObject(it.pivot).min.y;
-  e.translate[1] += LAYOUT.floor_y - low; applyEdit(selId); refreshPanel(); markDirty();
+  const d = LAYOUT.floor_y - groupCentre().y + selBox3.getSize(new THREE.Vector3()).y / 2;   // lowest point of the selection to the floor
+  selected.forEach(id => { edit(id).translate[1] += d; applyEdit(id); }); updateSelection(); refreshPanel(); markDirty();
 });
 
 // Edits live in edits.json next to the scene. Served by the WorldBuilder
