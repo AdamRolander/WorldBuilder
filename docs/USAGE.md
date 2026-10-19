@@ -103,6 +103,15 @@ photo was taken, in metres when the scale is known). Every piece of
 built-in structure (relief surfaces, solid blocks; outdoors, the ground) has
 its own checkbox.
 
+The selected object shows which way each value moves it: arrows for +X, +Y and +Z, or, after
+clicking **Rotation°** (or a rotation field), a ring showing which way a positive angle
+turns it. **Shift-click** objects in the scene or the list to select several; a change then
+applies to all of them, and turning or scaling acts about the middle of the group (so typing
+180 in Y turns that part of the room around). **Esc** clears the selection.
+
+Scenes made before this viewer existed keep their old `viewer.html`; refresh them with
+`python scripts/regen_viewer.py --viewer-only outputs/<scene>`.
+
 **Save edits** writes `edits.json` next to the scene. Served by the web app
 it is saved through the API, and every GLB the server hands out (the
 download button, the Blender add-on, the Unreal bridge) and the MuJoCo
