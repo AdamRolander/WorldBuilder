@@ -61,7 +61,18 @@ def _multipart(fields, files):
     return bytes(body), f"multipart/form-data; boundary={boundary}"
 
 
+def _require_access(url):
+    """Honour Blender's "Allow Online Access" preference for any server that isn't this
+    computer. A server on localhost is always allowed."""
+    host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    local = host == "localhost" or host == "::1" or host.startswith("127.")
+    if not local and not getattr(bpy.app, "online_access", True):
+        raise RuntimeError(f"{host} is another computer and Blender's online access is off "
+                           "(Preferences → System → Network → Allow Online Access)")
+
+
 def _get_json(url, timeout=10):
+    _require_access(url)
     with urllib.request.urlopen(url, timeout=timeout) as r:
         return json.loads(r.read().decode())
 
@@ -72,6 +83,7 @@ def upload_photo(server, path, detector):
     ext = os.path.splitext(path)[1].lower().lstrip(".") or "jpg"
     body, ctype = _multipart({"detector": detector} if detector else {},
                              {"image": (os.path.basename(path), data, f"image/{ext}")})
+    _require_access(server)
     req = urllib.request.Request(f"{server}/api/upload", data=body, method="POST",
                                  headers={"Content-Type": ctype})
     with urllib.request.urlopen(req, timeout=60) as r:
@@ -83,6 +95,7 @@ def download_glb(server, scene_id, dest_dir, lite=True):
     GLB is SAM 3D's raw output with vertex colours and can be hundreds of MB."""
     dest = os.path.join(dest_dir, f"{scene_id}{'_lite' if lite else ''}.glb")
     url = f"{server}/api/scenes/{urllib.parse.quote(scene_id)}/glb" + ("?lite=1" if lite else "")
+    _require_access(url)
     urllib.request.urlretrieve(url, dest)
     return dest
 

@@ -69,8 +69,10 @@ Scale is an estimate. Check one known size, such as a door or a counter, before 
 
 Start the server with `python -m webapp.server --host 0.0.0.0` and set **Server URL** to
 `http://<gpu machine's IP>:5174`. Both computers must be on the same network, and the server
-has no login, so only do this on a network you trust. From anywhere else, an SSH tunnel is
-safer: `ssh -L 5174:localhost:5174 <gpu machine>` and keep the default URL.
+has no login, so only do this on a network you trust. Blender's **Allow Online Access**
+(Preferences → System → Network) must be on for any server other than `localhost`. From
+anywhere else, an SSH tunnel is safer: `ssh -L 5174:localhost:5174 <gpu machine>` and keep
+the default URL.
 
 ## For Developers
 
