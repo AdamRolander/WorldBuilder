@@ -1,8 +1,10 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright 2026 Adam Rolander
 """WorldBuilder for Blender — photo → 3D scene, via a local WorldBuilder server.
 
 Design: the add-on is a thin HTTP client. All the heavy models (SAM 3, SAM 3D
 Objects, MoGe, the VLM) run in the WorldBuilder webapp process on a GPU box
-(possibly this machine). That keeps the add-on tiny, GPL-compatible, and
+(possibly this machine). That keeps the add-on tiny, GPL-licensed on its own, and
 free of Meta's SAM licence terms, which the Extensions platform would not
 accept in a bundled form.
 

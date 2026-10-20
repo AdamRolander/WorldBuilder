@@ -156,7 +156,9 @@ A software paper is in preparation.
 
 ## License and Acknowledgements
 
-WorldBuilder's code is MIT licensed (see [LICENSE](LICENSE)). It runs on models and code that
+WorldBuilder's code is MIT licensed (see [LICENSE](LICENSE)), except the Blender add-on in
+`integrations/blender_worldbuilder/`, which is GPL-3.0-or-later as Blender's extension
+platform requires (see [its licence](integrations/blender_worldbuilder/LICENSE)). It runs on models and code that
 you obtain separately under their own terms and that this project never redistributes:
 SAM 3 and SAM 3D Objects (Meta, SAM License), MoGe (MIT), PyTorch3D (BSD), Qwen3-VL
 (Apache-2.0). Thanks to their authors for releasing them.

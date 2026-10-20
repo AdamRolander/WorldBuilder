@@ -23,6 +23,8 @@ versions follow [SemVer](https://semver.org/) (0.x: minor = features, patch = fi
 
 ### Changed
 - The Unreal bridge imports the lite GLB (baked textures) instead of the dense scene.
+- The Blender add-on (`integrations/blender_worldbuilder/`) is now licensed
+  GPL-3.0-or-later, as extensions.blender.org requires. The rest of the project stays MIT.
 
 ## [0.3.0] — 2026-10-17
 

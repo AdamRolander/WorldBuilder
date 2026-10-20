@@ -4,7 +4,7 @@ Turn a photo into a scene from inside Blender, or import one you already made. E
 arrives as its own named, textured mesh, with the room as separate pieces, all under one
 empty.
 
-You need Blender 4.2 or newer and a WorldBuilder install with a GPU ([Setup](../SETUP.md)).
+Requires Blender 4.2 or newer and a WorldBuilder install with a GPU ([Setup](../SETUP.md)).
 
 ## 1. Install the Add-On
 
@@ -82,5 +82,8 @@ thread. To test against a running server:
 blender --background --python scripts/test_blender_addon.py -- --scene <scene id> --render /tmp/wb.png
 blender --command extension validate integrations/blender_worldbuilder
 ```
+
+The add-on folder is licensed GPL-3.0-or-later (the rest of WorldBuilder is MIT), because
+extensions.blender.org only accepts GPL add-ons. It imports no pipeline code.
 
 Bump `version` in `blender_manifest.toml` and `bl_info` whenever the add-on changes.

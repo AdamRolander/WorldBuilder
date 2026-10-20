@@ -30,6 +30,9 @@ plugins and docs all run on a laptop from scenes on disk.
   `scripts/bench_detectors.py` before and after.
 - Keep the heavy stacks out of `pyproject.toml`; they are installed per
   [Setup](docs/SETUP.md) because they need specific indexes and source builds.
+- The project is MIT, except the Blender add-on (`integrations/blender_worldbuilder/`),
+  which is GPL-3.0-or-later as Blender's extension platform requires. Contributions are
+  accepted under the licence of the folder they touch.
 - Never commit model weights, photos you don't have the rights to share, or `.env`.
 
 ## Development Setup (CPU, No Models)
