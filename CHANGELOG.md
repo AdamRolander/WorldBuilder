@@ -5,6 +5,8 @@ versions follow [SemVer](https://semver.org/) (0.x: minor = features, patch = fi
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-10-21
+
 ### Added
 - Documentation split into Setup, Usage, Troubleshooting and Plugins pages (Blender, MuJoCo,
   Unreal, planned targets); the README is now an overview with a before/after animation
