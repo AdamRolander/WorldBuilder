@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "worldbuilder"
-version = "0.3.0"
+version = "0.4.0"
 description = "Turn a single photo of a room into a navigable, editable 3D scene (VLM + SAM 3 + SAM 3D Objects + MoGe layout)."
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -20,7 +20,7 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Image Recognition",
 ]
 # The heavy GPU stacks (torch, sam3, sam3d_objects, pytorch3d, kaolin, ...)
-# are installed per README §2; only WorldBuilder's own thin layer is listed.
+# are installed per docs/SETUP.md; only WorldBuilder's own thin layer is listed.
 dependencies = [
   "numpy>=1.26",
   "pillow>=10",

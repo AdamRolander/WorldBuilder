@@ -1,38 +1,62 @@
 # Contributing
 
-Thanks for looking at WorldBuilder. The project is small and opinionated;
-here is how to work on it without fighting it.
+Thanks for looking at WorldBuilder. Contributions of every size are welcome, and a lot of
+useful work needs no GPU at all: placement, the room and its textures, the viewer, exporters,
+plugins and docs all run on a laptop from scenes on disk.
 
-## Ground rules
+## Ways to Help
 
-* One pull request per change. Explain *why* in the description; the code
-  should already say *what*.
-* Anything that touches geometry or a placement heuristic needs a test in
-  `tests/` that fails without the change. CPU-only tests run everywhere;
-  GPU behaviour is verified manually (re-run a few photos, compare
-  `scripts/audit_scene.py` scores) and the before/after numbers go in the PR.
-* Prompt changes go in `src/prompts.py` only — both detector backends read
-  it. Run `scripts/bench_detectors.py` before and after.
-* Keep the heavy stacks out of `pyproject.toml`; they are installed per
-  README §2 because they need specific indexes and source builds.
+- **Try it on your own photo** and open an [issue](https://github.com/AdamRolander/WorldBuilder/issues)
+  with what broke. Reports from cards other than an RTX 5090 are especially useful
+  ([Hardware](docs/HARDWARE.md#reports-from-other-machines)).
+- **Pick up an issue** labelled `good first issue` or `no-gpu`.
+- **Build or test a plugin** for a tool you use. [Plugins](docs/plugins/README.md) lists the
+  targets and what each needs.
+- **Improve the docs.** If a setup step tripped you up, a PR that fixes the step is the best
+  kind of bug report.
 
-## Dev setup (CPU, no models)
+## Ground Rules
+
+- One pull request per change. Explain *why* in the description; the code should already
+  say *what*.
+- Prefer general rules grounded in the photo's evidence (depth, masks, normals, colour
+  statistics) over special cases for a label or a scene. A fix that only helps one photo
+  usually hurts another.
+- Anything that touches geometry or a placement heuristic needs a test in `tests/` that fails
+  without the change. CPU tests run in CI; GPU behaviour is checked by re-running a set of
+  photos and comparing the runs with `scripts/benchmark.py` ([Benchmarks](docs/BENCHMARKS.md)).
+  Put the before/after numbers in the PR.
+- Prompt changes go in `src/prompts.py` only; both detector backends read it. Run
+  `scripts/bench_detectors.py` before and after.
+- Keep the heavy stacks out of `pyproject.toml`; they are installed per
+  [Setup](docs/SETUP.md) because they need specific indexes and source builds.
+- The project is MIT, except the Blender add-on (`integrations/blender_worldbuilder/`),
+  which is GPL-3.0-or-later as Blender's extension platform requires. Contributions are
+  accepted under the licence of the folder they touch.
+- Never commit model weights, photos you don't have the rights to share, or `.env`.
+
+## Development Setup (CPU, No Models)
 
 ```bash
 conda create -n wb-dev python=3.11 && conda activate wb-dev
 pip install torch --index-url https://download.pytorch.org/whl/cpu
-pip install -e ".[dev]"
+pip install -e ".[dev,cpu,robotics]"
 pytest
 ruff check .
 ```
 
-## Reporting bugs
+The full GPU install is in [Setup](docs/SETUP.md). How the code is organised is in
+[Architecture](docs/ARCHITECTURE.md).
+
+## Reporting Bugs
 
 Please include the photo (or a similar one), `detected_objects.json`,
 `segmentation_results.json`, `3d_models/layout.json` and the console log.
 Those four files answer most questions without a GPU.
 
-## Code of conduct
+Security problems: please report them privately, see [SECURITY.md](SECURITY.md).
+
+## Code of Conduct
 
 Be kind, assume good faith, and keep discussions about the work. The
 [Contributor Covenant](https://www.contributor-covenant.org/version/2/1/code_of_conduct/)

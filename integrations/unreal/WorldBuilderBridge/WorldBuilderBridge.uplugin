@@ -7,7 +7,7 @@
   "Category": "Editor",
   "CreatedBy": "Adam Rolander",
   "CreatedByURL": "https://github.com/AdamRolander/WorldBuilder",
-  "DocsURL": "https://github.com/AdamRolander/WorldBuilder/blob/main/docs/INTEGRATIONS.md",
+  "DocsURL": "https://github.com/AdamRolander/WorldBuilder/blob/main/docs/plugins/UNREAL.md",
   "MarketplaceURL": "",
   "SupportURL": "https://github.com/AdamRolander/WorldBuilder/issues",
   "EngineVersion": "5.4.0",

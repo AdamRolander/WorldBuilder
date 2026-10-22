@@ -69,7 +69,7 @@ class SAM3DReconstructor:
         if not Path(config_path).exists():
             raise FileNotFoundError(
                 f"SAM 3D config not found: {config_path}\n"
-                f"  Download the checkpoints per README §4 (the 'mv' step is easy to miss).")
+                f"  Download the checkpoints per docs/SETUP.md step 4 (the 'mv' step is easy to miss).")
 
         if (SAM3DReconstructor._shared_inference is not None
                 and SAM3DReconstructor._shared_config_path == config_path):
@@ -227,6 +227,8 @@ class SAM3DReconstructor:
         failed: List[Dict] = []
         print(f"\nReconstructing {len(segmentation_results)} objects...")
         print("=" * 60)
+        t_start = time.time()
+        stage3_cache.save_progress(output_path, 0, len(segmentation_results), 0.0)
         for i, seg in enumerate(segmentation_results, 1):
             obj_id, label = seg['id'], seg['label']
             print(f"\n[{i}/{len(segmentation_results)}] {label}")
@@ -278,6 +280,7 @@ class SAM3DReconstructor:
             finally:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
+                stage3_cache.save_progress(output_path, i, len(segmentation_results), time.time() - t_start)
 
         print("\n" + "=" * 60)
         print(f"✓ Reconstructed {len(results)}/{len(segmentation_results)} objects")

@@ -1,4 +1,4 @@
-# Benchmarks: how a change is judged
+# Benchmarks: How a Change Is Judged
 
 WorldBuilder has no ground-truth 3D for the photos it runs on, so quality is
 measured against the one thing that is known: the photo itself. Speed,
@@ -14,7 +14,7 @@ python scripts/benchmark.py outputs/<run> --baseline outputs/<earlier>  # compar
 A *run* is a folder of scene directories written by `main.py`. The script
 writes `benchmark.json` and `benchmark.md` next to them.
 
-## What is measured
+## What Is Measured
 
 ### Placement (CPU, from `scripts/audit_scene.py`)
 
@@ -73,7 +73,7 @@ These are from the photo's viewpoint only; they say nothing about how the
 scene looks from behind. They are the right check for texture work, and a
 coarse one for everything else.
 
-## Comparing two runs
+## Comparing Two Runs
 
 With `--baseline` every cell shows the change, and the exit status is 1 if a
 guarded metric got worse by more than its tolerance:
@@ -102,7 +102,7 @@ python scripts/benchmark.py outputs/<run>-try --baseline outputs/<run> --appeara
 python scripts/make_gallery.py outputs/<run>-try --before outputs/<run>   # pictures, side by side
 ```
 
-## What the numbers do not tell you
+## What the Numbers Do Not Tell You
 
 * A mesh can match its mask and still be the wrong shape from the side.
   Look at the side and top views in `scripts/render_scene.py`'s contact

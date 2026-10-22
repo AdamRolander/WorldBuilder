@@ -1,9 +1,11 @@
-# WorldBuilder → MuJoCo / MJX
+# MuJoCo and MJX
 
-Turn a reconstructed scene into a MuJoCo model you can drop a robot into.
+Turn a reconstructed scene into a MuJoCo model you can drop a robot into. The exporter is part
+of this repository (`src/mujoco_export.py`); the helpers for loading a scene with a robot and
+wrapping it as a Gymnasium environment are in `integrations/mujoco/`. Exporting needs no GPU.
 
 ```bash
-pip install mujoco                      # + gymnasium for the env wrapper, + coacd for --collision coacd
+pip install -e ".[robotics]"            # mujoco, gymnasium (env wrapper), coacd (--collision coacd)
 
 python -m src.mujoco_export outputs/<scene> --stabilize --check
 #  → outputs/<scene>/mujoco/scene.xml, assets/*.obj|png, export_report.json
@@ -18,7 +20,7 @@ curl -OJ "http://<server>:5174/api/scenes/<scene>/mujoco"            # zip: scen
 curl -OJ "http://<server>:5174/api/scenes/<scene>/mujoco?mjx=1"      # MJX variant
 ```
 
-## What is in the model
+## What Is in the Model
 
 | | |
 | --- | --- |
@@ -30,7 +32,7 @@ curl -OJ "http://<server>:5174/api/scenes/<scene>/mujoco?mjx=1"      # MJX varia
 | Room | floor plane + four wall boxes (collision, invisible); textured shell quads and the photo relief of built-ins (visual only) |
 | Support pads | invisible static boxes under objects that rest on something the model has no collision for (a countertop that exists only in the relief, or a welded object whose hull does not reach under them) |
 | Cameras | `photo` (the input photo's pose and field of view) and `overview` |
-| Geom groups | 2 visual, 3 collision, 4 structure/pads — toggle them in the viewer with the number keys |
+| Geom groups | 2 visual, 3 collision, 4 structure/pads; toggle them in the viewer with the number keys |
 
 `--stabilize` simulates two seconds and welds whatever drifts more than
 5 cm, repeating until the scene is at rest; `export_report.json` lists what
@@ -44,10 +46,10 @@ Measured on the validation kitchen (35 objects, 2026-10-08): 32 MB of
 assets, 16 free bodies of which 6 were welded by `--stabilize`,
 remaining drift ≤ 4 cm over 2 s.
 
-## A robot in the room
+## A Robot in the Room
 
 ```python
-from worldbuilder_mujoco import load_scene, scene_objects, SceneEnv   # integrations/mujoco/
+from worldbuilder_mujoco import load_scene, scene_objects, SceneEnv   # integrations/mujoco/ on sys.path
 
 model = load_scene("outputs/k1_q/mujoco/scene.xml",
                    robot_xml="mujoco_menagerie/franka_emika_panda/panda.xml",
@@ -73,11 +75,11 @@ handles primitives far better than meshes), no relief, a 4 ms timestep and
 conservative solver iterations. It loads and steps in MJX
 (`mjx.put_model` → `jax.jit(mjx.step)`; verified on CPU JAX, 2026-10-08).
 Not yet measured: throughput on a GPU and how many objects a batch of
-thousands of environments tolerates — the contact count is what to watch.
+thousands of environments tolerates; the contact count is what to watch.
 For large batches weld the clutter (`--dynamic none`) and free only the
 objects the task manipulates.
 
-## Limits worth knowing
+## Limits Worth Knowing
 
 * **Scale is an estimate.** The photo has no absolute scale; the exporter
   uses a prior (camera 1.5 m above the floor). Check one known dimension
@@ -92,10 +94,10 @@ objects the task manipulates.
   front. Planned (plane-fitted collision for built-ins).
 * **Rendering.** `--check --render out.png` needs a working MuJoCo GL
   backend; with the PyOpenGL version pinned by `pyrender` in the main env,
-  `MUJOCO_GL=egl` fails to import — leave `MUJOCO_GL` unset on a desktop,
+  `MUJOCO_GL=egl` fails to import. Leave `MUJOCO_GL` unset on a desktop,
   or use a separate env for headless rendering.
 
-## Other simulators
+## Other Simulators
 
 Isaac Sim / Isaac Lab and Genesis import MJCF directly, so `scene.xml` is
 the interchange format for now; `scene_lite.glb` works anywhere glTF does

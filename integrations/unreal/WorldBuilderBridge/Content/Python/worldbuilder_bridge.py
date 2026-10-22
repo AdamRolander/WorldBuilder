@@ -95,7 +95,7 @@ def download_scene(scene_id: str, server: str = SERVER) -> tuple[str, dict]:
         out_dir = os.path.join(os.getcwd(), "WorldBuilder")
     os.makedirs(out_dir, exist_ok=True)
     glb = os.path.join(out_dir, f"{scene_id}.glb")
-    urllib.request.urlretrieve(f"{server}/api/scenes/{urllib.parse.quote(scene_id)}/glb", glb)
+    urllib.request.urlretrieve(f"{server}/api/scenes/{urllib.parse.quote(scene_id)}/glb?lite=1", glb)  # baked textures import as plain materials
     manifest = _get_json(f"{server}/api/scenes/{urllib.parse.quote(scene_id)}")
     return glb, manifest
 

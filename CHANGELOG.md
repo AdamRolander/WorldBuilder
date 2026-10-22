@@ -5,6 +5,30 @@ versions follow [SemVer](https://semver.org/) (0.x: minor = features, patch = fi
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-10-21
+
+### Added
+- Documentation split into Setup, Usage, Troubleshooting and Plugins pages (Blender, MuJoCo,
+  Unreal, planned targets); the README is now an overview with a before/after animation
+  and example stills (`scripts/make_hero.py`: several scenes, objects pop in one at a time
+  with their masks lit on the photo; WebP or GIF).
+- `SECURITY.md` (private vulnerability reports) and `.github/CODEOWNERS`.
+- Job progress: `GET /api/jobs/<id>` reports the step (1-4), objects reconstructed so far and
+  an ETA (`3d_models/stage3/progress.json` is written after every object); scene listings
+  and manifests report the lite and full GLB sizes and object counts.
+- Viewer: axis hints on the selection (±X/±Y/±Z arrows, rotation direction rings, scale
+  axes) and multi-select with shift-click (moves, turns and scales apply to the group).
+- Blender add-on 0.4.0: step and progress bar with time left; **Review in Browser First**
+  (default) opens the finished scene in the browser and imports it after review; a scene
+  list with object counts and sizes for **Import Existing Scene**; **Full Detail** import
+  option; **Edit in Browser** uses the selected object's scene; Help panel; Title Case labels.
+- `scripts/regen_viewer.py --viewer-only`.
+
+### Changed
+- The Unreal bridge imports the lite GLB (baked textures) instead of the dense scene.
+- The Blender add-on (`integrations/blender_worldbuilder/`) is now licensed
+  GPL-3.0-or-later, as extensions.blender.org requires. The rest of the project stays MIT.
+
 ## [0.3.0] — 2026-10-17
 
 ### Added
