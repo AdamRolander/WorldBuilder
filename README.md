@@ -9,10 +9,11 @@ browser (WebXR), Blender, MuJoCo and anything that reads glTF.
 ![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)
 
 <p align="center">
-  <img src="docs/assets/hero.gif" alt="A photo of a lab on the left; on the right, the reconstructed 3D scene seen from a camera that swings around the room" width="100%">
+  <img src="docs/assets/hero.webp" alt="Two photos, a living room and a library, each next to the 3D scene built from it. The room appears piece by piece, then each object pops in while its outline lights up on the photo, and the camera swings around the room" width="100%">
 </p>
-<p align="center"><sub>Left: the input photo. Right: the scene WorldBuilder built from it, seen from a moving camera.
-Every chair, bench and screen is a separate object you can move.</sub></p>
+<p align="center"><sub>Each photo next to the scene WorldBuilder built from it. Every object pops in on its own
+because it is its own mesh; the largest are switched off and on again. Shown after a few
+fixes in the browser viewer. Photos from <a href="https://unsplash.com">Unsplash</a>.</sub></p>
 
 ## What It Does
 
@@ -36,6 +37,16 @@ objects, [SAM 3](https://github.com/facebookresearch/sam3) segments every instan
 and [MoGe](https://github.com/microsoft/MoGe) gives a point map of the whole scene. WorldBuilder's
 own code is what happens after that: room layout, placement with physical support, room
 textures and exports.
+
+## Examples
+
+| Photo, the scene from the photo's viewpoint, and from the side |
+| --- |
+| ![A living room photo, its 3D scene from the same view, and the scene from the side](docs/assets/examples/unsplash-livingroom.jpg) |
+| ![A library photo, its 3D scene from the same view, and the scene from the side](docs/assets/examples/unsplash-library.jpg) |
+
+More examples are coming. To make your own animation or stills from a scene:
+`python scripts/make_hero.py --scene outputs/<scene> photo.jpg --out hero.webp --stills <folder>`.
 
 ## Documentation
 

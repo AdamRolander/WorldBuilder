@@ -8,7 +8,8 @@ versions follow [SemVer](https://semver.org/) (0.x: minor = features, patch = fi
 ### Added
 - Documentation split into Setup, Usage, Troubleshooting and Plugins pages (Blender, MuJoCo,
   Unreal, planned targets); the README is now an overview with a before/after animation
-  (`scripts/make_hero.py`).
+  and example stills (`scripts/make_hero.py`: several scenes, objects pop in one at a time
+  with their masks lit on the photo; WebP or GIF).
 - `SECURITY.md` (private vulnerability reports) and `.github/CODEOWNERS`.
 - Job progress: `GET /api/jobs/<id>` reports the step (1-4), objects reconstructed so far and
   an ETA (`3d_models/stage3/progress.json` is written after every object); scene listings

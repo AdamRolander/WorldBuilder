@@ -160,7 +160,7 @@ scripts/
   plot_scene.py             plan-view diagnostic PNG of a finished scene
   estimate_metric_scale.py  metres per scene unit from MoGe-2 (isolated install)
   make_gallery.py           before/after HTML page for two runs of the same photos
-  make_hero.py              README animation: the photo next to a camera sweep through the scene
+  make_hero.py              README animation and stills: photos next to their scenes, objects popping in
   replay_assembly.py        re-run stage 4 on a finished scene (CPU, seconds)
   audit_scene.py            score placement against the photo's masks and point map
   render_scene.py           headless contact-sheet renders (pyrender + EGL)
