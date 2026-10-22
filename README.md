@@ -13,7 +13,7 @@ browser (WebXR), Blender, MuJoCo and anything that reads glTF.
 </p>
 <p align="center"><sub>Each photo next to the scene WorldBuilder built from it. Every object pops in on its own
 because it is its own mesh; the largest are switched off and on again. Shown after a few
-fixes in the browser viewer. Photos from <a href="https://unsplash.com">Unsplash</a>.</sub></p>
+fixes in the browser viewer. Photos from Spacejoy and Jonathan Borba on <a href="https://unsplash.com">Unsplash</a>.</sub></p>
 
 ## What It Does
 
