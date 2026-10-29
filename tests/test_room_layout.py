@@ -264,3 +264,24 @@ def test_a_level_surface_on_the_wrong_side_of_the_camera_is_not_floor_or_ceiling
     floor = rl.estimate_floor(below, valid, rng=np.random.default_rng(0))
     assert floor is not None and float(np.asarray(floor.normal) @ rl.UP) > 0.99
     assert rl.estimate_ceiling_plane(below, valid, rng=np.random.default_rng(0)) is None
+
+
+def test_a_floor_mask_allows_a_steeply_pitched_camera_but_not_a_wall():
+    """Looking down at 50° (common in handheld photos), the floor normal is 50°
+    from camera up. With a floor mask that floor is accepted; a wall inside
+    the mask is not, and without a mask the tight cone still applies."""
+    rng = np.random.default_rng(0)
+    H = W = 64
+    u, v = np.meshgrid(np.linspace(-1, 1, W), np.linspace(-1, 1, H))
+    valid = np.ones((H, W), bool)
+    mask = np.ones((H, W), bool)
+    t = math.radians(50)
+    R = np.array([[1, 0, 0], [0, math.cos(t), -math.sin(t)], [0, math.sin(t), math.cos(t)]])
+    floor = np.stack([u * 2, np.full_like(u, -1.5), 1.0 + (v + 1) * 2], -1) @ R.T
+    floor += rng.normal(0, 1e-3, floor.shape)
+    p = rl.estimate_floor(floor, valid, mask, rng=np.random.default_rng(0))
+    assert p is not None and p.source == "mask"
+    assert abs(math.degrees(math.acos(float(np.asarray(p.normal) @ rl.UP))) - 50) < 2
+    assert rl.estimate_floor(floor, valid, rng=np.random.default_rng(0)) is None
+    wall = np.stack([u * 2, v * 2, np.full_like(u, 3.0)], -1) + rng.normal(0, 1e-3, floor.shape)
+    assert rl.estimate_floor(wall, valid, mask, rng=np.random.default_rng(0)) is None

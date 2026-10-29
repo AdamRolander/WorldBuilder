@@ -229,11 +229,18 @@ def estimate_floor(points: np.ndarray, valid: np.ndarray,
                    floor_mask: Optional[np.ndarray] = None,
                    normals: Optional[np.ndarray] = None,
                    max_tilt_deg: float = 40.0,
-                   rng: Optional[np.random.Generator] = None) -> Optional[Plane]:
+                   rng: Optional[np.random.Generator] = None,
+                   mask_max_tilt_deg: float = 60.0) -> Optional[Plane]:
     """Fit the floor plane in the (camera-frame) world.
 
     ``points`` (H,W,3) world frame; ``valid`` (H,W) bool; ``floor_mask`` (H,W)
     bool from SAM 3 if available (any resolution — it is resized to the map).
+
+    The floor normal's angle from camera up is the camera's pitch. Without a
+    mask the cone (``max_tilt_deg``) also has to pick the floor out of every
+    upward-facing surface, so it is tight. With a mask the pixels are already
+    floor and the cone only has to exclude walls (90°), so it is wider: photos
+    taken looking down at 40-50° are common.
     """
     H, W = valid.shape
     scale = _scene_scale(points, valid)
@@ -249,6 +256,7 @@ def estimate_floor(points: np.ndarray, valid: np.ndarray,
         source = "mask"
         if cand.sum() < 200:
             cand = None
+    cone = mask_max_tilt_deg if cand is not None else max_tilt_deg
     if cand is None:
         # Geometric guess: lower 65 % of the frame, normal within max_tilt of +Y.
         rows = np.arange(H)[:, None] >= int(0.35 * H)
@@ -263,7 +271,7 @@ def estimate_floor(points: np.ndarray, valid: np.ndarray,
 
     pts = points[cand]
     n, d, inl = ransac_plane(pts, thr, iterations=600, rng=rng,
-                             normal_prior=UP, max_angle_deg=max_tilt_deg)
+                             normal_prior=UP, max_angle_deg=cone)
     if n is None:
         return None
     # The camera must be above the floor (signed distance of the origin > 0).
@@ -282,9 +290,11 @@ def estimate_ceiling_plane(points: np.ndarray, valid: np.ndarray,
                            ceiling_mask: Optional[np.ndarray] = None,
                            normals: Optional[np.ndarray] = None,
                            max_tilt_deg: float = 40.0,
-                           rng: Optional[np.random.Generator] = None) -> Optional[Plane]:
+                           rng: Optional[np.random.Generator] = None,
+                           mask_max_tilt_deg: float = 60.0) -> Optional[Plane]:
     """Mirror of estimate_floor for the ceiling (normal within max_tilt of -Y,
-    upper part of the frame). Used for gravity when no floor is visible."""
+    upper part of the frame; wider with a ceiling mask). Used for gravity when
+    no floor is visible."""
     H, W = valid.shape
     scale = _scene_scale(points, valid)
     thr = 0.015 * scale
@@ -297,6 +307,7 @@ def estimate_ceiling_plane(points: np.ndarray, valid: np.ndarray,
         source = "mask"
         if cand.sum() < 200:
             cand = None
+    cone = mask_max_tilt_deg if cand is not None else max_tilt_deg
     if cand is None:
         rows = np.arange(H)[:, None] <= int(0.65 * H)
         down_like = normals @ (-UP) > math.cos(math.radians(max_tilt_deg))
@@ -305,7 +316,7 @@ def estimate_ceiling_plane(points: np.ndarray, valid: np.ndarray,
     if cand.sum() < 100:
         return None
     n, d, inl = ransac_plane(points[cand], thr, iterations=600, rng=rng,
-                             normal_prior=-UP, max_angle_deg=max_tilt_deg)
+                             normal_prior=-UP, max_angle_deg=cone)
     if n is None or inl.mean() < 0.25:
         return None
     if d <= 0:                    # a ceiling must be above the camera
