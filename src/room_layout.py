@@ -687,15 +687,18 @@ def estimate_layout(points_world: np.ndarray, valid: np.ndarray,
     notes: List[str] = []
     normals = compute_normals(points_world, valid)
 
+    # The wide cone a mask allows only adds steep floors the room confirms; it
+    # never loses a floor the 40° cone finds.
     floor = estimate_floor(points_world, valid, structural_masks.get("floor"), normals, rng=rng)
-    if floor is not None and not _steep_plane_confirmed(floor.normal, normals, valid):
-        notes.append("steep floor fit not confirmed by the other surfaces; refitting within 40°")
+    if floor is None or not _steep_plane_confirmed(floor.normal, normals, valid):
+        if floor is not None:
+            notes.append("steep floor fit not confirmed by the other surfaces; refitting within 40°")
         floor = estimate_floor(points_world, valid, structural_masks.get("floor"), normals, rng=rng,
                                mask_max_tilt_deg=STEEP_TILT_DEG)
     if floor is None:
         # Upward-looking photo: no floor in view. Try the ceiling for gravity.
         ceil_plane = estimate_ceiling_plane(points_world, valid, structural_masks.get("ceiling"), normals, rng=rng)
-        if ceil_plane is not None and not _steep_plane_confirmed(-np.asarray(ceil_plane.normal), normals, valid):
+        if ceil_plane is None or not _steep_plane_confirmed(-np.asarray(ceil_plane.normal), normals, valid):
             ceil_plane = estimate_ceiling_plane(points_world, valid, structural_masks.get("ceiling"), normals,
                                                 rng=rng, mask_max_tilt_deg=STEEP_TILT_DEG)
         if ceil_plane is not None:
