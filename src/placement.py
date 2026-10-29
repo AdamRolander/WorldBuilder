@@ -1718,6 +1718,9 @@ def place_objects(results: List[Dict], model_verts: Dict[int, np.ndarray], ev: S
                 r['support'] = SURFACE
     diag['removed'] = {i: {"label": by_id[i].r['label'], "reason": why} for i, why in removed.items()}
     kept = [o for o in objs if o.id not in removed] or objs
+    if not kept:                             # every object was structural or failed
+        diag['bounds'] = None
+        return diag
     lo = np.min([o.lo for o in kept], axis=0)
     hi = np.max([o.hi for o in kept], axis=0)
     diag['bounds'] = {'min': lo.tolist(), 'max': hi.tolist(), 'size': (hi - lo).tolist()}

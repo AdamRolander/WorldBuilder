@@ -232,3 +232,14 @@ def test_scene_is_open_when_sky_fills_the_upper_frame_or_no_structure_was_seen()
     window = valid.copy()
     window[5:15, 10:30] = False                                           # sky through a window: 5.6 %
     assert rl.classify_scene(window, "geometric", walls)[0] == "room"
+
+
+def test_floor_ransac_never_returns_a_plane_outside_its_cone():
+    """A thick vertical slab (a cabinet front filling the frame): some random
+    triples look almost level, but the least-squares refit on their inliers is
+    the vertical face itself, which must not come back as a floor."""
+    rng = np.random.default_rng(0)
+    pts = np.stack([rng.uniform(-1, 1, 4000), rng.uniform(-1, 1, 4000), 3.0 + rng.normal(0, 0.05, 4000)], 1)
+    n, _, _ = rl.ransac_plane(pts, 0.15, iterations=600, rng=rng, normal_prior=rl.UP, max_angle_deg=40.0)
+    if n is not None:
+        assert math.degrees(math.acos(min(1.0, float(n @ rl.UP)))) <= 40.0

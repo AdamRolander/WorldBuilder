@@ -381,17 +381,20 @@ def assemble_from_cache(models_dir: Path, image_rgb: np.ndarray,
                 bmin, bmax = list(layout.bounds_min), list(layout.bounds_max)
                 for side, src in layout.wall_sources.items():
                     axis = 0 if side.startswith("x") else 2
-                    if str(src).startswith("wall"):
+                    if str(src).startswith("wall") or bounds is None:
                         continue
                     if side.endswith("min"):
                         bmin[axis] = min(bmin[axis], bounds['min'][axis] - 0.02)
                     else:
                         bmax[axis] = max(bmax[axis], bounds['max'][axis] + 0.02)
-                bmin[1] = layout.floor_y if floor_fitted else min(layout.floor_y, bounds['min'][1])
-                # An observed ceiling is evidence too; only a prior-placed one
-                # moves up to make room for a tall object.
-                bmax[1] = (layout.ceiling_y if layout.ceiling_source == "geometric"
-                           else max(layout.ceiling_y, bounds['max'][1] + 0.02))
+                if bounds is None:                  # no objects left: the room is all there is
+                    bmin[1], bmax[1] = layout.floor_y, layout.ceiling_y
+                else:
+                    bmin[1] = layout.floor_y if floor_fitted else min(layout.floor_y, bounds['min'][1])
+                    # An observed ceiling is evidence too; only a prior-placed one
+                    # moves up to make room for a tall object.
+                    bmax[1] = (layout.ceiling_y if layout.ceiling_source == "geometric"
+                               else max(layout.ceiling_y, bounds['max'][1] + 0.02))
                 layout.bounds_min, layout.bounds_max = bmin, bmax
                 from scipy import ndimage
 

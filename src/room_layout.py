@@ -206,6 +206,10 @@ def ransac_plane(pts: np.ndarray, threshold: float, iterations: int = 500,
         n = -n
     elif normal_prior is None and float(n @ best_n) < 0:
         n = -n
+    if normal_prior is not None and float(n @ normal_prior) < cos_max:
+        # the least-squares refit left the allowed cone (a steep surface caught
+        # by a hypothesis near its edge): there is no plane of that kind here
+        return None, 0.0, np.zeros(n_pts, bool)
     d = -float(n @ cen)
     inl = np.abs(pts @ n + d) < threshold
     return n, d, inl
