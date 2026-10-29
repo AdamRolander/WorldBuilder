@@ -651,6 +651,22 @@ def build_textured_room(layout: RoomLayout, K_norm: np.ndarray, image_rgb: np.nd
 # Orchestration
 # --------------------------------------------------------------------------
 
+STEEP_TILT_DEG = 40.0
+
+
+def _steep_plane_confirmed(up: Sequence[float], normals: np.ndarray, valid: np.ndarray) -> bool:
+    """A floor (or ceiling) tilted more than ``STEEP_TILT_DEG`` from camera up
+    says the camera looks steeply down (or up). A mask that caught a sloped
+    surface says the same thing, so a steep plane is kept only if the rest of
+    the scene's horizontal and vertical surfaces agree with it (the same test
+    ``refine_gravity`` applies). Planes within the tight cone pass unchecked."""
+    up = np.asarray(up, float)
+    if math.degrees(math.acos(min(1.0, max(-1.0, float(up @ UP))))) <= STEEP_TILT_DEG:
+        return True
+    refined, support = refine_gravity(normals, valid, up)
+    return support >= 0.4 and math.degrees(math.acos(min(1.0, float(refined @ up)))) <= 15.0
+
+
 def estimate_layout(points_world: np.ndarray, valid: np.ndarray,
                     object_aabbs_world: Sequence[Tuple[np.ndarray, np.ndarray]] = (),
                     structural_masks: Optional[Dict[str, np.ndarray]] = None,
@@ -672,9 +688,16 @@ def estimate_layout(points_world: np.ndarray, valid: np.ndarray,
     normals = compute_normals(points_world, valid)
 
     floor = estimate_floor(points_world, valid, structural_masks.get("floor"), normals, rng=rng)
+    if floor is not None and not _steep_plane_confirmed(floor.normal, normals, valid):
+        notes.append("steep floor fit not confirmed by the other surfaces; refitting within 40°")
+        floor = estimate_floor(points_world, valid, structural_masks.get("floor"), normals, rng=rng,
+                               mask_max_tilt_deg=STEEP_TILT_DEG)
     if floor is None:
         # Upward-looking photo: no floor in view. Try the ceiling for gravity.
         ceil_plane = estimate_ceiling_plane(points_world, valid, structural_masks.get("ceiling"), normals, rng=rng)
+        if ceil_plane is not None and not _steep_plane_confirmed(-np.asarray(ceil_plane.normal), normals, valid):
+            ceil_plane = estimate_ceiling_plane(points_world, valid, structural_masks.get("ceiling"), normals,
+                                                rng=rng, mask_max_tilt_deg=STEEP_TILT_DEG)
         if ceil_plane is not None:
             n_up = -np.asarray(ceil_plane.normal)
             floor = Plane(normal=n_up.tolist(), offset=0.0, inliers=ceil_plane.inliers,
