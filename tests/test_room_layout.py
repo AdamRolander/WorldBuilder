@@ -285,3 +285,26 @@ def test_a_floor_mask_allows_a_steeply_pitched_camera_but_not_a_wall():
     assert rl.estimate_floor(floor, valid, rng=np.random.default_rng(0)) is None
     wall = np.stack([u * 2, v * 2, np.full_like(u, 3.0)], -1) + rng.normal(0, 1e-3, floor.shape)
     assert rl.estimate_floor(wall, valid, mask, rng=np.random.default_rng(0)) is None
+
+
+def test_a_steep_floor_is_kept_only_when_the_room_agrees():
+    """Camera looking 50° down at a real floor: the walls agree, gravity is
+    recovered. Level camera whose floor mask covers a 50° ramp instead: the
+    walls disagree, so the steep fit is dropped and gravity stays level."""
+    R = rot_x(-50.0)
+    P_cam, _, _, _, hit = raycast_room(R)
+    valid = np.isfinite(P_cam).all(-1)
+    layout = rl.estimate_layout(P_cam, valid, structural_masks={"floor": hit == "floor"},
+                                rng=np.random.default_rng(0))
+    np.testing.assert_allclose(layout.R_total @ (R @ np.array([0, 1, 0.])), [0, 1, 0], atol=2e-2)
+
+    P_cam, _, _, _, hit = raycast_room(np.eye(3))
+    valid = np.isfinite(P_cam).all(-1)
+    ramp = hit == "floor"
+    t = math.radians(50)
+    p = P_cam[ramp]
+    P_ramp = P_cam.copy()
+    P_ramp[ramp] = np.stack([p[:, 0], FLOOR_Y + (p[:, 2] - p[:, 2].min()) * math.tan(t), p[:, 2]], -1)   # a 50° slope
+    layout = rl.estimate_layout(P_ramp, valid, structural_masks={"floor": ramp}, rng=np.random.default_rng(0))
+    up = layout.R_total.T @ np.array([0, 1, 0.])
+    assert math.degrees(math.acos(min(1.0, float(up @ rl.UP)))) < 10.0
