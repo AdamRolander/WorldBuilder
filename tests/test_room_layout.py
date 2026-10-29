@@ -243,3 +243,24 @@ def test_floor_ransac_never_returns_a_plane_outside_its_cone():
     n, _, _ = rl.ransac_plane(pts, 0.15, iterations=600, rng=rng, normal_prior=rl.UP, max_angle_deg=40.0)
     if n is not None:
         assert math.degrees(math.acos(min(1.0, float(n @ rl.UP)))) <= 40.0
+
+
+def test_a_level_surface_on_the_wrong_side_of_the_camera_is_not_floor_or_ceiling():
+    """A level patch above the camera (seen in the lower part of the frame,
+    as MoGe can produce on a blank background) must not become an upside-down
+    floor, and one below the camera must not become the ceiling."""
+    rng = np.random.default_rng(0)
+    H = W = 64
+    u, v = np.meshgrid(np.linspace(-1, 1, W), np.linspace(-1, 1, H))
+    valid = np.ones((H, W), bool)
+
+    def level(y):
+        pts = np.stack([u * 3, np.full_like(u, y), 2.0 + (v + 1) * 2], -1)
+        return pts + rng.normal(0, 1e-3, pts.shape)
+
+    above = level(0.8)
+    assert rl.estimate_floor(above, valid, rng=np.random.default_rng(0)) is None
+    below = level(-1.2)
+    floor = rl.estimate_floor(below, valid, rng=np.random.default_rng(0))
+    assert floor is not None and float(np.asarray(floor.normal) @ rl.UP) > 0.99
+    assert rl.estimate_ceiling_plane(below, valid, rng=np.random.default_rng(0)) is None

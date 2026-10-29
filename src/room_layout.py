@@ -266,9 +266,11 @@ def estimate_floor(points: np.ndarray, valid: np.ndarray,
                              normal_prior=UP, max_angle_deg=max_tilt_deg)
     if n is None:
         return None
-    # The camera must be above the floor: signed distance of the origin > 0.
-    if d < 0:
-        n, d = -n, -d
+    # The camera must be above the floor (signed distance of the origin > 0).
+    # An upward-facing surface above the camera is not a floor; flipping it
+    # would turn gravity upside down.
+    if d <= 0:
+        return None
     frac = float(inl.mean())
     if frac < 0.25:
         return None
@@ -305,6 +307,8 @@ def estimate_ceiling_plane(points: np.ndarray, valid: np.ndarray,
     n, d, inl = ransac_plane(points[cand], thr, iterations=600, rng=rng,
                              normal_prior=-UP, max_angle_deg=max_tilt_deg)
     if n is None or inl.mean() < 0.25:
+        return None
+    if d <= 0:                    # a ceiling must be above the camera
         return None
     return Plane(normal=n.tolist(), offset=float(d), inliers=int(inl.sum()),
                  inlier_fraction=float(inl.mean()), source=source)
