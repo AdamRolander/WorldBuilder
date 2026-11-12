@@ -206,6 +206,10 @@ def ransac_plane(pts: np.ndarray, threshold: float, iterations: int = 500,
         n = -n
     elif normal_prior is None and float(n @ best_n) < 0:
         n = -n
+    if normal_prior is not None and float(n @ normal_prior) < cos_max:
+        # the least-squares refit left the allowed cone (a steep surface caught
+        # by a hypothesis near its edge): there is no plane of that kind here
+        return None, 0.0, np.zeros(n_pts, bool)
     d = -float(n @ cen)
     inl = np.abs(pts @ n + d) < threshold
     return n, d, inl
@@ -225,11 +229,18 @@ def estimate_floor(points: np.ndarray, valid: np.ndarray,
                    floor_mask: Optional[np.ndarray] = None,
                    normals: Optional[np.ndarray] = None,
                    max_tilt_deg: float = 40.0,
-                   rng: Optional[np.random.Generator] = None) -> Optional[Plane]:
+                   rng: Optional[np.random.Generator] = None,
+                   mask_max_tilt_deg: float = 60.0) -> Optional[Plane]:
     """Fit the floor plane in the (camera-frame) world.
 
     ``points`` (H,W,3) world frame; ``valid`` (H,W) bool; ``floor_mask`` (H,W)
     bool from SAM 3 if available (any resolution — it is resized to the map).
+
+    The floor normal's angle from camera up is the camera's pitch. Without a
+    mask the cone (``max_tilt_deg``) also has to pick the floor out of every
+    upward-facing surface, so it is tight. With a mask the pixels are already
+    floor and the cone only has to exclude walls (90°), so it is wider: photos
+    taken looking down at 40-50° are common.
     """
     H, W = valid.shape
     scale = _scene_scale(points, valid)
@@ -245,6 +256,7 @@ def estimate_floor(points: np.ndarray, valid: np.ndarray,
         source = "mask"
         if cand.sum() < 200:
             cand = None
+    cone = mask_max_tilt_deg if cand is not None else max_tilt_deg
     if cand is None:
         # Geometric guess: lower 65 % of the frame, normal within max_tilt of +Y.
         rows = np.arange(H)[:, None] >= int(0.35 * H)
@@ -259,12 +271,14 @@ def estimate_floor(points: np.ndarray, valid: np.ndarray,
 
     pts = points[cand]
     n, d, inl = ransac_plane(pts, thr, iterations=600, rng=rng,
-                             normal_prior=UP, max_angle_deg=max_tilt_deg)
+                             normal_prior=UP, max_angle_deg=cone)
     if n is None:
         return None
-    # The camera must be above the floor: signed distance of the origin > 0.
-    if d < 0:
-        n, d = -n, -d
+    # The camera must be above the floor (signed distance of the origin > 0).
+    # An upward-facing surface above the camera is not a floor; flipping it
+    # would turn gravity upside down.
+    if d <= 0:
+        return None
     frac = float(inl.mean())
     if frac < 0.25:
         return None
@@ -276,9 +290,11 @@ def estimate_ceiling_plane(points: np.ndarray, valid: np.ndarray,
                            ceiling_mask: Optional[np.ndarray] = None,
                            normals: Optional[np.ndarray] = None,
                            max_tilt_deg: float = 40.0,
-                           rng: Optional[np.random.Generator] = None) -> Optional[Plane]:
+                           rng: Optional[np.random.Generator] = None,
+                           mask_max_tilt_deg: float = 60.0) -> Optional[Plane]:
     """Mirror of estimate_floor for the ceiling (normal within max_tilt of -Y,
-    upper part of the frame). Used for gravity when no floor is visible."""
+    upper part of the frame; wider with a ceiling mask). Used for gravity when
+    no floor is visible."""
     H, W = valid.shape
     scale = _scene_scale(points, valid)
     thr = 0.015 * scale
@@ -291,6 +307,7 @@ def estimate_ceiling_plane(points: np.ndarray, valid: np.ndarray,
         source = "mask"
         if cand.sum() < 200:
             cand = None
+    cone = mask_max_tilt_deg if cand is not None else max_tilt_deg
     if cand is None:
         rows = np.arange(H)[:, None] <= int(0.65 * H)
         down_like = normals @ (-UP) > math.cos(math.radians(max_tilt_deg))
@@ -299,8 +316,10 @@ def estimate_ceiling_plane(points: np.ndarray, valid: np.ndarray,
     if cand.sum() < 100:
         return None
     n, d, inl = ransac_plane(points[cand], thr, iterations=600, rng=rng,
-                             normal_prior=-UP, max_angle_deg=max_tilt_deg)
+                             normal_prior=-UP, max_angle_deg=cone)
     if n is None or inl.mean() < 0.25:
+        return None
+    if d <= 0:                    # a ceiling must be above the camera
         return None
     return Plane(normal=n.tolist(), offset=float(d), inliers=int(inl.sum()),
                  inlier_fraction=float(inl.mean()), source=source)
@@ -632,6 +651,22 @@ def build_textured_room(layout: RoomLayout, K_norm: np.ndarray, image_rgb: np.nd
 # Orchestration
 # --------------------------------------------------------------------------
 
+STEEP_TILT_DEG = 40.0
+
+
+def _steep_plane_confirmed(up: Sequence[float], normals: np.ndarray, valid: np.ndarray) -> bool:
+    """A floor (or ceiling) tilted more than ``STEEP_TILT_DEG`` from camera up
+    says the camera looks steeply down (or up). A mask that caught a sloped
+    surface says the same thing, so a steep plane is kept only if the rest of
+    the scene's horizontal and vertical surfaces agree with it (the same test
+    ``refine_gravity`` applies). Planes within the tight cone pass unchecked."""
+    up = np.asarray(up, float)
+    if math.degrees(math.acos(min(1.0, max(-1.0, float(up @ UP))))) <= STEEP_TILT_DEG:
+        return True
+    refined, support = refine_gravity(normals, valid, up)
+    return support >= 0.4 and math.degrees(math.acos(min(1.0, float(refined @ up)))) <= 15.0
+
+
 def estimate_layout(points_world: np.ndarray, valid: np.ndarray,
                     object_aabbs_world: Sequence[Tuple[np.ndarray, np.ndarray]] = (),
                     structural_masks: Optional[Dict[str, np.ndarray]] = None,
@@ -652,10 +687,20 @@ def estimate_layout(points_world: np.ndarray, valid: np.ndarray,
     notes: List[str] = []
     normals = compute_normals(points_world, valid)
 
+    # The wide cone a mask allows only adds steep floors the room confirms; it
+    # never loses a floor the 40° cone finds.
     floor = estimate_floor(points_world, valid, structural_masks.get("floor"), normals, rng=rng)
+    if floor is None or not _steep_plane_confirmed(floor.normal, normals, valid):
+        if floor is not None:
+            notes.append("steep floor fit not confirmed by the other surfaces; refitting within 40°")
+        floor = estimate_floor(points_world, valid, structural_masks.get("floor"), normals, rng=rng,
+                               mask_max_tilt_deg=STEEP_TILT_DEG)
     if floor is None:
         # Upward-looking photo: no floor in view. Try the ceiling for gravity.
         ceil_plane = estimate_ceiling_plane(points_world, valid, structural_masks.get("ceiling"), normals, rng=rng)
+        if ceil_plane is None or not _steep_plane_confirmed(-np.asarray(ceil_plane.normal), normals, valid):
+            ceil_plane = estimate_ceiling_plane(points_world, valid, structural_masks.get("ceiling"), normals,
+                                                rng=rng, mask_max_tilt_deg=STEEP_TILT_DEG)
         if ceil_plane is not None:
             n_up = -np.asarray(ceil_plane.normal)
             floor = Plane(normal=n_up.tolist(), offset=0.0, inliers=ceil_plane.inliers,

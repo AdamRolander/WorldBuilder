@@ -401,3 +401,11 @@ def test_resting_object_is_stood_upright(scene):
     out = pl.upright_resting(ev, [o], max_iou_loss=1.0)
     assert 1 in out and abs(out[1] - 6.0) < 0.5
     assert pl.upright_rotation(quat_to_matrix(o.r["rotation_quaternion"]))[1] < 0.1
+
+
+def test_guard_never_lets_a_poorly_fitting_object_leave_its_mask():
+    assert not pl.fit_lost(0.8, 0.7, 0.12)            # within the tolerance
+    assert pl.fit_lost(0.8, 0.6, 0.12)                # more than the tolerance
+    assert pl.fit_lost(0.24, 0.004, 0.25)             # tolerance larger than the fit itself
+    assert not pl.fit_lost(0.24, 0.15, 0.25)          # lost under half of what it had
+    assert not pl.fit_lost(None, 0.1, 0.25) and not pl.fit_lost(0.3, None, 0.25)

@@ -315,6 +315,19 @@ def fit_iou(ev: SceneEvidence, obj: PlacedObject) -> Optional[float]:
     return mask_iou(sil, m)
 
 
+def fit_lost(before: Optional[float], after: Optional[float], max_loss: float,
+             max_frac: float = 0.5) -> bool:
+    """The silhouette guard: True if a move costs the object too much of its
+    match with its mask, i.e. more than ``max_loss`` IoU, or more than
+    ``max_frac`` of the match it had. The second bound matters for objects
+    that already fit poorly: with only an absolute tolerance, an object at
+    IoU 0.2 under a 0.25 tolerance could be moved off its mask entirely.
+    No verdict (False) when the fit cannot be measured (no mask)."""
+    if before is None or after is None:
+        return False
+    return after < before - min(max_loss, max_frac * before)
+
+
 def upright_rotation(R_obj: np.ndarray) -> Tuple[np.ndarray, float]:
     """Smallest rotation that makes the object's most-vertical model axis
     exactly vertical, and the tilt it removes (degrees).
@@ -347,7 +360,7 @@ def correct_upright(ev: SceneEvidence, obj: PlacedObject, max_tilt_deg: float = 
     snap = obj.snapshot()
     obj.set_rotation(matrix_to_quat(R_new))
     after = fit_iou(ev, obj)
-    if before is not None and after is not None and after < before - max_iou_loss:
+    if fit_lost(before, after, max_iou_loss):
         obj.restore(snap)
         return False
     obj.r['upright_corrected'] = True
@@ -763,7 +776,7 @@ def settle_unsupported(ev: SceneEvidence, objs: List[PlacedObject], room: Option
             options.append((fit_iou(ev, o), "stretch", o.snapshot()))
         o.restore(snap)
         best = max(options, key=lambda t: -1.0 if t[0] is None else t[0])
-        if before is not None and best[0] is not None and best[0] < before - max_iou_loss:
+        if fit_lost(before, best[0], max_iou_loss):
             continue
         o.restore(best[2])
         o.r.update(snapped=True, support=FLOOR if sup_id is None else "object", supported_by=sup_id,
@@ -921,7 +934,7 @@ def upright_resting(ev: SceneEvidence, objs: List["PlacedObject"], max_tilt_deg:
             sc = fit_iou(ev, o)
             if sc is not None and (best[0] is None or sc > best[0]):
                 best = (sc, o.snapshot())
-        if before is not None and best[0] is not None and best[0] < before - max_iou_loss:
+        if fit_lost(before, best[0], max_iou_loss):
             o.restore(snap)
             continue
         o.restore(best[1])
@@ -1128,7 +1141,7 @@ def square_to_wall(ev: SceneEvidence, o: "PlacedObject", side: str, max_deg: flo
         o.restore(snap)
         return None
     after = fit_iou(ev, o)
-    if before is not None and after is not None and after < before - max_iou_loss:
+    if fit_lost(before, after, max_iou_loss):
         o.restore(snap)
         return None
     o.r['squared_to_wall'] = round(float(np.degrees(best)), 2)
@@ -1183,7 +1196,7 @@ def square_long_objects(ev: SceneEvidence, objs: List["PlacedObject"], room: Opt
             o.restore(snap)
             continue
         after = fit_iou(ev, o)
-        if before is not None and after is not None and after < before - max_iou_loss:
+        if fit_lost(before, after, max_iou_loss):
             o.restore(snap)
             continue
         o.r['squared_to_room'] = round(float(np.degrees(done)), 2)
@@ -1260,7 +1273,7 @@ def push_to_walls(ev: SceneEvidence, objs: List[PlacedObject], room: Dict, max_s
         if not options:
             continue
         best = max(options, key=lambda t: -1.0 if t[0] is None else t[0])
-        if before is not None and best[0] is not None and best[0] < before - max_iou_loss:
+        if fit_lost(before, best[0], max_iou_loss):
             continue
         o.restore(best[2])
         o.r['wall_gap_closed'] = best[1]
@@ -1294,7 +1307,7 @@ def clamp_below_ceiling(ev: SceneEvidence, objs: List[PlacedObject], room: Dict,
             options.append((fit_iou(ev, o), o.snapshot()))
             o.restore(snap)
         best = max(options, key=lambda t: -1.0 if t[0] is None else t[0])
-        if before is not None and best[0] is not None and best[0] < before - max_iou_loss:
+        if fit_lost(before, best[0], max_iou_loss):
             continue
         o.restore(best[1])
         o.r['ceiling_clamped'] = True
@@ -1382,7 +1395,7 @@ def keep_inside_walls(ev: SceneEvidence, objs: List[PlacedObject], room: Dict,
             o.translate([d if axis == 0 else 0, 0, d if axis == 2 else 0])
             options.append((fit_iou(ev, o), o.snapshot()))
             best = max(options, key=lambda t: -1.0 if t[0] is None else t[0])
-            if before is not None and best[0] is not None and best[0] < before - 0.10:
+            if fit_lost(before, best[0], 0.10):
                 # Coming inside would cost the object its match with the photo:
                 # more likely the "wall" is a cabinet front or a partition and
                 # the object really is beyond it. Leave it where the photo has it.
@@ -1590,7 +1603,7 @@ def place_objects(results: List[Dict], model_verts: Dict[int, np.ndarray], ev: S
                 options.append((fit_iou(ev, o), "slide", o.snapshot()))
             o.restore(snap)
         best = max(options, key=lambda t: -1.0 if t[0] is None else t[0])
-        if before is not None and best[0] is not None and best[0] < before - max_iou_loss:
+        if fit_lost(before, best[0], max_iou_loss):
             o.r.update(supported_by=None, support_source="rejected",
                        contact_rejected={"y": round(float(target), 4), "kind": c.kind, "iou_before": _round(before),
                                          "options": {how: _round(sc) for sc, how, _ in options}})
@@ -1705,6 +1718,9 @@ def place_objects(results: List[Dict], model_verts: Dict[int, np.ndarray], ev: S
                 r['support'] = SURFACE
     diag['removed'] = {i: {"label": by_id[i].r['label'], "reason": why} for i, why in removed.items()}
     kept = [o for o in objs if o.id not in removed] or objs
+    if not kept:                             # every object was structural or failed
+        diag['bounds'] = None
+        return diag
     lo = np.min([o.lo for o in kept], axis=0)
     hi = np.max([o.hi for o in kept], axis=0)
     diag['bounds'] = {'min': lo.tolist(), 'max': hi.tolist(), 'size': (hi - lo).tolist()}

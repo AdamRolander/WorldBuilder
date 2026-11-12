@@ -232,3 +232,79 @@ def test_scene_is_open_when_sky_fills_the_upper_frame_or_no_structure_was_seen()
     window = valid.copy()
     window[5:15, 10:30] = False                                           # sky through a window: 5.6 %
     assert rl.classify_scene(window, "geometric", walls)[0] == "room"
+
+
+def test_floor_ransac_never_returns_a_plane_outside_its_cone():
+    """A thick vertical slab (a cabinet front filling the frame): some random
+    triples look almost level, but the least-squares refit on their inliers is
+    the vertical face itself, which must not come back as a floor."""
+    rng = np.random.default_rng(0)
+    pts = np.stack([rng.uniform(-1, 1, 4000), rng.uniform(-1, 1, 4000), 3.0 + rng.normal(0, 0.05, 4000)], 1)
+    n, _, _ = rl.ransac_plane(pts, 0.15, iterations=600, rng=rng, normal_prior=rl.UP, max_angle_deg=40.0)
+    if n is not None:
+        assert math.degrees(math.acos(min(1.0, float(n @ rl.UP)))) <= 40.0
+
+
+def test_a_level_surface_on_the_wrong_side_of_the_camera_is_not_floor_or_ceiling():
+    """A level patch above the camera (seen in the lower part of the frame,
+    as MoGe can produce on a blank background) must not become an upside-down
+    floor, and one below the camera must not become the ceiling."""
+    rng = np.random.default_rng(0)
+    H = W = 64
+    u, v = np.meshgrid(np.linspace(-1, 1, W), np.linspace(-1, 1, H))
+    valid = np.ones((H, W), bool)
+
+    def level(y):
+        pts = np.stack([u * 3, np.full_like(u, y), 2.0 + (v + 1) * 2], -1)
+        return pts + rng.normal(0, 1e-3, pts.shape)
+
+    above = level(0.8)
+    assert rl.estimate_floor(above, valid, rng=np.random.default_rng(0)) is None
+    below = level(-1.2)
+    floor = rl.estimate_floor(below, valid, rng=np.random.default_rng(0))
+    assert floor is not None and float(np.asarray(floor.normal) @ rl.UP) > 0.99
+    assert rl.estimate_ceiling_plane(below, valid, rng=np.random.default_rng(0)) is None
+
+
+def test_a_floor_mask_allows_a_steeply_pitched_camera_but_not_a_wall():
+    """Looking down at 50° (common in handheld photos), the floor normal is 50°
+    from camera up. With a floor mask that floor is accepted; a wall inside
+    the mask is not, and without a mask the tight cone still applies."""
+    rng = np.random.default_rng(0)
+    H = W = 64
+    u, v = np.meshgrid(np.linspace(-1, 1, W), np.linspace(-1, 1, H))
+    valid = np.ones((H, W), bool)
+    mask = np.ones((H, W), bool)
+    t = math.radians(50)
+    R = np.array([[1, 0, 0], [0, math.cos(t), -math.sin(t)], [0, math.sin(t), math.cos(t)]])
+    floor = np.stack([u * 2, np.full_like(u, -1.5), 1.0 + (v + 1) * 2], -1) @ R.T
+    floor += rng.normal(0, 1e-3, floor.shape)
+    p = rl.estimate_floor(floor, valid, mask, rng=np.random.default_rng(0))
+    assert p is not None and p.source == "mask"
+    assert abs(math.degrees(math.acos(float(np.asarray(p.normal) @ rl.UP))) - 50) < 2
+    assert rl.estimate_floor(floor, valid, rng=np.random.default_rng(0)) is None
+    wall = np.stack([u * 2, v * 2, np.full_like(u, 3.0)], -1) + rng.normal(0, 1e-3, floor.shape)
+    assert rl.estimate_floor(wall, valid, mask, rng=np.random.default_rng(0)) is None
+
+
+def test_a_steep_floor_is_kept_only_when_the_room_agrees():
+    """Camera looking 50° down at a real floor: the walls agree, gravity is
+    recovered. Level camera whose floor mask covers a 50° ramp instead: the
+    walls disagree, so the steep fit is dropped and gravity stays level."""
+    R = rot_x(-50.0)
+    P_cam, _, _, _, hit = raycast_room(R)
+    valid = np.isfinite(P_cam).all(-1)
+    layout = rl.estimate_layout(P_cam, valid, structural_masks={"floor": hit == "floor"},
+                                rng=np.random.default_rng(0))
+    np.testing.assert_allclose(layout.R_total @ (R @ np.array([0, 1, 0.])), [0, 1, 0], atol=2e-2)
+
+    P_cam, _, _, _, hit = raycast_room(np.eye(3))
+    valid = np.isfinite(P_cam).all(-1)
+    ramp = hit == "floor"
+    t = math.radians(50)
+    p = P_cam[ramp]
+    P_ramp = P_cam.copy()
+    P_ramp[ramp] = np.stack([p[:, 0], FLOOR_Y + (p[:, 2] - p[:, 2].min()) * math.tan(t), p[:, 2]], -1)   # a 50° slope
+    layout = rl.estimate_layout(P_ramp, valid, structural_masks={"floor": ramp}, rng=np.random.default_rng(0))
+    up = layout.R_total.T @ np.array([0, 1, 0.])
+    assert math.degrees(math.acos(min(1.0, float(up @ rl.UP)))) < 10.0

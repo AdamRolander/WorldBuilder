@@ -5,6 +5,20 @@ versions follow [SemVer](https://semver.org/) (0.x: minor = features, patch = fi
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-11-12
+
+### Fixed
+- Upside-down gravity: a level surface above the camera could be taken for the floor and
+  flipped, turning the room over. A floor must now be below the camera and a ceiling above it.
+- Tilted floors on photos with little background: a plane refit could leave the RANSAC cone
+  and come out tilted by up to 112 degrees. The refit now stays inside the cone.
+- Steeply pitched photos (camera looking 40-60 degrees down) lost their floor. With a floor or
+  ceiling mask the plane may now tilt up to 60 degrees, but past 40 degrees only when the
+  room's other surfaces agree; otherwise the 40 degree fit is used.
+- Scenes where every object was removed during assembly crashed instead of finishing.
+- The silhouette guard let an object that already matched its mask poorly be moved almost
+  entirely off it. A placement step may now cost an object at most half of its fit.
+
 ## [0.4.0] — 2026-10-21
 
 ### Added
