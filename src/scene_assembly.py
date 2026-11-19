@@ -121,6 +121,65 @@ def on_ceiling(masks: Dict[int, np.ndarray], points_aligned: np.ndarray, valid: 
     return out
 
 
+def indistinct(masks: Dict[int, np.ndarray], image_small: np.ndarray, points_aligned: np.ndarray,
+               valid: np.ndarray, object_pixels: Optional[np.ndarray] = None, max_edge: float = 0.025,
+               max_colour: float = 0.07, max_relief: float = 0.06, ring_frac: float = 0.25) -> List[int]:
+    """Detections that are a patch of the surface they were found on. When a
+    label names something the photo doesn't show, SAM 3 sometimes returns a
+    blank piece of wall or floor instead. Three things are all missing then:
+
+    * an outline: the photo's colour does not step across the mask's edge
+      (median step between the local means just inside and just outside);
+    * a colour of its own: the mask's median colour is the surrounding
+      surface's;
+    * relief: the points under the mask lie on the plane through the
+      surface around it.
+
+    A real object has at least one: a grey rug on a grey floor has a border,
+    a poster flush with the wall has an outline, a white cabinet against a
+    white wall stands out of it. Only surface that no other mask claims
+    counts as surroundings, and objects with too little of it are kept.
+    Colours are 0-1 RGB; relief is relative to the object's own size."""
+    from scipy import ndimage
+    h, w = valid.shape
+    img = image_small.astype(float) / 255.0
+    free = valid if object_pixels is None else (valid & (object_pixels == 0))
+    out = []
+    for rid, m in masks.items():
+        mm = rl._resize_mask(m, (h, w)) & valid
+        n = int(mm.sum())
+        if n < 30:
+            continue
+        k = max(2, int(round(ring_frac * np.sqrt(n))))
+        ring = ndimage.binary_dilation(mm, iterations=k) & ~ndimage.binary_dilation(mm, iterations=1) & free
+        if ring.sum() < 0.3 * n:
+            continue
+        if np.linalg.norm(np.median(img[mm], 0) - np.median(img[ring], 0)) >= max_colour:
+            continue
+        P = points_aligned[ring]
+        c = P.mean(0)
+        normal = np.linalg.svd(P - c, full_matrices=False)[2][2]
+        Q = points_aligned[mm]
+        size = float(np.linalg.norm(np.percentile(Q, 95, 0) - np.percentile(Q, 5, 0)))
+        if float(np.percentile(np.abs((Q - c) @ normal), 90)) >= max_relief * max(size, 1e-6):
+            continue
+        inner = mm & ~ndimage.binary_erosion(mm, iterations=2)
+        outer = ndimage.binary_dilation(mm, iterations=2) & ~mm & valid
+
+        def local_mean(band):
+            wt = ndimage.uniform_filter(band.astype(float), 7)
+            s = np.stack([ndimage.uniform_filter(img[..., ch] * band, 7) for ch in range(3)], -1)
+            return s / np.maximum(wt, 1e-6)[..., None], wt
+        mi, wi = local_mean(inner)
+        mo, wo = local_mean(outer)
+        edge = inner & (wi > 0.05) & (wo > 0.05)
+        if not edge.any():
+            continue
+        if float(np.median(np.linalg.norm(mi[edge] - mo[edge], axis=1))) < max_edge:
+            out.append(int(rid))
+    return out
+
+
 def beyond_window(masks: Dict[int, np.ndarray], window: Optional[np.ndarray], points_aligned: np.ndarray,
                   valid: np.ndarray, layout, min_inside: float = 0.45, min_beyond: float = 0.6) -> List[int]:
     """Detections that are the view through a window: the trees, cars and
@@ -306,6 +365,14 @@ def assemble_from_cache(models_dir: Path, image_rgb: np.ndarray,
             structural.setdefault(rid, "view through a window")
         for rid in on_ceiling(masks, pm["points"] @ layout.R_total.T, pm["valid"], layout):
             structural.setdefault(rid, "ceiling")
+        # after the other surface rules: what they left to the room (window
+        # panes, ceiling tiles) is surroundings here, not another object
+        hs, ws = pm["valid"].shape
+        free_of = np.where(np.isin(object_pixels, list(structural)), 0, object_pixels)
+        for rid in indistinct({k: v for k, v in masks.items() if k not in structural},
+                              np.asarray(Image.fromarray(image_rgb).resize((ws, hs), Image.BILINEAR)),
+                              pm["points"] @ layout.R_total.T, pm["valid"], free_of):
+            structural.setdefault(rid, "surface around it (no outline, colour or relief of its own)")
         if layout.scene_type == "open" and "floor" not in (structural_masks or {}):
             P_al = pm["points"] @ layout.R_total.T
             N_al = rl.compute_normals(pm["points"], pm["valid"]) @ layout.R_total.T
