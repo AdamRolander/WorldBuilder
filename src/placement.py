@@ -585,6 +585,27 @@ def contained_parts(masks: Dict[int, np.ndarray], labels: Dict[int, str], min_in
     return out
 
 
+def failed_reconstructions(records: List[Dict], min_fit_iou: float = 0.08) -> Dict[int, str]:
+    """Objects whose placed mesh does not look like their mask at all,
+    ``{id: reason}``. A shared instance is judged by the mesh it borrowed,
+    not here. A failed reconstruction replaced by a box from the photo is
+    kept only while something rests on it: that is the box's whole purpose,
+    so a box that ends up carrying nothing is a failed reconstruction again."""
+    carrying = {r.get('supported_by') for r in records}
+    out: Dict[int, str] = {}
+    for r in records:
+        iou = r.get('fit_iou')
+        if iou is None or iou >= min_fit_iou or r.get('instance_of'):
+            continue
+        if r.get('proxy'):
+            if r['id'] in carrying:
+                continue
+            out[r['id']] = f"box stand-in carries nothing and misses its mask (IoU {iou:.2f})"
+        else:
+            out[r['id']] = f"mesh does not match its mask (IoU {iou:.2f})"
+    return out
+
+
 def find_duplicates(objs: List[PlacedObject], ev: Optional[SceneEvidence] = None,
                     min_overlap: float = 0.45, min_size_ratio: float = 0.25) -> List[Tuple[int, int, float]]:
     """Pairs ``(keep, drop, overlap)`` of same-label objects whose boxes share
@@ -1699,11 +1720,7 @@ def place_objects(results: List[Dict], model_verts: Dict[int, np.ndarray], ev: S
             o.r['proxy_box'] = {"min": o.lo.tolist(), "max": o.hi.tolist()}
 
     # 7. reconstructions that do not look like their mask at all
-    removed: Dict[int, str] = {}
-    for o in objs:
-        iou = o.r.get('fit_iou')
-        if iou is not None and iou < min_fit_iou and not o.r.get('instance_of') and not o.r.get('proxy'):
-            removed[o.id] = f"mesh does not match its mask (IoU {iou:.2f})"
+    removed: Dict[int, str] = failed_reconstructions([o.r for o in objs], min_fit_iou)
     # 8. duplicates
     dups = find_duplicates([o for o in objs if o.id not in removed], ev)
     diag['duplicates'] = [{"kept": k, "dropped": d, "overlap": ov} for k, d, ov in dups]
