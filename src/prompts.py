@@ -33,6 +33,7 @@ Rules:
 - Include furniture, built-in furniture (cabinets, counters, islands, shelving, bars, vanities, benches), appliances, fixtures, decor, plants, tools, equipment, vehicles, and outdoor objects (trees, benches, play structures).
 - A built-in is listed as one piece of furniture ("kitchen cabinets", "bar counter"), not as its doors, drawers or countertop.
 - Do NOT list walls, floors, ceilings, windows, doors, or other architecture — those are reconstructed separately.
+- Do NOT list things seen through a window or glass door; they are outside and are not modelled.
 - Do NOT list people or animals.
 - Do NOT list parts of an object as separate objects (a chair's legs, a lamp's shade).
 - Small clutter counts if it is clearly visible (mug, book, bottle), but stop at 25 entries, most prominent first.
