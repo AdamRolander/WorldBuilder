@@ -137,3 +137,18 @@ def test_copies_nodes_and_room_in_the_export(tmp_path):
     assert lay["bounds_min"][0] == pytest.approx(-4.0)
     np.testing.assert_allclose([lay["builtins"][0]["min"][0], lay["builtins"][0]["max"][0]], [2.0, 4.0])
     assert se.copy_sources(se.load(tmp_path)) == {40: 3}
+
+
+def test_extend_stretches_one_end_and_keeps_the_other():
+    # a "table": a thin top at y in [0.9, 1] and a leg from 0.2 to 0.9 (it should reach 0)
+    top = trimesh.creation.box(extents=(1, 0.1, 1), transform=trimesh.transformations.translation_matrix([0, 0.95, 0]))
+    leg = trimesh.creation.box(extents=(0.1, 0.7, 0.1), transform=trimesh.transformations.translation_matrix([0, 0.55, 0]))
+    m = trimesh.util.concatenate([top, leg])
+    lo, hi = m.bounds
+    e = se.sanitize({"objects": {"1": _edit(pivot=list((lo + hi) / 2),
+                                            extend=[lo.tolist(), hi.tolist(), [lo[0], 0.0, lo[2]], hi.tolist()])}})["objects"]["1"]
+    v = se.stretch(m.vertices, e)
+    assert v[:, 1].min() == pytest.approx(0.0) and v[:, 1].max() == pytest.approx(1.0)
+    top_v = v[np.asarray(m.vertices)[:, 1] >= 0.9 - 1e-9]
+    np.testing.assert_allclose(top_v[:, 1].min(), 0.9)               # the top keeps its thickness
+    assert se.sanitize({"objects": {"1": {"extend": [[0, 0, 0], [1, 1, 1], [0, 0, 0], [1, 1, 1]]}}})["objects"] == {}

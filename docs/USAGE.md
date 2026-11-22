@@ -107,13 +107,14 @@ to hide it.
 The selected object shows which way each value moves it: arrows for +X, +Y and +Z, or, after
 clicking **Rotation°** (or a rotation field), a ring showing which way a positive angle
 turns it. Every field has its own ▲ and ▼ (hold to repeat); the arrow keys step a field
-being typed in, and **Shift** makes any step five times larger.
+being typed in. Steps are 0.01 m, 5° and 0.05 in scale; with **Shift**, 0.05 m, 10° and 0.25.
 
 - **Several objects.** Shift-click objects in the scene or the list to select several.
   A typed value is set on each of them (type 0 in Rotation Y and they all face the same
   way, each turning about its own centre); a field left blank means the selected objects
   differ. ▲ ▼ and the arrow keys move the group together, and turn or scale it about the
-  middle of the group.
+  middle of the group. Tick **edit as one group** to have typed values do the same (type
+  180 in Rotation Y to turn a whole corner of the room around).
 - **To floor** lowers (or raises) the selection until its lowest point touches the floor.
   **Send down** drops it onto whatever is under it: another object, a built-in or the floor.
 - **To wall...** then click a wall, or any surface: the selection moves straight towards
@@ -122,6 +123,10 @@ being typed in, and **Shift** makes any step five times larger.
   them, ready to move. **Remove** (or Delete) hides an object and deletes a copy.
 - **Trim** cuts a percentage off each side of an object (− is the −X side, the bottom and
   the −Z side), for a mesh that took in a piece of its neighbour.
+- **Stretch** lengthens (or, negative, shortens) one end of an object by a percentage of
+  its size. Only the half on that side stretches, so a table's legs get longer while its
+  top keeps its shape and height. **Stretch down** does it for you: each selected object's
+  bottom half grows until it reaches what is below.
 - **Resize** (next to the Room menu) moves the floor, the walls and the ceiling, side by
   side or as a size. A wall moved in keeps the photo's texture, cut off; a wall moved out
   stretches it. Objects stay where they are.

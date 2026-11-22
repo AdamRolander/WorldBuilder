@@ -114,22 +114,26 @@ _TEMPLATE = r"""<!DOCTYPE html>
   <div class="grid">
     <span></span><span class="axis x">X</span><span class="axis y">Y (up)</span><span class="axis z">Z</span>
     <span class="mode lbl on" data-mode="p" title="Show which way +X, +Y and +Z move the object">Position</span><input type="number" id="px" step="0.01"><input type="number" id="py" step="0.01"><input type="number" id="pz" step="0.01">
-    <span class="mode lbl" data-mode="r" title="Show which way a positive angle turns the object">Rotation°</span><input type="number" id="rx" step="1"><input type="number" id="ry" step="1"><input type="number" id="rz" step="1">
+    <span class="mode lbl" data-mode="r" title="Show which way a positive angle turns the object">Rotation°</span><input type="number" id="rx" step="5"><input type="number" id="ry" step="5"><input type="number" id="rz" step="5">
     <span class="mode lbl" data-mode="s" title="Show the scale axes">Scale</span><input type="number" id="sx" step="0.05" min="0.01"><input type="number" id="sy" step="0.05" min="0.01"><input type="number" id="sz" step="0.05" min="0.01">
     <span class="lbl trim" title="Percent of the object cut away from its −X side, its bottom and its −Z side (in the object's own frame)">Trim − %</span><input type="number" class="trim" id="t0x" step="1" min="0" max="95"><input type="number" class="trim" id="t0y" step="1" min="0" max="95"><input type="number" class="trim" id="t0z" step="1" min="0" max="95">
     <span class="lbl trim" title="Percent of the object cut away from its +X side, its top and its +Z side (in the object's own frame)">Trim + %</span><input type="number" class="trim" id="t1x" step="1" min="0" max="95"><input type="number" class="trim" id="t1y" step="1" min="0" max="95"><input type="number" class="trim" id="t1z" step="1" min="0" max="95">
+    <span class="lbl trim" title="Lengthen the object at its −X side, its bottom or its −Z side by this percent of its size. Only the half on that side stretches, so the other end keeps its shape (a table's legs get longer, its top stays). Negative shortens.">Stretch − %</span><input type="number" class="trim" id="e0x" step="1"><input type="number" class="trim" id="e0y" step="1"><input type="number" class="trim" id="e0z" step="1">
+    <span class="lbl trim" title="Lengthen the object at its +X side, its top or its +Z side by this percent of its size. Only the half on that side stretches. Negative shortens.">Stretch + %</span><input type="number" class="trim" id="e1x" step="1"><input type="number" class="trim" id="e1y" step="1"><input type="number" class="trim" id="e1z" step="1">
   </div>
   <label><input type="checkbox" id="uniform" checked> uniform scale</label>
+  <label id="rigid-row" style="display:none" title="Off: a typed value is set on each selected object. On: the selection moves, turns and scales as one piece, about its middle (type 180 in Rotation Y to turn a whole corner of the room around)."><input type="checkbox" id="rigid"> edit as one group</label>
   <div class="btns">
     <button id="btn-floor" title="Move down or up until the lowest point touches the floor">To floor</button>
     <button id="btn-down" title="Lower until it rests on the nearest object, built-in or floor below">Send down</button>
+    <button id="btn-stretch" title="Lengthen the bottom half of each selected object until it reaches what is below (the floor, a built-in or another object); the top stays where it is">Stretch down</button>
     <button id="btn-wall" title="Then click a wall (or any surface) to push the selection against it">To wall&hellip;</button>
     <button id="btn-dup" title="Copy the selected objects (Ctrl+C, Ctrl+V)">Duplicate</button>
     <button id="btn-reset">Reset</button>
     <button id="btn-remove" title="Delete key">Remove</button>
     <button id="btn-close">Close</button>
   </div>
-  <div class="hint" id="edit-hint">Shift-click to select several. Typing a value sets it on every selected object; &#9650;&#9660; and the arrow keys move, turn or scale them together (Shift: 5&times; the step). Ctrl+C / Ctrl+V copy, Delete removes, Ctrl+S saves, Esc clears.</div>
+  <div class="hint" id="edit-hint">Shift-click to select several. Typing a value sets it on every selected object (or, with "edit as one group", moves the group); &#9650;&#9660; and the arrow keys move, turn or scale them together. Shift: bigger steps (5&times;, rotation 10&deg;). Ctrl+C / Ctrl+V copy, Delete removes, Ctrl+S saves, Esc clears.</div>
 </div>
 <div id="roomedit" class="panel">
   <h3 class="handle" title="Drag to move; double-click to put it back"><span>Room</span></h3>
@@ -572,20 +576,57 @@ renderer.domElement.addEventListener('pointerup', e => {
 // ---------------------------------------------------------------- edits
 const edits = {};     // key -> {translate:[3], rotate_deg:[3], scale:[3], hidden, crop: [[lo],[hi]] | null}
 const FAR = 1e4;      // an untrimmed side of the crop box
-function edit(k) { return edits[k] = edits[k] || { translate: [0,0,0], rotate_deg: [0,0,0], scale: [1,1,1], hidden: false, crop: null }; }
-function isIdentity(e) { return !e.hidden && !e.crop && e.translate.every(v => Math.abs(v) < 1e-9) && e.rotate_deg.every(v => Math.abs(v) < 1e-9) && e.scale.every(v => Math.abs(v - 1) < 1e-9); }
+function edit(k) { return edits[k] = edits[k] || { translate: [0,0,0], rotate_deg: [0,0,0], scale: [1,1,1], hidden: false, crop: null, extend: null }; }
+function isIdentity(e) { return !e.hidden && !e.crop && !e.extend && e.translate.every(v => Math.abs(v) < 1e-9) && e.rotate_deg.every(v => Math.abs(v) < 1e-9) && e.scale.every(v => Math.abs(v - 1) < 1e-9); }
 // original scene coordinates -> where the edit puts them
 function toWorld(k) {
   const it = items[k]; it.pivot.updateMatrixWorld(true);
   return it.pivot.matrixWorld.clone().multiply(new THREE.Matrix4().makeTranslation(-it.home.x, -it.home.y, -it.home.z));
 }
+// The stretch along axis a of a coordinate x (original frame): each half is scaled
+// away from the centre so that its old end lands on the new one.
+function stretch1(k, a, x) {
+  const ext = edit(k).extend;
+  if (!ext) return x;
+  const c = items[k].home.getComponent(a), d = x - c;
+  if (d < 0) return Math.abs(c - ext[0][a]) > 1e-9 ? c + d * (c - ext[2][a]) / (c - ext[0][a]) : x;
+  return Math.abs(ext[1][a] - c) > 1e-9 ? c + d * (ext[3][a] - c) / (ext[1][a] - c) : x;
+}
 function worldPoints(k) {
   const it = items[k], c = edit(k).crop, M = toWorld(k), P = it.orig, out = [];
   for (let i = 0; i < P.length; i += 3) {
     if (c && (P[i] < c[0][0] || P[i] > c[1][0] || P[i+1] < c[0][1] || P[i+1] > c[1][1] || P[i+2] < c[0][2] || P[i+2] > c[1][2])) continue;
-    V.set(P[i], P[i+1], P[i+2]).applyMatrix4(M); out.push(V.x, V.y, V.z);
+    V.set(stretch1(k, 0, P[i]), stretch1(k, 1, P[i+1]), stretch1(k, 2, P[i+2])).applyMatrix4(M); out.push(V.x, V.y, V.z);
   }
   return out;
+}
+// Stretching changes the mesh itself: each vertex is mapped in the original frame.
+const meshBase = new WeakMap();   // mesh -> { base: unstretched positions, toOrig, fromOrig }
+function updateStretch(k) {
+  const it = items[k];
+  if (it.kind !== 'object') return;
+  const ext = edit(k).extend, key = ext ? JSON.stringify(ext) : '';
+  if ((it.extKey || '') === key) return;
+  it.extKey = key;
+  it.pivot.updateMatrixWorld(true);
+  const toPivot = it.pivot.matrixWorld.clone().invert(), T = new THREE.Matrix4().makeTranslation(it.home.x, it.home.y, it.home.z);
+  it.node.traverse(o => {
+    if (!o.isMesh) return;
+    if (!meshBase.has(o)) o.geometry = o.geometry.clone();      // instances may share a buffer
+    const pa = o.geometry.attributes.position;
+    if (!meshBase.has(o)) {
+      const toOrig = T.clone().multiply(toPivot.clone().multiply(o.matrixWorld));   // mesh -> original frame
+      meshBase.set(o, { base: pa.array.slice(), toOrig, fromOrig: toOrig.clone().invert() });
+    }
+    const { base: B, toOrig, fromOrig } = meshBase.get(o);
+    for (let i = 0; i < pa.count; i++) {
+      V.set(B[3*i], B[3*i+1], B[3*i+2]).applyMatrix4(toOrig);
+      V.set(stretch1(k, 0, V.x), stretch1(k, 1, V.y), stretch1(k, 2, V.z)).applyMatrix4(fromOrig);
+      pa.setXYZ(i, V.x, V.y, V.z);
+    }
+    pa.needsUpdate = true;
+    o.geometry.computeBoundingBox(); o.geometry.computeBoundingSphere();
+  });
 }
 function worldBox(k, box) {
   const p = worldPoints(k);
@@ -601,8 +642,8 @@ function updateClip(k) {
     const M = toWorld(k);
     for (let i = 0; i < 3; i++) {
       const n = AXES[i];
-      if (c[0][i] > -FAR / 2) planes.push(new THREE.Plane(n.clone(), -c[0][i]).applyMatrix4(M));
-      if (c[1][i] < FAR / 2) planes.push(new THREE.Plane(n.clone().negate(), c[1][i]).applyMatrix4(M));
+      if (c[0][i] > -FAR / 2) planes.push(new THREE.Plane(n.clone(), -stretch1(k, i, c[0][i])).applyMatrix4(M));
+      if (c[1][i] < FAR / 2) planes.push(new THREE.Plane(n.clone().negate(), stretch1(k, i, c[1][i])).applyMatrix4(M));
     }
   }
   const changed = (it.nPlanes || 0) !== planes.length;
@@ -621,12 +662,15 @@ function applyEdit(k) {
     if (it.row) it.row.querySelector('input').checked = !e.hidden;
   }
   if (it.row) it.row.classList.toggle('edited', !isIdentity(e) || it.copyOf !== undefined);
+  updateStretch(k);
   updateClip(k);
   if (selected.has(k)) updateSelection();
   if (hotId === k) { hotBox3.makeEmpty(); worldBox(k, hotBox3); }
 }
-const fields = { p: ['px','py','pz'], r: ['rx','ry','rz'], s: ['sx','sy','sz'], t: ['t0x','t0y','t0z','t1x','t1y','t1z'] };
-const ALL_FIELDS = [...fields.p, ...fields.r, ...fields.s, ...fields.t];
+const fields = { p: ['px','py','pz'], r: ['rx','ry','rz'], s: ['sx','sy','sz'], t: ['t0x','t0y','t0z','t1x','t1y','t1z'],
+                 e: ['e0x','e0y','e0z','e1x','e1y','e1z'] };
+const ALL_FIELDS = [...fields.p, ...fields.r, ...fields.s, ...fields.t, ...fields.e];
+const PER_OBJECT = f => f[0] === 't' || f[0] === 'e';      // trims and stretches: objects only
 // ------------------------------------------------------------ axis hints
 // A small gizmo on the selection: arrows for +X/+Y/+Z (position), arcs with the
 // direction a positive angle turns (rotation), or double arrows (scale). Click
@@ -722,13 +766,17 @@ function select(k, additive) {
   F('edit-title').textContent = selected.size > 1 ? `${selected.size} selected` : (it.kind === 'object' ? `${it.label}${it.copyOf !== undefined ? ' (copy)' : ''} #${selId}` : it.label);
   refreshPanel();
 }
-const DIGITS = { p: 2, r: 2, s: 2, t: 1 };
+const DIGITS = { p: 2, r: 2, s: 2, t: 1, e: 1 };
 function fieldValue(k, f) {
   const it = items[k], e = edit(k), i = 'xyz'.indexOf(f[f.length - 1]);
   if (f[0] === 'p') return (it.home.getComponent(i) + e.translate[i] - ORIGIN[i]) * UNIT;
   if (f[0] === 'r') return e.rotate_deg[i];
   if (f[0] === 's') return e.scale[i];
   const lo = it.lo.getComponent(i), sz = Math.max(it.size.getComponent(i), 1e-9);
+  if (f[0] === 'e') {
+    if (!e.extend) return 0;
+    return f[1] === '0' ? (e.extend[0][i] - e.extend[2][i]) / sz * 100 : (e.extend[3][i] - e.extend[1][i]) / sz * 100;
+  }
   if (!e.crop) return 0;
   return f[1] === '0' ? Math.max(0, (e.crop[0][i] - lo) / sz * 100) : Math.max(0, (lo + sz - e.crop[1][i]) / sz * 100);
 }
@@ -742,20 +790,29 @@ function setTrim(k, side, i, pct) {
   else e.crop[1][i] = pct > 1e-6 ? lo + sz - pct / 100 * sz : FAR;
   if (e.crop[0].every(v => v <= -FAR / 2) && e.crop[1].every(v => v >= FAR / 2)) e.crop = null;
 }
+// Stretch: the side moves out by pct of the object's size; only its half stretches.
+function setExtend(k, side, i, pct) {
+  const it = items[k], e = edit(k), lo = it.lo.getComponent(i), sz = it.size.getComponent(i);
+  pct = Math.max(-45, Math.min(500, pct));                // a half can shrink to a tenth, not vanish
+  if (!e.extend) e.extend = [it.lo.toArray(), it.lo.clone().add(it.size).toArray(), it.lo.toArray(), it.lo.clone().add(it.size).toArray()];
+  if (side === '0') e.extend[2][i] = lo - pct / 100 * sz; else e.extend[3][i] = lo + sz + pct / 100 * sz;
+  if ([0, 1, 2].every(j => Math.abs(e.extend[2][j] - e.extend[0][j]) < 1e-9 && Math.abs(e.extend[3][j] - e.extend[1][j]) < 1e-9)) e.extend = null;
+}
 function setFieldValue(k, f, v) {
   const it = items[k], e = edit(k), i = 'xyz'.indexOf(f[f.length - 1]);
   if (f[0] === 'p') e.translate[i] = v / UNIT + ORIGIN[i] - it.home.getComponent(i);
   else if (f[0] === 'r') e.rotate_deg[i] = v;
   else if (f[0] === 's') { v = Math.max(0.01, v); if (F('uniform').checked) e.scale = [v, v, v]; else e.scale[i] = v; }
-  else if (it.kind === 'object') setTrim(k, f[1], i, v);
+  else if (it.kind === 'object') (f[0] === 't' ? setTrim : setExtend)(k, f[1], i, v);
 }
 function refreshPanel() {
   const ids = [...selected].filter(k => items[k]), it = items[selId];
   const objs = ids.filter(k => items[k].kind === 'object');
   document.querySelectorAll('#edit .trim').forEach(el => el.style.display = objs.length ? '' : 'none');
-  F('btn-dup').disabled = !objs.length;
+  F('btn-dup').disabled = F('btn-stretch').disabled = !objs.length;
+  F('rigid-row').style.display = ids.length > 1 ? 'block' : 'none';
   ALL_FIELDS.forEach(f => {
-    const vals = (f[0] === 't' ? objs : ids).map(k => fieldValue(k, f));
+    const vals = (PER_OBJECT(f) ? objs : ids).map(k => fieldValue(k, f));
     const same = vals.length && vals.every(v => Math.abs(v - vals[0]) < 5e-3);
     F(f).value = same ? (f[0] === 'p' || f[0] === 's' ? vals[0].toFixed(DIGITS[f[0]]) : +vals[0].toFixed(DIGITS[f[0]])) : '';
     F(f).placeholder = same ? '' : 'mixed';
@@ -794,21 +851,27 @@ function typed(f) {
   const v = parseFloat(F(f).value);
   if (!Number.isFinite(v)) { refreshPanel(); return; }
   const ids = [...selected];
-  ids.forEach(k => setFieldValue(k, f, v));
+  if (ids.length > 1 && F('rigid').checked && !PER_OBJECT(f)) {
+    // as one piece: the shown object's value becomes v, the rest keep their place around it
+    const ref = fieldValue(selId, f), i = 'xyz'.indexOf(f[f.length - 1]);
+    if (f[0] === 'p') ids.forEach(k => edit(k).translate[i] += (v - ref) / UNIT);
+    else if (f[0] === 'r') rotateGroup(ids, i, v - ref);
+    else { const ratio = Math.max(0.01, v) / ref; scaleGroup(ids, F('uniform').checked ? [ratio, ratio, ratio] : [0, 1, 2].map(j => j === i ? ratio : 1)); }
+  } else ids.forEach(k => setFieldValue(k, f, v));
   changed(ids);
 }
 // A step (▲▼, arrow keys) moves, turns or scales the selection together.
-const STEP = { p: 0.01, r: 1, s: 0.05, t: 1 };
+const STEP = { p: 0.01, r: 5, s: 0.05, t: 1, e: 1 }, BIG = { p: 5, r: 2, s: 5, t: 5, e: 5 };
 function stepField(f, dir, big) {
   if (selId === null) return;
-  const d = STEP[f[0]] * (big ? 5 : 1) * dir, i = 'xyz'.indexOf(f[f.length - 1]), ids = [...selected];
+  const d = STEP[f[0]] * (big ? BIG[f[0]] : 1) * dir, i = 'xyz'.indexOf(f[f.length - 1]), ids = [...selected];
   if (f[0] === 'p') ids.forEach(k => edit(k).translate[i] += d / UNIT);
   else if (f[0] === 'r') { if (ids.length === 1) edit(ids[0]).rotate_deg[i] += d; else rotateGroup(ids, i, d); }
   else if (f[0] === 's') {
     const e = edit(selId), cur = e.scale[i], ratio = Math.max(0.01, cur + d) / cur;
     const ratios = F('uniform').checked ? [ratio, ratio, ratio] : [0, 1, 2].map(j => j === i ? ratio : 1);
     if (ids.length === 1) e.scale = e.scale.map((v, j) => Math.max(0.01, v * ratios[j])); else scaleGroup(ids, ratios);
-  } else ids.forEach(k => { if (items[k].kind === 'object') setTrim(k, f[1], i, fieldValue(k, f) + d); });
+  } else ids.forEach(k => { if (items[k].kind === 'object') (f[0] === 't' ? setTrim : setExtend)(k, f[1], i, fieldValue(k, f) + d); });
   changed(ids);
 }
 // Number fields with their own ▲▼ (bigger than the browser's, held down to repeat).
@@ -819,7 +882,7 @@ function stepper(input, onStep) {
   const spin = document.createElement('span'); spin.className = 'spin';
   [['▲', 1], ['▼', -1]].forEach(([t, d]) => {
     const b = document.createElement('button');
-    b.type = 'button'; b.textContent = t; b.tabIndex = -1; b.title = (d > 0 ? 'Up' : 'Down') + ' (Shift: 5× the step; hold to repeat)';
+    b.type = 'button'; b.textContent = t; b.tabIndex = -1; b.title = (d > 0 ? 'Up' : 'Down') + ' (Shift: a bigger step; hold to repeat)';
     let timer = null;
     const stop = () => { clearTimeout(timer); clearInterval(timer); timer = null; };
     b.addEventListener('pointerdown', ev => {
@@ -869,18 +932,19 @@ F('btn-floor').addEventListener('click', () => {
   updateSelection();
   moveSelection(new THREE.Vector3(0, floorY() - selBox3.min.y, 0));   // lowest point of the selection to the floor
 });
-// Send down: drop straight down onto whatever is below (an object, a built-in,
-// or the floor). Rays go down from the lowest points of the selection, one per
-// cell of its footprint; the shortest gap is the drop. Rays start a little above
-// the bottom, so something that sank slightly into its support comes back up.
-F('btn-down').addEventListener('click', () => {
-  if (selId === null) return;
-  updateSelection();
-  const keys = [...selected], size = selBox3.getSize(new THREE.Vector3()), N = 12, low = new Map();
+// How far the given objects can drop straight down before they rest on something
+// (an object, a built-in, or the floor). Rays go down from their lowest points,
+// one per cell of the footprint; the shortest gap is the drop. Rays start a
+// little above the bottom, so something that sank slightly into its support
+// gets a negative drop and comes back up.
+function dropDistance(keys) {
+  const box = new THREE.Box3(); keys.forEach(k => worldBox(k, box));
+  if (box.isEmpty()) return NaN;
+  const size = box.getSize(new THREE.Vector3()), N = 12, low = new Map();
   const cell = Math.max(size.x, size.z) / N || 1;
   keys.forEach(k => { const p = worldPoints(k);
     for (let i = 0; i < p.length; i += 3) {
-      const c = Math.floor((p[i] - selBox3.min.x) / cell) + ',' + Math.floor((p[i+2] - selBox3.min.z) / cell);
+      const c = Math.floor((p[i] - box.min.x) / cell) + ',' + Math.floor((p[i+2] - box.min.z) / cell);
       const q = low.get(c); if (!q || p[i+1] < q[1]) low.set(c, [p[i], p[i+1], p[i+2]]);
     } });
   const exclude = new Set(keys), lift = 0.03 * size.y + 1e-4, down = new THREE.Vector3(0, -1, 0);
@@ -893,7 +957,31 @@ F('btn-down').addEventListener('click', () => {
     if (hit) d = Math.min(d, hit.distance - lift);
     drop = Math.min(drop, d);
   }
+  return drop;
+}
+F('btn-down').addEventListener('click', () => {
+  if (selId === null) return;
+  const drop = dropDistance([...selected]);
   if (Number.isFinite(drop)) moveSelection(new THREE.Vector3(0, -drop, 0));
+});
+// Stretch down: each object's bottom half grows until its lowest point reaches what
+// is below it; its top stays where it is (legs that stop short of the floor).
+F('btn-stretch').addEventListener('click', () => {
+  if (selId === null) return;
+  const objs = [...selected].filter(k => items[k].kind === 'object');
+  for (const k of objs) {
+    const drop = dropDistance([k]);
+    if (!Number.isFinite(drop) || Math.abs(drop) < 1e-6) continue;
+    const it = items[k], e = edit(k), sy = Math.max(e.scale[1], 0.01);
+    const lo = it.lo.y, c = it.home.y, cut = e.crop ? Math.max(lo, e.crop[0][1]) : lo;     // the lowest point left
+    if (c - cut < 1e-9) continue;
+    const ext = e.extend || [it.lo.toArray(), it.lo.clone().add(it.size).toArray(), it.lo.toArray(), it.lo.clone().add(it.size).toArray()];
+    const f = (c - ext[2][1]) / (c - ext[0][1]) + drop / sy / (c - cut);      // the bottom half's new stretch factor
+    const pct = ((c - f * (c - ext[0][1])) - lo) / -it.size.y * 100;
+    if (!e.extend) e.extend = ext;
+    setExtend(k, '0', 1, pct);
+  }
+  changed(objs);
 });
 // To wall: the next click picks a surface; the selection moves along that
 // surface's normal until its nearest point touches it.
@@ -929,7 +1017,18 @@ function makeCopy(root, id, e) {
   const src = items[root];
   if (!src || !src.node || items[id] && items[id].pivot) return false;
   const node = src.node.clone(true);
-  node.traverse(o => { if (o.isMesh) { o.material = o.material.clone(); o.material.color.copy(WHITE); o.material.clippingPlanes = null; } });
+  const srcMeshes = [];
+  src.node.traverse(o => { if (o.isMesh) srcMeshes.push(o); });
+  let m = 0;
+  node.traverse(o => { if (o.isMesh) {
+    const from = srcMeshes[m++];
+    o.material = o.material.clone(); o.material.color.copy(WHITE); o.material.clippingPlanes = null;
+    o.geometry = o.geometry.clone();
+    if (from && meshBase.has(from)) {                     // the original's unstretched shape
+      o.geometry.attributes.position.array.set(meshBase.get(from).base);
+      o.geometry.computeBoundingBox(); o.geometry.computeBoundingSphere();
+    }
+  } });
   const pivot = new THREE.Group();
   pivot.position.copy(src.home); pivot.add(node); pivot.userData.key = id;
   scene.add(pivot);
@@ -940,7 +1039,7 @@ function makeCopy(root, id, e) {
   addRow(o, after);
   Object.assign(items[id], { kind: 'object', pivot, node, orig: src.orig, home: src.home.clone(), size: src.size.clone(), lo: src.lo.clone(), copyOf: root });
   edits[id] = { translate: [...e.translate], rotate_deg: [...e.rotate_deg], scale: [...e.scale], hidden: !!e.hidden,
-                crop: e.crop ? e.crop.map(a => [...a]) : null };
+                crop: e.crop ? e.crop.map(a => [...a]) : null, extend: e.extend ? e.extend.map(a => [...a]) : null };
   applyEdit(id); updateCount();
   return true;
 }
@@ -948,7 +1047,7 @@ function deleteCopy(id) {
   const it = items[id];
   if (hotId === id) setHot(null);
   scene.remove(it.pivot);
-  it.pivot.traverse(o => { if (o.isMesh) o.material.dispose(); });
+  it.pivot.traverse(o => { if (o.isMesh) { o.material.dispose(); o.geometry.dispose(); } });
   if (it.row) it.row.remove();
   delete items[id]; delete edits[id]; delete byId[id];
   OBJECTS.splice(OBJECTS.findIndex(o => o.id === id), 1);
@@ -1117,6 +1216,7 @@ function collect() {
     if (isIdentity(e) && it.copyOf === undefined) continue;
     const o = Object.assign(t, { hidden: e.hidden });
     if (e.crop) o.crop = e.crop;
+    if (e.extend) o.extend = e.extend;
     if (it.copyOf !== undefined) o.source = it.copyOf;
     out.objects[k] = o;
   }
@@ -1131,7 +1231,7 @@ async function loadEdits() {
       const objs = Object.entries(d.objects || {});
       for (const [id, e] of objs) {
         if (e.source !== undefined || !items[id] || !items[id].pivot) continue;
-        edits[id] = { translate: e.translate, rotate_deg: e.rotate_deg, scale: e.scale, hidden: !!e.hidden, crop: e.crop || null };
+        edits[id] = { translate: e.translate, rotate_deg: e.rotate_deg, scale: e.scale, hidden: !!e.hidden, crop: e.crop || null, extend: e.extend || null };
         applyEdit(id);
       }
       for (const [id, e] of objs) if (e.source !== undefined && items[e.source] && items[e.source].copyOf === undefined) makeCopy(e.source, K(id), e);
@@ -1270,7 +1370,7 @@ renderer.setAnimationLoop(() => {
   renderer.render(scene, camera);
 });
 // For scripted checks (tests drive the viewer headlessly through this).
-if (params.has('debug')) window.wb = { items, edits, select, collect, duplicate, roomEdit, applyRoom, moveRoom, worldBox, floorY, typed, stepField, F };
+if (params.has('debug')) window.wb = { items, edits, select, collect, duplicate, roomEdit, applyRoom, moveRoom, worldBox, floorY, typed, stepField, dropDistance, F };
 </script>
 </body></html>
 """

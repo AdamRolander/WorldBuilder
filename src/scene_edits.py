@@ -13,7 +13,8 @@ Format (scene units, degrees, three.js ``XYZ`` Euler order)::
     {"version": 1,
      "objects": {"12": {"translate": [dx, dy, dz], "rotate_deg": [rx, ry, rz],
                         "scale": [sx, sy, sz], "pivot": [cx, cy, cz], "hidden": false,
-                        "crop": [[x0, y0, z0], [x1, y1, z1]]},
+                        "crop": [[x0, y0, z0], [x1, y1, z1]],
+                        "extend": [[lo], [hi], [new lo], [new hi]]},
                  "41": {"source": 12, ...}},
      "nodes": {"room_builtin_03": {"translate": ..., "rotate_deg": ..., "scale": ..., "pivot": ...}},
      "room": {"min": [dx, dy, dz], "max": [dx, dy, dz]},
@@ -21,7 +22,10 @@ Format (scene units, degrees, three.js ``XYZ`` Euler order)::
 
 An object's vertices become ``pivot + translate + R · (scale ⊙ (v − pivot))``.
 ``crop`` (optional) is a box in the object's original coordinates; the mesh is
-cut to it before it is moved. An entry with ``source`` is a copy: a new object
+cut to it before it is moved. ``extend`` (optional) stretches one end of the object:
+along each axis, the half between the pivot and ``lo`` is stretched so that ``lo``
+lands on ``new lo`` (likewise ``hi``), and the other half is left as it is, so a
+table's legs can be lengthened without thickening its top. An entry with ``source`` is a copy: a new object
 made from object ``source``'s original mesh, exported as ``<id>_<label>``.
 ``nodes`` moves, turns and resizes built-ins and relief pieces the same way
 (the key is the node name without its ``_body`` / ``_face`` suffix). ``room``
@@ -76,6 +80,17 @@ def _crop(c) -> Optional[List[List[float]]]:
     return [lo, hi]
 
 
+def _extend(x) -> Optional[List[List[float]]]:
+    if not (isinstance(x, (list, tuple)) and len(x) == 4):
+        return None
+    lo, hi, lo1, hi1 = (_vec3(v, (0, 0, 0), -1e4, 1e4) for v in x)
+    if any(not (a < b and a1 < b1) for a, b, a1, b1 in zip(lo, hi, lo1, hi1, strict=True)):
+        return None
+    if np.allclose(lo, lo1) and np.allclose(hi, hi1):
+        return None
+    return [lo, hi, lo1, hi1]
+
+
 def sanitize(data) -> Dict:
     """Keep only well-formed, bounded values. The file can arrive over HTTP,
     so nothing in it is trusted: unknown keys are dropped, numbers clamped."""
@@ -93,6 +108,9 @@ def sanitize(data) -> Dict:
             crop = _crop(e.get("crop"))
             if crop:
                 clean["crop"] = crop
+            ext = _extend(e.get("extend"))
+            if ext:
+                clean["extend"] = ext
             src = e.get("source")
             if isinstance(src, int) and not isinstance(src, bool) and 0 <= src <= MAX_ID and src != int(k):
                 clean["source"] = src
@@ -123,7 +141,7 @@ def sanitize(data) -> Dict:
 
 
 def is_identity(e: Dict) -> bool:
-    return (not e.get("hidden") and not e.get("crop") and "source" not in e
+    return (not e.get("hidden") and not e.get("crop") and not e.get("extend") and "source" not in e
             and np.allclose(e["translate"], 0) and np.allclose(e["rotate_deg"], 0)
             and np.allclose(e["scale"], 1))
 
@@ -168,6 +186,28 @@ def apply(vertices: np.ndarray, edit: Dict) -> np.ndarray:
     c = np.asarray(edit["pivot"], float)
     local = (np.asarray(vertices, float) - c) * np.asarray(edit["scale"], float)
     return local @ euler_xyz(edit["rotate_deg"]).T + c + np.asarray(edit["translate"], float)
+
+
+def stretch(vertices: np.ndarray, edit: Dict) -> np.ndarray:
+    """The object's ``extend`` applied: per axis, the part on each side of the pivot is
+    scaled away from the pivot so that the old end lands on the new one."""
+    ext = edit.get("extend")
+    v = np.asarray(vertices, float)
+    if not ext:
+        return v
+    c = np.asarray(edit["pivot"], float)
+    lo, hi, lo1, hi1 = (np.asarray(x, float) for x in ext)
+    low = np.where(np.abs(c - lo) > 1e-9, (c - lo1) / np.where(np.abs(c - lo) > 1e-9, c - lo, 1), 1.0)
+    high = np.where(np.abs(hi - c) > 1e-9, (hi1 - c) / np.where(np.abs(hi - c) > 1e-9, hi - c, 1), 1.0)
+    d = v - c
+    return c + d * np.where(d < 0, low, high)
+
+
+def _deform(m, e):
+    """Crop, stretch, then move: the order the viewer shows them in."""
+    if e.get("crop"):
+        m = crop_mesh(m, e["crop"])
+    return _with_vertices(m, apply(stretch(m.vertices, e), e))
 
 
 def for_object(edits: Optional[Dict], obj_id) -> Optional[Dict]:
@@ -283,9 +323,7 @@ def apply_to_meshes(named, edits: Optional[Dict], room_bounds=None):
             if e is not None:
                 if e["hidden"]:
                     continue
-                if e.get("crop"):
-                    m = crop_mesh(m, e["crop"])
-                m = _with_vertices(m, apply(m.vertices, e))
+                m = _deform(m, e)
             out.append((name, m))
             continue
         key = _node_key(name)
@@ -301,9 +339,7 @@ def apply_to_meshes(named, edits: Optional[Dict], room_bounds=None):
         if ce["hidden"] or cid in originals:          # the id is taken by a real object
             continue
         for name, m in originals.get(e, []):
-            if ce.get("crop"):
-                m = crop_mesh(m, ce["crop"])
-            out.append((f"{cid:03d}{name[3:]}", _with_vertices(m, apply(m.vertices, ce))))
+            out.append((f"{cid:03d}{name[3:]}", _deform(m, ce)))
     return out
 
 
