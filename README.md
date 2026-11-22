@@ -9,11 +9,18 @@ browser (WebXR), Blender, MuJoCo and anything that reads glTF.
 ![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)
 
 <p align="center">
-  <img src="docs/assets/hero.webp" alt="Two photos, a living room and a library, each next to the 3D scene built from it. The room appears piece by piece, then each object pops in while its outline lights up on the photo, and the camera swings around the room" width="100%">
+  <img src="docs/assets/hero.webp" alt="Eight photos, among them a kitchen and dining room, a hotel lobby, a cafe, a historic period room and a TV studio, each next to the 3D scene built from it. The room appears piece by piece, then each object pops in while its outline lights up on the photo, and the camera swings around the room" width="100%">
 </p>
 <p align="center"><sub>Each photo next to the scene WorldBuilder built from it. Every object pops in on its own
 because it is its own mesh; the largest are switched off and on again. Shown after a few
-fixes in the browser viewer. Photos from Spacejoy and Jonathan Borba on <a href="https://unsplash.com">Unsplash</a>.</sub></p>
+fixes in the browser viewer. Photos by Anand Kumar, Jennifer Latuperisa-Andresen, Ting Chen,
+Spacejoy, The Metropolitan Museum of Art, Bailey Alexander, Brad Weaver and Clay Banks on
+<a href="https://unsplash.com">Unsplash</a>.</sub></p>
+
+<p align="center">
+  <b><a href="https://adamrolander.github.io/worldbuilder-demo/">Web Demo</a></b> (no install, works in VR) &middot;
+  <b><a href="https://www.youtube.com/@WorldBuilder-Code">YouTube Tutorials</a></b>
+</p>
 
 ## What It Does
 
@@ -40,13 +47,41 @@ textures and exports.
 
 ## Examples
 
+Every scene below is in the [browser demo](https://adamrolander.github.io/worldbuilder-demo/): click an image to open that scene in 3D.
+
 | Photo, the scene from the photo's viewpoint, and from the side |
 | --- |
-| ![A living room photo, its 3D scene from the same view, and the scene from the side](docs/assets/examples/unsplash-livingroom.jpg) |
-| ![A library photo, its 3D scene from the same view, and the scene from the side](docs/assets/examples/unsplash-library.jpg) |
+| [![A kitchen and dining room photo, its 3D scene from the same view, and the scene from the side](docs/assets/examples/kitchen-dining.jpg)](https://adamrolander.github.io/worldbuilder-demo/kitchen-dining/) |
+| [![A rustic tavern photo, its 3D scene from the same view, and the scene from the side](docs/assets/examples/tavern.jpg)](https://adamrolander.github.io/worldbuilder-demo/tavern/) |
+| [![A living room photo, its 3D scene from the same view, and the scene from the side](docs/assets/examples/unsplash-livingroom.jpg)](https://adamrolander.github.io/worldbuilder-demo/living-room/) |
+| [![A library photo, its 3D scene from the same view, and the scene from the side](docs/assets/examples/unsplash-library.jpg)](https://adamrolander.github.io/worldbuilder-demo/library/) |
 
-More examples are coming. To make your own animation or stills from a scene:
-`python scripts/make_hero.py --scene outputs/<scene> photo.jpg --out hero.webp --stills <folder>`.
+<details>
+<summary><b>Eight more scenes</b>: a cafe, a period room, a TV studio, a hotel lobby, a dining room, a kitchen, a home office and a gym</summary>
+
+| Photo, the scene from the photo's viewpoint, and from the side |
+| --- |
+| [![A cafe photo, its 3D scene from the same view, and the scene from the side](docs/assets/examples/cafe.jpg)](https://adamrolander.github.io/worldbuilder-demo/cafe/) |
+| [![A historic period room photo, its 3D scene from the same view, and the scene from the side](docs/assets/examples/period-room.jpg)](https://adamrolander.github.io/worldbuilder-demo/period-room/) |
+| [![A TV studio photo, its 3D scene from the same view, and the scene from the side](docs/assets/examples/tv-studio.jpg)](https://adamrolander.github.io/worldbuilder-demo/tv-studio/) |
+| [![A hotel lobby photo, its 3D scene from the same view, and the scene from the side](docs/assets/examples/hotel-lobby.jpg)](https://adamrolander.github.io/worldbuilder-demo/hotel-lobby/) |
+| [![A dining room photo, its 3D scene from the same view, and the scene from the side](docs/assets/examples/unsplash-dining.jpg)](https://adamrolander.github.io/worldbuilder-demo/dining-room/) |
+| [![A kitchen photo, its 3D scene from the same view, and the scene from the side](docs/assets/examples/kitchen.jpg)](https://adamrolander.github.io/worldbuilder-demo/kitchen/) |
+| [![A home office photo and its 3D scene from the same view](docs/assets/examples/home-office.jpg)](https://adamrolander.github.io/worldbuilder-demo/home-office/) |
+| [![A gym photo and its 3D scene from the same view](docs/assets/examples/gym.jpg)](https://adamrolander.github.io/worldbuilder-demo/gym/) |
+
+</details>
+
+<sub>Photos from <a href="https://unsplash.com">Unsplash</a> by Anand Kumar (kitchen and dining room),
+Michael Matloka (tavern), Spacejoy (living room), Jonathan Borba (library), Ting Chen (cafe),
+The Metropolitan Museum of Art (period room), Brad Weaver (TV studio), Jennifer
+Latuperisa-Andresen (hotel lobby), Puscas Adryan (dining room), Bailey Alexander (kitchen),
+Clay Banks (home office) and Aalo Lens (gym). Each scene is shown after a few fixes in the
+browser viewer.</sub>
+
+To make your own animation or stills from a scene (`--edits` applies the fixes you made in
+the viewer):
+`python scripts/make_hero.py --scene outputs/<scene> photo.jpg --out hero.webp --stills <folder> --edits`.
 
 ## Documentation
 
@@ -126,7 +161,7 @@ suite needs no models. See [CPU-Only Development](docs/SETUP.md#cpu-only-develop
 
 | | |
 | --- | --- |
-| **Blender** 4.2+ | Generate or import a scene from the sidebar; every object arrives as a named, textured mesh. [Guide](docs/plugins/BLENDER.md) |
+| **Blender** 4.2+ | Generate or import a scene from the sidebar; every object arrives as a named, textured mesh. [Guide](docs/plugins/BLENDER.md), [video tutorial](https://youtu.be/BsiHjmhykTY) (11 min) |
 | **MuJoCo / MJX** | A metric, Z-up model with collision geometry and free joints on movable objects, plus a Gymnasium wrapper to put a robot in the room. [Guide](docs/plugins/MUJOCO.md) |
 | **Unreal Engine** 5.4+ | Early scaffold, not yet tested. [Guide](docs/plugins/UNREAL.md) |
 | **Everything else** | `scene_lite.glb` (7-30 MB, baked textures) opens in Godot, Unity, three.js and most 3D tools |
