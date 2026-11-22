@@ -4,7 +4,8 @@
         --out docs/assets/hero.webp [--stills docs/assets/examples] [--edits]
 
 For every scene the camera starts at the photo's own viewpoint, swings to one
-side of the room and to the other, and returns. Meanwhile the room pops in
+side of the room and to the other, and returns; the orbit is narrowed where a
+full one would leave the room and show it from outside. Meanwhile the room pops in
 piece by piece, then each object one at a time (its mask lights up on the
 photo as it appears), a few of the largest objects are switched off and on
 again to show they are separate, and everything pops out before the next
@@ -161,6 +162,29 @@ class SceneClip:
         # the objects switched off and on mid-orbit: the three biggest
         self.toggled = sorted(self.objects, key=lambda it: -np.prod(np.maximum(it[4], 1e-3)))[:3]
 
+    def fit_orbit(self, swing, lift=0.25, max_empty=0.3):
+        """(swing, lift): the widest orbit, up to ``swing`` degrees and ``lift``, whose views
+        stay filled by the room.
+
+        A fixed orbit suits a room seen across its width, but in a long, narrow room it
+        carries the camera out through a side wall or up over the ceiling, and the room
+        shrinks to a box on the background. Measured on nine scenes: seven orbits show at
+        most 26% empty background (beyond what the photo's own view shows), a narrow gym
+        over 50%. Swing and lift are narrowed together until no view along the orbit
+        adds more than ``max_empty`` background; the narrowest orbit is the fallback.
+        """
+        import pyrender
+
+        def empty(t, s, h):
+            self.sc.set_pose(self.cam, camera_pose(self.R, self.target, t, s, h))
+            return float((self.r.render(self.sc, flags=pyrender.RenderFlags.DEPTH_ONLY) == 0).mean())
+        base = empty(0.0, swing, lift)
+        for f in (1.0, 0.85, 0.7, 0.55, 0.4, 0.3, 0.2):
+            if max(empty(t, swing * f, lift * f) for t in (0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875)) \
+                    <= base + max_empty:
+                return swing * f, lift * f
+        return swing * 0.2, lift * 0.2
+
     def scales(self, t):
         """{node: scale} at time t, and the ids of objects whose mask should glow."""
         out, glow = {}, {}
@@ -194,7 +218,7 @@ class SceneClip:
                 glow[int(_ID.match(it[1]).group(1))] = 1.0
         return out, glow
 
-    def render(self, t, swing, scales=None):
+    def render(self, t, orbit, scales=None):
         import pyrender
         scales, glow = self.scales(t) if scales is None else (scales, {})
         for _kind, _name, node, c, _ in self.items:
@@ -203,7 +227,7 @@ class SceneClip:
             M[:3, :3] *= s
             M[:3, 3] = c - s * c
             node.matrix = M
-        self.sc.set_pose(self.cam, camera_pose(self.R, self.target, t, swing))
+        self.sc.set_pose(self.cam, camera_pose(self.R, self.target, t, *orbit))
         color, _ = self.r.render(self.sc, flags=pyrender.RenderFlags.FLAT)
         photo = self.photo.copy()
         for oid, g in glow.items():
@@ -221,7 +245,7 @@ def main():
     ap.add_argument("--fps", type=int, default=14)
     ap.add_argument("--width", type=int, default=1000, help="canvas width")
     ap.add_argument("--height", type=int, default=420, help="canvas height")
-    ap.add_argument("--swing", type=float, default=30.0, help="degrees of orbit to each side")
+    ap.add_argument("--swing", type=float, default=30.0, help="most degrees of orbit to each side")
     ap.add_argument("--quality", type=int, default=72, help="WebP quality")
     ap.add_argument("--stills", type=Path, help="folder for one still image per scene")
     ap.add_argument("--edits", action="store_true", help="apply each scene's edits.json")
@@ -235,8 +259,10 @@ def main():
         clip = SceneClip(Path(scene), Path(photo), box, args.edits)
         x0 = (args.width - 2 * clip.w - gap) // 2
         y0 = (args.height - clip.h) // 2
+        orbit = clip.fit_orbit(args.swing)
+        print(f"{scene}: swing {orbit[0]:.0f} degrees, lift {orbit[1]:.2f}")
         for i in range(args.frames):
-            left, right = clip.render(i / args.frames, args.swing)
+            left, right = clip.render(i / args.frames, orbit)
             _label(left, "Photo", px)
             _label(right, "3D scene", px)
             canvas = Image.new("RGB", (args.width, args.height), BG)
@@ -246,7 +272,7 @@ def main():
         if args.stills:
             args.stills.mkdir(parents=True, exist_ok=True)
             full = {it[2]: 1.0 for it in clip.items}
-            views = [clip.render(0.0, args.swing, full), clip.render(0.25, args.swing * 1.3, full)]
+            views = [clip.render(0.0, orbit, full), clip.render(0.25, clip.fit_orbit(args.swing * 1.3), full)]
             panels = [views[0][0], views[0][1], views[1][1]]
             for p, text in zip(panels, ("Photo", "3D scene, photo view", "3D scene, from the side"), strict=True):
                 _label(p, text, px)
