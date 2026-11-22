@@ -111,8 +111,11 @@ def export_mujoco(scene_dir: Path, out_dir: Optional[Path] = None, scale: Option
         from src.scene_export import export_scene_lite
         log("  building scene_lite.glb (decimated meshes with baked textures)...")
         export_scene_lite(scene_dir, rec["objects"])
-    from src.scene_edits import edited_glb
-    lite = edited_glb(scene_dir, lite=True) or lite          # the user's corrections, if any
+    from src import scene_edits
+    edits = scene_edits.load(scene_dir)                      # the user's corrections, if any
+    lite = scene_edits.edited_glb(scene_dir, lite=True) or lite
+    layout = scene_edits.edited_layout(layout, edits)        # moved room sides and built-ins
+    copied_from = scene_edits.copy_sources(edits)
     glb = trimesh.load(str(lite), process=False)
 
     s = float(scale if scale else layout.get("estimated_metric_scale", 1.0))
@@ -153,6 +156,9 @@ def export_mujoco(scene_dir: Path, out_dir: Optional[Path] = None, scale: Option
     force_static = force_static or set()
     sizes = {n: float(np.max(g.extents)) * s for n, g in glb.geometry.items() if not n.startswith("room")}
     id_to_name = {int(o["id"]): n for n, o in by_name.items()}
+    for g in glb.geometry:                                   # a copy behaves like its original
+        if g[:3].isdigit() and int(g[:3]) in copied_from and copied_from[int(g[:3])] in id_to_name:
+            by_name.setdefault(g, by_name[id_to_name[copied_from[int(g[:3])]]])
 
     def _is_dynamic(gname: str) -> bool:
         o = by_name.get(gname, {})

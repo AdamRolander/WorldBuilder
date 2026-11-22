@@ -16,7 +16,8 @@ Exposes:
     GET  /api/scenes                finished scenes, newest first
     GET  /api/scenes/<scene>/glb    the scene as one GLB (?lite=1: decimated + baked textures;
                                     manual edits applied unless ?raw=1)
-    GET  /api/scenes/<scene>/edits  manual corrections saved from the viewer
+    GET  /api/scenes/<scene>/edits  manual corrections saved from the viewer (<scene> may be a
+                                    path under outputs/, e.g. demo/kitchen_q, here and for glb/mujoco)
     POST /api/scenes/<scene>/edits  replace them (JSON; validated and clamped)
     GET  /api/scenes/<scene>/mujoco zip with a MuJoCo MJCF model of the scene
     GET  /outputs/<scene>/...       static access to reconstruction outputs
@@ -315,7 +316,7 @@ def list_scenes():
     return jsonify({"scenes": scenes})
 
 
-@app.route("/api/scenes/<scene_id>/glb")
+@app.route("/api/scenes/<path:scene_id>/glb")
 def scene_glb(scene_id):
     """The scene as one GLB. ``?lite=1`` returns the decimated version with
     baked textures (tens of MB instead of hundreds), which is what DCC tools
@@ -340,11 +341,11 @@ def scene_glb(scene_id):
         except Exception as e:
             return jsonify({"error": f"Applying edits failed: {e}"}), 500
     return send_from_directory(d, name, as_attachment=True,
-                               download_name=f"{scene_id}{'_lite' if lite else ''}.glb",
+                               download_name=f"{Path(scene_id).name}{'_lite' if lite else ''}.glb",
                                mimetype="model/gltf-binary")
 
 
-@app.route("/api/scenes/<scene_id>/edits", methods=["GET", "POST"])
+@app.route("/api/scenes/<path:scene_id>/edits", methods=["GET", "POST"])
 def scene_edits_route(scene_id):
     """Manual corrections from the viewer (``src/scene_edits.py``). The body
     is treated as untrusted: only known numeric fields survive, clamped."""
@@ -362,7 +363,7 @@ def scene_edits_route(scene_id):
     return jsonify(scene_edits.save(d, data))
 
 
-@app.route("/api/scenes/<scene_id>/mujoco")
+@app.route("/api/scenes/<path:scene_id>/mujoco")
 def scene_mujoco(scene_id):
     """The scene as a MuJoCo model: a zip with ``scene.xml`` and ``assets/``.
     Query: ``collision=hull|coacd|box``, ``mjx=1``, ``stabilize=0`` to skip
@@ -387,7 +388,7 @@ def scene_mujoco(scene_id):
         traceback.print_exc()
         return jsonify({"error": f"MuJoCo export failed: {e}"}), 500
     shutil.make_archive(str(d / tag), "zip", root_dir=out)
-    return send_from_directory(d, f"{tag}.zip", as_attachment=True, download_name=f"{scene_id}_{tag}.zip")
+    return send_from_directory(d, f"{tag}.zip", as_attachment=True, download_name=f"{Path(scene_id).name}_{tag}.zip")
 
 
 if __name__ == "__main__":

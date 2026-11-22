@@ -9,8 +9,21 @@ versions follow [SemVer](https://semver.org/) (0.x: minor = features, patch = fi
 - README: a new animation of eight scenes, a gallery of twelve example scenes that each open
   in the browser demo, and links to the demo site and the YouTube tutorials; the Blender
   guide links its video tutorial.
+- Viewer editing: copy and paste objects; move, turn and resize built-ins; trim a percentage
+  off any side of an object; resize the room (each wall, the floor and the ceiling);
+  **Send down** onto the nearest object below and **To wall** against a clicked surface;
+  Shift for 5× steps, larger ▲ ▼ buttons that repeat when held; the object list folds away
+  and both panels can be dragged. All of it is saved in `edits.json` and applied by the GLB
+  exports, the MuJoCo export (walls and built-in collision boxes included) and
+  `make_hero.py --edits`.
+- Viewer saving: Ctrl+S; the web app saves scenes in subfolders of `outputs/`; from any other
+  server Chrome and Edge save straight into the scene folder, picked once.
 
 ### Changed
+- Viewer: with several objects selected, a typed value is set on each of them (it used to
+  move or turn the group by the difference); ▲ ▼ and the arrow keys still move the group
+  together. Clicking a built-in in the scene selects it (shift-click used to hide it; untick
+  it in the list instead). Rotation steps by 1° (Shift: 5°).
 - `scripts/make_hero.py` narrows the camera's swing and rise for rooms where the full orbit
   would leave the room and show it from outside (a long, narrow room); other rooms keep the
   full orbit.

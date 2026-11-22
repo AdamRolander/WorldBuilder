@@ -99,27 +99,51 @@ dense meshes). Move the mouse over the object list, or over the scene, and
 the matching object lights up; untick it to remove it. Click an object or
 its name to type its position, rotation and scale (position is the object's
 centre: Y is height above the floor, X and Z are relative to where the
-photo was taken, in metres when the scale is known). Every piece of
-built-in structure (relief surfaces, solid blocks; outdoors, the ground) has
-its own checkbox.
+photo was taken, in metres when the scale is known). Built-in structure
+(relief surfaces, solid blocks; outdoors, the ground) is listed below the
+objects: click one to move, turn or resize it like an object, or untick it
+to hide it.
 
 The selected object shows which way each value moves it: arrows for +X, +Y and +Z, or, after
 clicking **Rotation°** (or a rotation field), a ring showing which way a positive angle
-turns it. **Shift-click** objects in the scene or the list to select several; a change then
-applies to all of them, and turning or scaling acts about the middle of the group (so typing
-180 in Y turns that part of the room around). **Esc** clears the selection.
+turns it. Every field has its own ▲ and ▼ (hold to repeat); the arrow keys step a field
+being typed in, and **Shift** makes any step five times larger.
+
+- **Several objects.** Shift-click objects in the scene or the list to select several.
+  A typed value is set on each of them (type 0 in Rotation Y and they all face the same
+  way, each turning about its own centre); a field left blank means the selected objects
+  differ. ▲ ▼ and the arrow keys move the group together, and turn or scale it about the
+  middle of the group.
+- **To floor** lowers (or raises) the selection until its lowest point touches the floor.
+  **Send down** drops it onto whatever is under it: another object, a built-in or the floor.
+- **To wall...** then click a wall, or any surface: the selection moves straight towards
+  it until it touches.
+- **Duplicate** (or Ctrl+C, Ctrl+V) copies the selected objects; the copies land beside
+  them, ready to move. **Remove** (or Delete) hides an object and deletes a copy.
+- **Trim** cuts a percentage off each side of an object (− is the −X side, the bottom and
+  the −Z side), for a mesh that took in a piece of its neighbour.
+- **Resize** (next to the Room menu) moves the floor, the walls and the ceiling, side by
+  side or as a size. A wall moved in keeps the photo's texture, cut off; a wall moved out
+  stretches it. Objects stay where they are.
+- Drag the list and the editing panel by their titles (double-click a title to put the
+  panel back), and fold the list away with its **−** button.
 
 Scenes made before this viewer existed keep their old `viewer.html`; refresh them with
 `python scripts/regen_viewer.py --viewer-only outputs/<scene>`.
 
-**Save edits** writes `edits.json` next to the scene. Served by the web app
-it is saved through the API, and every GLB the server hands out (the
-download button, the Blender add-on, the Unreal bridge) and the MuJoCo
-export has the edits applied. Opened from a plain file server the file is
-downloaded instead: put it in the scene folder and run
-`python -m src.scene_edits outputs/<scene>` to write `scene_lite.edited.glb`.
-The pipeline's own output is never modified; delete `edits.json` to undo
-everything.
+**Save edits** (or **Ctrl+S**) writes `edits.json` into the scene folder:
+
+- Served by the web app (`python -m webapp.server`, then
+  `http://localhost:5174/outputs/<scene>/viewer.html`, also for scenes in subfolders of
+  `outputs/`), it is saved through the API, and every GLB the server hands out (the
+  download button, the Blender add-on, the Unreal bridge) and the MuJoCo export has the
+  edits applied.
+- From any other server, Chrome and Edge ask once for the scene's folder and then save
+  straight into it; the folder is remembered for that page.
+- Other browsers download the file: put it in the scene folder.
+
+Run `python -m src.scene_edits outputs/<scene>` to write `scene_lite.edited.glb` yourself.
+The pipeline's own output is never modified; delete `edits.json` to undo everything.
 
 ### Utilities
 
