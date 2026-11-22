@@ -5,6 +5,16 @@ versions follow [SemVer](https://semver.org/) (0.x: minor = features, patch = fi
 
 ## [Unreleased]
 
+### Added
+- README: a new animation of eight scenes, a gallery of twelve example scenes that each open
+  in the browser demo, and links to the demo site and the YouTube tutorials; the Blender
+  guide links its video tutorial.
+
+### Changed
+- `scripts/make_hero.py` narrows the camera's swing and rise for rooms where the full orbit
+  would leave the room and show it from outside (a long, narrow room); other rooms keep the
+  full orbit.
+
 ## [0.4.1] — 2026-11-12
 
 ### Fixed

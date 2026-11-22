@@ -6,6 +6,9 @@ empty.
 
 Requires Blender 4.2 or newer and a WorldBuilder install with a GPU ([Setup](../SETUP.md)).
 
+Prefer to watch? There is an [11-minute video tutorial](https://youtu.be/BsiHjmhykTY) of the
+add-on in use.
+
 ## 1. Install the Add-On
 
 1. Download `worldbuilder-<version>.zip` from the
