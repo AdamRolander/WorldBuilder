@@ -72,22 +72,7 @@ def _meshes(scene: Path, edits: bool):
     if not edits:
         return out
     from src import scene_edits
-    e = scene_edits.load(scene)
-    if e is None:
-        return out
-    kept = []
-    for name, m in out:
-        if name in set(e["hidden_nodes"]):
-            continue
-        mid = _ID.match(name)
-        oe = scene_edits.for_object(e, int(mid.group(1))) if mid else None
-        if oe is not None:
-            if oe["hidden"]:
-                continue
-            m = m.copy()
-            m.vertices = scene_edits.apply(m.vertices, oe)
-        kept.append((name, m))
-    return kept
+    return scene_edits.apply_to_meshes(out, scene_edits.load(scene), scene_edits._layout_bounds(scene))
 
 
 def _masks(scene: Path, size):

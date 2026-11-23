@@ -13,6 +13,10 @@ the viewer is a passive renderer. Changes from the demo-era viewer:
 * the object list shows what rests on what (``supported_by``) and failed
   reconstructions are listed greyed out;
 * Three.js is pinned and loaded from jsDelivr with an unpkg fallback.
+* objects, built-ins and the room box are editable (move, turn, resize,
+  trim, copy, drop onto what is below, push against a wall); the edits are
+  saved to edits.json (src/scene_edits.py) through the web app's API,
+  into the scene folder picked once (Chrome, Edge), or as a download.
 """
 from __future__ import annotations
 
@@ -30,7 +34,11 @@ _TEMPLATE = r"""<!DOCTYPE html>
   body { margin:0; overflow:hidden; background:#1a1a1a; color:#eee; font-family:system-ui,sans-serif; }
   .panel { position:absolute; background:rgba(0,0,0,.74); padding:12px; border-radius:8px; font-size:13px; }
   #info { top:10px; left:10px; max-height:88vh; overflow-y:auto; width:290px; }
-  #info h3, #edit h3 { margin:0 0 8px; font-size:14px; }
+  #info h3, #edit h3, #roomedit h3 { margin:0 0 8px; font-size:14px; }
+  .handle { cursor:move; user-select:none; display:flex; align-items:center; justify-content:space-between; gap:8px; }
+  .handle button.tiny { padding:0 7px; line-height:18px; font-size:14px; }
+  #info.collapsed > :not(h3) { display:none !important; }
+  #info.collapsed h3 { margin:0; }
   #info h4 { margin:10px 0 4px; font-size:12px; color:#aaa; font-weight:600; text-transform:uppercase; letter-spacing:.04em; }
   .row { display:flex; align-items:center; gap:6px; padding:2px 4px; border-radius:4px; cursor:pointer; }
   .row:hover, .row.hot { background:rgba(140,200,255,.18); }
@@ -38,6 +46,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .row .name { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .row.edited .name::after { content:" •"; color:#fc5; }
   #info label { display:block; margin:3px 0; cursor:pointer; }
+  #info .roomline { display:flex; align-items:center; gap:8px; }
   #info .meta { margin-top:10px; padding-top:10px; border-top:1px solid #444; font-size:11px; color:#aaa; white-space:pre-line; }
   #info .failed { color:#777; text-decoration:line-through; padding:2px 4px; }
   .sub { color:#8a8; font-size:11px; }
@@ -47,33 +56,49 @@ _TEMPLATE = r"""<!DOCTYPE html>
   button { padding:4px 10px; cursor:pointer; }
   button:hover { border-color:#8cf; }
   button.primary { background:#367D8A; border-color:#285F6B; font-weight:600; }
-  #edit { top:10px; right:10px; width:300px; display:none; }
-  #edit .grid { display:grid; grid-template-columns:62px repeat(3, 1fr); gap:4px; align-items:center; margin-bottom:6px; }
-  #edit input[type=number] { width:100%; box-sizing:border-box; padding:3px 4px; }
-  #edit .axis { color:#aaa; font-size:11px; text-align:center; font-weight:600; }
-  #edit .axis.x { color:#ff6b6b; } #edit .axis.y { color:#6ddc6d; } #edit .axis.z { color:#6fa8ff; }
+  button.on { background:#6b5a1e; border-color:#fc5; }
+  #edit, #roomedit { top:10px; right:10px; width:340px; display:none; }
+  .grid { display:grid; grid-template-columns:70px repeat(3, 1fr); gap:5px 6px; align-items:center; margin-bottom:6px; }
+  .grid .lbl { font-size:12px; }
+  input[type=number] { width:100%; box-sizing:border-box; padding:4px 5px; -moz-appearance:textfield; appearance:textfield; }
+  input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer-spin-button { -webkit-appearance:none; margin:0; }
+  input[type=number]:hover { border-color:#777; }
+  input[type=number]:focus { border-color:#8cf; outline:none; background:#1b2830; }
+  input[type=number]::placeholder { color:#999; font-style:italic; }
+  .num { display:flex; align-items:stretch; gap:3px; min-width:0; }
+  .num input { flex:1; min-width:0; }
+  .spin { display:flex; flex-direction:column; gap:3px; }
+  .spin button { flex:1; padding:0 4px; min-height:11px; font-size:8px; line-height:1; border-radius:3px; color:#bbb; }
+  .spin button:hover { background:#367D8A; border-color:#8cf; color:#fff; }
+  .spin button:active { background:#8cf; color:#000; }
+  .axis { color:#aaa; font-size:11px; text-align:center; font-weight:600; }
+  .axis.x { color:#ff6b6b; } .axis.y { color:#6ddc6d; } .axis.z { color:#6fa8ff; }
   #edit .mode { cursor:pointer; border-radius:3px; padding:1px 2px; }
   #edit .mode:hover { background:rgba(255,255,255,.08); }
   #edit .mode.on { background:rgba(102,204,255,.22); }
-  #edit .hint { color:#888; font-size:11px; margin-top:6px; }
-  #edit .btns { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; }
-  #edit .dim { color:#aaa; font-size:11px; margin:4px 0; }
+  .hint { color:#888; font-size:11px; margin-top:6px; }
+  .btns { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; }
+  .dim { color:#aaa; font-size:11px; margin:4px 0; }
   #bar { bottom:12px; right:12px; display:none; gap:8px; align-items:center; }
   #status { color:#aaa; font-size:12px; }
   #status.dirty { color:#fc5; }
+  #prompt { top:10px; left:50%; transform:translateX(-50%); display:none; color:#fc5; font-weight:600; }
 </style>
 </head>
 <body>
 <div id="loading">Loading scene... <span id="progress"></span></div>
 <div id="info" class="panel" style="display:none">
-  <h3>Scene (<span id="count">0</span> objects)</h3>
-  <label>Room:
-    <select id="room-mode">
-      <option value="textured" selected>textured</option>
-      <option value="ghost">ghosted</option>
-      <option value="hidden">hidden</option>
-    </select>
-  </label>
+  <h3 class="handle" title="Drag to move; double-click to put it back"><span>Scene (<span id="count">0</span> objects)</span><button id="btn-collapse" class="tiny" type="button" title="Collapse or expand the list">&minus;</button></h3>
+  <div class="roomline">
+    <label>Room:
+      <select id="room-mode">
+        <option value="textured" selected>textured</option>
+        <option value="ghost">ghosted</option>
+        <option value="hidden">hidden</option>
+      </select>
+    </label>
+    <button id="btn-room" type="button" style="display:none" title="Move the walls, floor and ceiling">Resize</button>
+  </div>
   <label><input type="checkbox" id="toggle-points"> Photo point cloud</label>
   <h4>Objects</h4>
   <div id="object-list"></div>
@@ -84,26 +109,48 @@ _TEMPLATE = r"""<!DOCTYPE html>
   <div class="meta" id="meta"></div>
 </div>
 <div id="edit" class="panel">
-  <h3 id="edit-title">Object</h3>
+  <h3 class="handle" title="Drag to move; double-click to put it back"><span id="edit-title">Object</span></h3>
   <div class="dim" id="edit-dim"></div>
   <div class="grid">
     <span></span><span class="axis x">X</span><span class="axis y">Y (up)</span><span class="axis z">Z</span>
-    <span class="mode on" data-mode="p" title="Show which way +X, +Y and +Z move the object">Position</span><input type="number" id="px" step="0.01"><input type="number" id="py" step="0.01"><input type="number" id="pz" step="0.01">
-    <span class="mode" data-mode="r" title="Show which way a positive angle turns the object">Rotation°</span><input type="number" id="rx" step="5"><input type="number" id="ry" step="5"><input type="number" id="rz" step="5">
-    <span class="mode" data-mode="s" title="Show the scale axes">Scale</span><input type="number" id="sx" step="0.05" min="0.01"><input type="number" id="sy" step="0.05" min="0.01"><input type="number" id="sz" step="0.05" min="0.01">
+    <span class="mode lbl on" data-mode="p" title="Show which way +X, +Y and +Z move the object">Position</span><input type="number" id="px" step="0.01"><input type="number" id="py" step="0.01"><input type="number" id="pz" step="0.01">
+    <span class="mode lbl" data-mode="r" title="Show which way a positive angle turns the object">Rotation°</span><input type="number" id="rx" step="5"><input type="number" id="ry" step="5"><input type="number" id="rz" step="5">
+    <span class="mode lbl" data-mode="s" title="Show the scale axes">Scale</span><input type="number" id="sx" step="0.05" min="0.01"><input type="number" id="sy" step="0.05" min="0.01"><input type="number" id="sz" step="0.05" min="0.01">
+    <span class="lbl trim" title="Percent of the object cut away from its −X side, its bottom and its −Z side (in the object's own frame)">Trim − %</span><input type="number" class="trim" id="t0x" step="1" min="0" max="95"><input type="number" class="trim" id="t0y" step="1" min="0" max="95"><input type="number" class="trim" id="t0z" step="1" min="0" max="95">
+    <span class="lbl trim" title="Percent of the object cut away from its +X side, its top and its +Z side (in the object's own frame)">Trim + %</span><input type="number" class="trim" id="t1x" step="1" min="0" max="95"><input type="number" class="trim" id="t1y" step="1" min="0" max="95"><input type="number" class="trim" id="t1z" step="1" min="0" max="95">
+    <span class="lbl trim" title="Lengthen the object at its −X side, its bottom or its −Z side by this percent of its size. Only the half on that side stretches, so the other end keeps its shape (a table's legs get longer, its top stays). Negative shortens.">Stretch − %</span><input type="number" class="trim" id="e0x" step="1"><input type="number" class="trim" id="e0y" step="1"><input type="number" class="trim" id="e0z" step="1">
+    <span class="lbl trim" title="Lengthen the object at its +X side, its top or its +Z side by this percent of its size. Only the half on that side stretches. Negative shortens.">Stretch + %</span><input type="number" class="trim" id="e1x" step="1"><input type="number" class="trim" id="e1y" step="1"><input type="number" class="trim" id="e1z" step="1">
   </div>
   <label><input type="checkbox" id="uniform" checked> uniform scale</label>
+  <label id="rigid-row" style="display:none" title="Off: a typed value is set on each selected object. On: the selection moves, turns and scales as one piece, about its middle (type 180 in Rotation Y to turn a whole corner of the room around)."><input type="checkbox" id="rigid"> edit as one group</label>
   <div class="btns">
     <button id="btn-floor" title="Move down or up until the lowest point touches the floor">To floor</button>
+    <button id="btn-down" title="Lower until it rests on the nearest object, built-in or floor below">Send down</button>
+    <button id="btn-stretch" title="Lengthen the bottom half of each selected object until it reaches what is below (the floor, a built-in or another object); the top stays where it is">Stretch down</button>
+    <button id="btn-wall" title="Then click a wall (or any surface) to push the selection against it">To wall&hellip;</button>
+    <button id="btn-dup" title="Copy the selected objects (Ctrl+C, Ctrl+V)">Duplicate</button>
     <button id="btn-reset">Reset</button>
-    <button id="btn-remove">Remove</button>
+    <button id="btn-remove" title="Delete key">Remove</button>
     <button id="btn-close">Close</button>
   </div>
-  <div class="hint">Shift-click objects to select several and change them together. Esc clears.</div>
+  <div class="hint" id="edit-hint">Shift-click to select several. Typing a value sets it on every selected object (or, with "edit as one group", moves the group); &#9650;&#9660; and the arrow keys move, turn or scale them together. Shift: bigger steps (5&times;, rotation 10&deg;). Ctrl+C / Ctrl+V copy, Delete removes, Ctrl+S saves, Esc clears.</div>
 </div>
+<div id="roomedit" class="panel">
+  <h3 class="handle" title="Drag to move; double-click to put it back"><span>Room</span></h3>
+  <div class="dim" id="room-dim"></div>
+  <div class="grid">
+    <span></span><span class="axis x">X</span><span class="axis y">Y (up)</span><span class="axis z">Z</span>
+    <span class="lbl" title="Positions of the −X wall, the floor and the −Z wall">Low side</span><input type="number" id="rlx" step="0.05"><input type="number" id="rly" step="0.05"><input type="number" id="rlz" step="0.05">
+    <span class="lbl" title="Positions of the +X wall, the ceiling and the +Z wall">High side</span><input type="number" id="rhx" step="0.05"><input type="number" id="rhy" step="0.05"><input type="number" id="rhz" step="0.05">
+    <span class="lbl" title="Width, height and depth; X and Z change both walls equally, Y moves the ceiling">Size</span><input type="number" id="rsx" step="0.05"><input type="number" id="rsy" step="0.05"><input type="number" id="rsz" step="0.05">
+  </div>
+  <div class="btns"><button id="room-reset">Reset room</button><button id="room-close">Close</button></div>
+  <div class="hint">Hover a value to see which side it moves. Where a wall moves in, its photo texture is cut off; where it moves out, the texture stretches. Objects stay where they are.</div>
+</div>
+<div id="prompt" class="panel"></div>
 <div id="bar" class="panel">
   <span id="status"></span>
-  <button id="btn-save" class="primary">Save edits</button>
+  <button id="btn-save" class="primary" title="Ctrl+S">Save edits</button>
   <a id="lnk-glb" style="display:none"><button>Download GLB</button></a>
 </div>
 <script type="importmap">
@@ -134,6 +181,8 @@ const UNIT = (LAYOUT && LAYOUT.estimated_metric_scale) ? LAYOUT.estimated_metric
 const UNIT_NAME = (LAYOUT && LAYOUT.estimated_metric_scale) ? 'm' : 'units';
 // Typed positions are shown relative to the floor (Y) and the photo's camera (X, Z).
 const ORIGIN = [0, (LAYOUT && typeof LAYOUT.floor_y === 'number') ? LAYOUT.floor_y : 0, 0];
+// The room box as the pipeline fitted it; the room editor moves its sides.
+const BOX0 = (LAYOUT && LAYOUT.bounds_min && LAYOUT.bounds_max && LAYOUT.scene_type !== 'open') ? [LAYOUT.bounds_min, LAYOUT.bounds_max] : null;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x1a1a1a);
@@ -144,6 +193,7 @@ camera.position.set(3, 3, 3);
 const renderer = new THREE.WebGLRenderer({ antialias:true });
 renderer.setSize(innerWidth, innerHeight);
 renderer.setPixelRatio(devicePixelRatio);
+renderer.localClippingEnabled = true;          // trimmed objects
 renderer.xr.enabled = true;
 renderer.xr.setFoveation(1);
 document.body.appendChild(renderer.domElement);
@@ -159,8 +209,7 @@ playerRig.add(camera);
 scene.add(playerRig);
 renderer.xr.addEventListener('sessionstart', () => {
   const c = new THREE.Vector3(); bbox.getCenter(c);
-  const floorY = (LAYOUT && LAYOUT.floor_y !== undefined) ? LAYOUT.floor_y : bbox.min.y;
-  playerRig.position.set(c.x, floorY, c.z);
+  playerRig.position.set(c.x, floorY(), c.z);
   playerRig.rotation.set(0, 0, 0);
 });
 
@@ -170,12 +219,24 @@ scene.add(new THREE.AmbientLight(0xffffff, 0.9));
 const dir = new THREE.DirectionalLight(0xffffff, 0.5);
 dir.position.set(5, 10, 5); scene.add(dir);
 
-// id -> { pivot: Group (edits are applied to it), home: Vector3 (bbox centre), size: Vector3, row: element }
+// Everything that can be selected and edited, by key: an object's id (a number)
+// or a built-in's key ('builtin_3', 'relief_0'). Each has a pivot Group at its
+// original bounding-box centre (home) that the edit is applied to, and its
+// original points in scene coordinates (orig) for boxes, drops and trims.
 const items = {};
 const bbox = new THREE.Box3();
 let roomMesh = null;              // THREE.Mesh (vertex-coloured PLY) or THREE.Group (textured GLB nodes)
 const builtins = {};              // group key -> { nodes: [Object3D], names: [node names], row }
 const hiddenNodes = new Set();
+const shellMeshes = [];           // floor, walls, ceiling: { mesh, name }
+const K = k => (typeof k === 'number' || !/^\d+$/.test(k)) ? k : parseInt(k);
+const esc = t => String(t).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+const V = new THREE.Vector3();
+
+function floorY() {
+  const f = (LAYOUT && typeof LAYOUT.floor_y === 'number') ? LAYOUT.floor_y : bbox.min.y;
+  return f + roomEdit.min[1];
+}
 
 function unlit(o, isRoom, doubleSided) {
   const map = o.material.map || null;
@@ -186,19 +247,36 @@ function unlit(o, isRoom, doubleSided) {
   if (isRoom) o.renderOrder = -1;
 }
 
+// The node's vertices in scene coordinates (at most ~30k of them).
+function originalPoints(node) {
+  node.updateMatrixWorld(true);
+  let n = 0;
+  node.traverse(o => { if (o.isMesh) n += o.geometry.attributes.position.count; });
+  const stride = Math.max(1, Math.ceil(n / 30000)), out = [];
+  node.traverse(o => {
+    if (!o.isMesh) return;
+    const pa = o.geometry.attributes.position;
+    for (let i = 0; i < pa.count; i += stride) { V.fromBufferAttribute(pa, i).applyMatrix4(o.matrixWorld); out.push(V.x, V.y, V.z); }
+  });
+  return new Float32Array(out);
+}
+
 // Wrap an object in a pivot at its bounding-box centre so that typed
 // rotations and scales act about the object, not about the scene origin.
 function registerObject(id, node) {
   const box = new THREE.Box3().setFromObject(node);
   if (box.isEmpty()) return;
+  const orig = originalPoints(node);
   const c = box.getCenter(new THREE.Vector3());
   const pivot = new THREE.Group();
   pivot.position.copy(c);
   node.position.sub(c);
   pivot.add(node);
+  pivot.userData.key = id;
   scene.add(pivot);
   bbox.union(box);
-  items[id] = Object.assign(items[id] || {}, { pivot, home: c.clone(), size: box.getSize(new THREE.Vector3()), minY: box.min.y });
+  items[id] = Object.assign(items[id] || {}, { kind: 'object', pivot, node, orig, home: c.clone(),
+    size: box.getSize(new THREE.Vector3()), lo: box.min.clone() });
   const info = OBJECTS.find(e => e.id === id);
   if (info && info.glass) {       // transparent in the photo: see the room through it
     node.traverse(o => { if (o.isMesh) { o.material.transparent = true; o.material.opacity = 0.45; o.material.depthWrite = false; } });
@@ -222,7 +300,33 @@ function adoptRoom(group) {
     const isRelief = nm.includes('room_relief') || nm.includes('room_builtin');
     unlit(o, true, isRelief);
     if (isRelief) registerRoomNode(o);
+    const shell = nm.match(/room_(floor|ceiling|wall_[xz]_(min|max))/);
+    if (shell && !isRelief) shellMeshes.push({ mesh: o, name: shell[0] });
   });
+}
+
+// Built-ins (relief pieces and solid blocks) get pivots like objects, so they
+// can be selected, moved, turned and resized.
+function registerBuiltins() {
+  scene.updateMatrixWorld(true);
+  const title = b => b.kind === 'relief' ? `${LAYOUT && LAYOUT.scene_type === 'open' ? 'Ground / backdrop' : 'Surface'} ${b.idx + 1}` : `Solid block ${b.idx + 1}`;
+  for (const [k, b] of Object.entries(builtins)) {
+    b.title = title(b);
+    const box = new THREE.Box3();
+    b.nodes.forEach(n => box.expandByObject(n));
+    if (box.isEmpty()) continue;
+    const pts = b.nodes.map(n => originalPoints(n));
+    const orig = new Float32Array(pts.reduce((s, p) => s + p.length, 0));
+    pts.reduce((off, p) => { orig.set(p, off); return off + p.length; }, 0);
+    const c = box.getCenter(new THREE.Vector3());
+    const pivot = new THREE.Group();
+    pivot.position.copy(c); pivot.userData.key = k;
+    scene.add(pivot); pivot.updateMatrixWorld(true);
+    b.nodes.forEach(n => pivot.attach(n));
+    const m = b.names[0].match(/room_(builtin|relief)_\d+/);
+    items[k] = { kind: 'builtin', pivot, orig, home: c.clone(), size: box.getSize(new THREE.Vector3()), lo: box.min.clone(),
+                 label: b.title, prefix: m ? m[0] : b.names[0], builtin: b };
+  }
 }
 
 function loadSceneGLB(url, done) {
@@ -309,7 +413,7 @@ function onLoad() {
   document.getElementById('loading').style.display = 'none';
   document.getElementById('info').style.display = 'block';
   document.getElementById('bar').style.display = 'flex';
-  document.getElementById('count').textContent = OBJECTS.length;
+  updateCount();
   let meta = `Objects extent: ${(s.x * UNIT).toFixed(2)} × ${(s.y * UNIT).toFixed(2)} × ${(s.z * UNIT).toFixed(2)} ${UNIT_NAME}`;
   meta += USE_LITE ? `\nMeshes: lite (decimated, baked textures). Add ?full=1 for the dense originals.` : `\nMeshes: full resolution`;
   if (LAYOUT) {
@@ -318,25 +422,32 @@ function onLoad() {
     if (LAYOUT.wall_sources) meta += `\nWalls: ` + Object.entries(LAYOUT.wall_sources).map(([k,v]) => `${k}=${v}`).join(', ');
   }
   document.getElementById('meta').textContent = meta;
+  registerBuiltins();
   buildBuiltinList();
-  loadEdits().then(() => { const s = parseInt(params.get('select')); if (items[s]) { select(s); setHot(s); } });
+  if (BOX0 && shellMeshes.length) F('btn-room').style.display = 'inline-block';
+  loadEdits().then(() => { const s = K(params.get('select') || ''); if (items[s]) { select(s); setHot(s); } });
 }
 
 // ---------------------------------------------------------------- lists
+const F = id => document.getElementById(id);
 const list = document.getElementById('object-list');
 const byId = {};
 OBJECTS.forEach(o => byId[o.id] = o);
-OBJECTS.forEach(o => {
+function updateCount() { F('count').textContent = OBJECTS.length; }
+function addRow(o, after) {
   const row = document.createElement('div'); row.className = 'row'; row.dataset.id = o.id;
-  const sup = (o.supported_by && byId[o.supported_by]) ? ` <span class="sub">on ${byId[o.supported_by].label}</span>` : '';
-  row.innerHTML = `<input type="checkbox" checked><span class="name">${o.label}${sup}</span><span class="conf">${(o.confidence||0).toFixed(2)}</span>`;
-  list.appendChild(row);
+  const sup = (o.supported_by && byId[o.supported_by]) ? ` <span class="sub">on ${esc(byId[o.supported_by].label)}</span>` : '';
+  const tag = o.copyOf !== undefined ? ` <span class="sub">copy</span>` : sup;
+  const conf = o.copyOf !== undefined ? '' : (o.confidence || 0).toFixed(2);
+  row.innerHTML = `<input type="checkbox" checked><span class="name">${esc(o.label)}${tag}</span><span class="conf">${conf}</span>`;
+  if (after) after.after(row); else list.appendChild(row);
   items[o.id] = Object.assign(items[o.id] || {}, { row, label: o.label });
   row.addEventListener('mouseenter', () => setHot(o.id));
   row.addEventListener('mouseleave', () => setHot(null));
   row.querySelector('input').addEventListener('change', e => { edit(o.id).hidden = !e.target.checked; applyEdit(o.id); markDirty(); });
   row.querySelector('.name').addEventListener('click', ev => select(o.id, ev.shiftKey));
-});
+}
+OBJECTS.forEach(o => addRow(o));
 FAILED.forEach(f => {
   const l = document.createElement('div'); l.className = 'failed';
   l.textContent = `${f.label} (${f.status || 'failed'})`; list.appendChild(l);
@@ -350,14 +461,14 @@ function buildBuiltinList() {
   keys.forEach(k => {
     const b = builtins[k];
     const row = document.createElement('div'); row.className = 'row';
-    const terrain = LAYOUT && LAYOUT.scene_type === 'open';
-    const title = b.kind === 'relief' ? `${terrain ? 'Ground / backdrop' : 'Surface'} ${b.idx + 1}` : `Solid block ${b.idx + 1}`;
-    row.innerHTML = `<input type="checkbox" checked><span class="name">${title}</span><span class="conf">${b.kind}</span>`;
+    row.innerHTML = `<input type="checkbox" checked><span class="name">${esc(b.title)}</span><span class="conf">${b.kind}</span>`;
     el.appendChild(row); b.row = row;
-    row.title = 'Hover to highlight in the scene; shift-click a built-in in the scene to hide it';
-    row.addEventListener('mouseenter', () => setHotBuiltin(k));
-    row.addEventListener('mouseleave', () => setHotBuiltin(null));
+    if (items[k]) items[k].row = row;
+    row.title = 'Click to select it (move, turn or resize); untick to hide it';
+    row.addEventListener('mouseenter', () => setHot(k));
+    row.addEventListener('mouseleave', () => setHot(null));
     row.querySelector('input').addEventListener('change', e => { setBuiltin(k, e.target.checked); markDirty(); });
+    row.querySelector('.name').addEventListener('click', ev => select(k, ev.shiftKey));
   });
 }
 function setBuiltin(k, on) {
@@ -365,54 +476,85 @@ function setBuiltin(k, on) {
   b.nodes.forEach(n => n.visible = on);
   b.names.forEach(n => on ? hiddenNodes.delete(n) : hiddenNodes.add(n));
   if (b.row) b.row.querySelector('input').checked = on;
+  if (selected.has(k)) updateSelection();
 }
 document.getElementById('toggle-relief').addEventListener('change', e => {
   Object.keys(builtins).forEach(k => setBuiltin(k, e.target.checked)); markDirty();
 });
+
+// The scene list can be folded away and both panels dragged by their titles.
+function draggable(panel, key) {
+  const handle = panel.querySelector('.handle'), store = 'wb-panel-' + key;
+  function place(x, y) {
+    panel.style.left = Math.max(0, Math.min(innerWidth - 80, x)) + 'px';
+    panel.style.top = Math.max(0, Math.min(innerHeight - 30, y)) + 'px';
+    panel.style.right = 'auto'; panel.style.bottom = 'auto';
+  }
+  try { const p = JSON.parse(localStorage.getItem(store)); if (p) place(p.x, p.y); } catch (err) { /* no storage */ }
+  handle.addEventListener('pointerdown', ev => {
+    if (ev.button !== 0 || ev.target.closest('button, input, select')) return;
+    const r = panel.getBoundingClientRect(), dx = ev.clientX - r.left, dy = ev.clientY - r.top;
+    handle.setPointerCapture(ev.pointerId);
+    const move = m => place(m.clientX - dx, m.clientY - dy);
+    const up = () => {
+      handle.removeEventListener('pointermove', move); handle.removeEventListener('pointerup', up);
+      const r2 = panel.getBoundingClientRect();
+      try { localStorage.setItem(store, JSON.stringify({ x: r2.left, y: r2.top })); } catch (err) { /* no storage */ }
+    };
+    handle.addEventListener('pointermove', move); handle.addEventListener('pointerup', up);
+  });
+  handle.addEventListener('dblclick', ev => {
+    if (ev.target.closest('button')) return;
+    panel.style.left = panel.style.top = panel.style.right = panel.style.bottom = '';
+    try { localStorage.removeItem(store); } catch (err) { /* no storage */ }
+  });
+}
+draggable(F('info'), 'info'); draggable(F('edit'), 'edit'); draggable(F('roomedit'), 'room');
+function setCollapsed(on) {
+  F('info').classList.toggle('collapsed', on);
+  F('btn-collapse').innerHTML = on ? '+' : '&minus;';
+  try { localStorage.setItem('wb-info-collapsed', on ? '1' : ''); } catch (err) { /* no storage */ }
+}
+F('btn-collapse').addEventListener('click', () => setCollapsed(!F('info').classList.contains('collapsed')));
+try { if (localStorage.getItem('wb-info-collapsed')) setCollapsed(true); } catch (err) { /* no storage */ }
 
 // ------------------------------------------------------------ highlight
 const HOT = new THREE.Color(1.0, 0.82, 0.45), WHITE = new THREE.Color(1, 1, 1);
 function tint(nodes, on) {
   nodes.forEach(n => n.traverse(o => { if (o.isMesh) o.material.color.copy(on ? HOT : WHITE); }));
 }
-let hotId = null, selId = null, hotBuiltin = null;
-const hotBox = new THREE.BoxHelper(undefined, 0xffc850); hotBox.visible = false; scene.add(hotBox);
+let hotId = null, selId = null;
+const hotBox3 = new THREE.Box3();
+const hotBox = new THREE.Box3Helper(hotBox3, 0xffc850); hotBox.visible = false; scene.add(hotBox);
 const selBox3 = new THREE.Box3();
 const selBox = new THREE.Box3Helper(selBox3, 0x66ccff); selBox.visible = false; scene.add(selBox);
-const selected = new Set();      // every selected id; selId is the one whose values the panel shows
-function setHot(id) {
-  if (hotId === id) return;
-  if (hotId !== null && items[hotId] && items[hotId].pivot) { tint([items[hotId].pivot], false); items[hotId].row.classList.remove('hot'); }
-  hotId = id;
-  const it = id !== null ? items[id] : null;
-  if (it && it.pivot) { tint([it.pivot], true); it.row.classList.add('hot'); hotBox.setFromObject(it.pivot); hotBox.visible = it.pivot.visible; }
-  else hotBox.visible = false;
-}
-// Built-ins highlight on hover too (both ways: list row <-> scene), so a
-// relief piece or a solid block can be found and switched off from the scene.
-function setHotBuiltin(key) {
-  if (hotBuiltin === key) return;
-  if (hotBuiltin !== null && builtins[hotBuiltin]) { tint(builtins[hotBuiltin].nodes, false); if (builtins[hotBuiltin].row) builtins[hotBuiltin].row.classList.remove('hot'); }
-  hotBuiltin = key;
-  const b = key !== null ? builtins[key] : null;
-  if (b) { tint(b.nodes, true); if (b.row) { b.row.classList.add('hot'); b.row.scrollIntoView({ block: 'nearest' }); } }
+const selected = new Set();      // every selected key; selId is the one whose values the panel shows
+function shown(o) { for (; o; o = o.parent) if (!o.visible) return false; return true; }
+function setHot(k) {
+  if (hotId === k) return;
+  const old = hotId !== null ? items[hotId] : null;
+  if (old && old.pivot) { tint([old.pivot], false); if (old.row) old.row.classList.remove('hot'); }
+  hotId = k;
+  const it = k !== null ? items[k] : null;
+  if (it && it.pivot) {
+    tint([it.pivot], true);
+    if (it.row) { it.row.classList.add('hot'); it.row.scrollIntoView({ block: 'nearest' }); }
+    hotBox3.makeEmpty(); worldBox(k, hotBox3); hotBox.visible = !hotBox3.isEmpty() && shown(it.pivot.children[0] || it.pivot);
+  } else hotBox.visible = false;
 }
 
 const ray = new THREE.Raycaster(), ptr = new THREE.Vector2();
-// Returns { id } for an object, { builtin: key } for a built-in, or null.
-function pick(ev) {
+// The first visible thing under the pointer: { key, hit } for an object or a
+// built-in, { room: true, hit } for the floor, a wall or the ceiling, or null.
+function pick(ev, withRoom, exclude) {
   ptr.set((ev.clientX / innerWidth) * 2 - 1, -(ev.clientY / innerHeight) * 2 + 1);
   ray.setFromCamera(ptr, camera);
-  const targets = Object.values(items).filter(i => i.pivot && i.pivot.visible).map(i => i.pivot);
-  const bnodes = [];
-  for (const [k, b] of Object.entries(builtins)) b.nodes.forEach(n => { if (n.visible) { n.userData.builtinKey = k; bnodes.push(n); } });
-  const hit = ray.intersectObjects(targets.concat(bnodes), true)[0];
-  if (!hit) return null;
-  let o = hit.object;
-  while (o) {
-    if (o.userData && o.userData.builtinKey) return { builtin: o.userData.builtinKey };
-    for (const [id, it] of Object.entries(items)) if (o === it.pivot) return { id: parseInt(id) };
-    o = o.parent;
+  const targets = Object.entries(items).filter(([k, i]) => i.pivot && !(exclude && exclude.has(K(k)))).map(([, i]) => i.pivot);
+  if (withRoom && roomMesh) targets.push(roomMesh);
+  for (const hit of ray.intersectObjects(targets, true)) {
+    if (!shown(hit.object)) continue;
+    for (let o = hit.object; o; o = o.parent) if (o.userData && o.userData.key !== undefined) return { key: o.userData.key, hit };
+    return { room: true, hit };
   }
   return null;
 }
@@ -422,35 +564,113 @@ renderer.domElement.addEventListener('pointermove', e => {
   if (e.buttons || performance.now() - lastMove < 60) return;
   lastMove = performance.now();
   const p = pick(e);
-  const id = (p && p.id !== undefined) ? p.id : null;
-  setHot(id); setHotBuiltin(p && p.builtin ? p.builtin : null);
-  if (id !== null && items[id].row) items[id].row.scrollIntoView({ block: 'nearest' });
+  setHot(p ? p.key : null);
 });
 renderer.domElement.addEventListener('pointerup', e => {
   if (!downAt || Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 4) return;   // a drag, not a click
+  if (wallMode) { toWall(e); return; }
   const p = pick(e);
-  if (p && p.id !== undefined) select(p.id, e.shiftKey);
-  else if (p && p.builtin && e.shiftKey) { setBuiltin(p.builtin, false); markDirty(); }   // shift-click hides a built-in
+  if (p) select(p.key, e.shiftKey);
 });
 
 // ---------------------------------------------------------------- edits
-const edits = {};     // id -> {translate:[3], rotate_deg:[3], scale:[3], hidden}
-function edit(id) { return edits[id] = edits[id] || { translate: [0,0,0], rotate_deg: [0,0,0], scale: [1,1,1], hidden: false }; }
-function isIdentity(e) { return !e.hidden && e.translate.every(v => Math.abs(v) < 1e-9) && e.rotate_deg.every(v => Math.abs(v) < 1e-9) && e.scale.every(v => Math.abs(v - 1) < 1e-9); }
-function applyEdit(id) {
-  const it = items[id]; if (!it || !it.pivot) return;
-  const e = edit(id), r = THREE.MathUtils.degToRad;
+const edits = {};     // key -> {translate:[3], rotate_deg:[3], scale:[3], hidden, crop: [[lo],[hi]] | null}
+const FAR = 1e4;      // an untrimmed side of the crop box
+function edit(k) { return edits[k] = edits[k] || { translate: [0,0,0], rotate_deg: [0,0,0], scale: [1,1,1], hidden: false, crop: null, extend: null }; }
+function isIdentity(e) { return !e.hidden && !e.crop && !e.extend && e.translate.every(v => Math.abs(v) < 1e-9) && e.rotate_deg.every(v => Math.abs(v) < 1e-9) && e.scale.every(v => Math.abs(v - 1) < 1e-9); }
+// original scene coordinates -> where the edit puts them
+function toWorld(k) {
+  const it = items[k]; it.pivot.updateMatrixWorld(true);
+  return it.pivot.matrixWorld.clone().multiply(new THREE.Matrix4().makeTranslation(-it.home.x, -it.home.y, -it.home.z));
+}
+// The stretch along axis a of a coordinate x (original frame): each half is scaled
+// away from the centre so that its old end lands on the new one.
+function stretch1(k, a, x) {
+  const ext = edit(k).extend;
+  if (!ext) return x;
+  const c = items[k].home.getComponent(a), d = x - c;
+  if (d < 0) return Math.abs(c - ext[0][a]) > 1e-9 ? c + d * (c - ext[2][a]) / (c - ext[0][a]) : x;
+  return Math.abs(ext[1][a] - c) > 1e-9 ? c + d * (ext[3][a] - c) / (ext[1][a] - c) : x;
+}
+function worldPoints(k) {
+  const it = items[k], c = edit(k).crop, M = toWorld(k), P = it.orig, out = [];
+  for (let i = 0; i < P.length; i += 3) {
+    if (c && (P[i] < c[0][0] || P[i] > c[1][0] || P[i+1] < c[0][1] || P[i+1] > c[1][1] || P[i+2] < c[0][2] || P[i+2] > c[1][2])) continue;
+    V.set(stretch1(k, 0, P[i]), stretch1(k, 1, P[i+1]), stretch1(k, 2, P[i+2])).applyMatrix4(M); out.push(V.x, V.y, V.z);
+  }
+  return out;
+}
+// Stretching changes the mesh itself: each vertex is mapped in the original frame.
+const meshBase = new WeakMap();   // mesh -> { base: unstretched positions, toOrig, fromOrig }
+function updateStretch(k) {
+  const it = items[k];
+  if (it.kind !== 'object') return;
+  const ext = edit(k).extend, key = ext ? JSON.stringify(ext) : '';
+  if ((it.extKey || '') === key) return;
+  it.extKey = key;
+  it.pivot.updateMatrixWorld(true);
+  const toPivot = it.pivot.matrixWorld.clone().invert(), T = new THREE.Matrix4().makeTranslation(it.home.x, it.home.y, it.home.z);
+  it.node.traverse(o => {
+    if (!o.isMesh) return;
+    if (!meshBase.has(o)) o.geometry = o.geometry.clone();      // instances may share a buffer
+    const pa = o.geometry.attributes.position;
+    if (!meshBase.has(o)) {
+      const toOrig = T.clone().multiply(toPivot.clone().multiply(o.matrixWorld));   // mesh -> original frame
+      meshBase.set(o, { base: pa.array.slice(), toOrig, fromOrig: toOrig.clone().invert() });
+    }
+    const { base: B, toOrig, fromOrig } = meshBase.get(o);
+    for (let i = 0; i < pa.count; i++) {
+      V.set(B[3*i], B[3*i+1], B[3*i+2]).applyMatrix4(toOrig);
+      V.set(stretch1(k, 0, V.x), stretch1(k, 1, V.y), stretch1(k, 2, V.z)).applyMatrix4(fromOrig);
+      pa.setXYZ(i, V.x, V.y, V.z);
+    }
+    pa.needsUpdate = true;
+    o.geometry.computeBoundingBox(); o.geometry.computeBoundingSphere();
+  });
+}
+function worldBox(k, box) {
+  const p = worldPoints(k);
+  for (let i = 0; i < p.length; i += 3) box.expandByPoint(V.set(p[i], p[i+1], p[i+2]));
+  return box;
+}
+// Trims are clipping planes in the object's original frame, carried along by its edit.
+function updateClip(k) {
+  const it = items[k];
+  if (it.kind !== 'object') return;
+  const c = edit(k).crop, planes = [];
+  if (c) {
+    const M = toWorld(k);
+    for (let i = 0; i < 3; i++) {
+      const n = AXES[i];
+      if (c[0][i] > -FAR / 2) planes.push(new THREE.Plane(n.clone(), -stretch1(k, i, c[0][i])).applyMatrix4(M));
+      if (c[1][i] < FAR / 2) planes.push(new THREE.Plane(n.clone().negate(), stretch1(k, i, c[1][i])).applyMatrix4(M));
+    }
+  }
+  const changed = (it.nPlanes || 0) !== planes.length;
+  it.nPlanes = planes.length;
+  it.pivot.traverse(o => { if (o.isMesh) { o.material.clippingPlanes = planes.length ? planes : null; if (changed) o.material.needsUpdate = true; } });
+}
+function applyEdit(k) {
+  k = K(k);
+  const it = items[k]; if (!it || !it.pivot) return;
+  const e = edit(k), r = THREE.MathUtils.degToRad;
   it.pivot.position.set(it.home.x + e.translate[0], it.home.y + e.translate[1], it.home.z + e.translate[2]);
   it.pivot.rotation.set(r(e.rotate_deg[0]), r(e.rotate_deg[1]), r(e.rotate_deg[2]), 'XYZ');
   it.pivot.scale.set(e.scale[0], e.scale[1], e.scale[2]);
-  it.pivot.visible = !e.hidden;
-  it.row.querySelector('input').checked = !e.hidden;
-  it.row.classList.toggle('edited', !isIdentity(e));
-  if (selected.has(id)) updateSelection();
-  if (hotId === id) hotBox.setFromObject(it.pivot);
+  if (it.kind === 'object') {
+    it.pivot.visible = !e.hidden;
+    if (it.row) it.row.querySelector('input').checked = !e.hidden;
+  }
+  if (it.row) it.row.classList.toggle('edited', !isIdentity(e) || it.copyOf !== undefined);
+  updateStretch(k);
+  updateClip(k);
+  if (selected.has(k)) updateSelection();
+  if (hotId === k) { hotBox3.makeEmpty(); worldBox(k, hotBox3); }
 }
-const F = id => document.getElementById(id);
-const fields = { p: ['px','py','pz'], r: ['rx','ry','rz'], s: ['sx','sy','sz'] };
+const fields = { p: ['px','py','pz'], r: ['rx','ry','rz'], s: ['sx','sy','sz'], t: ['t0x','t0y','t0z','t1x','t1y','t1z'],
+                 e: ['e0x','e0y','e0z','e1x','e1y','e1z'] };
+const ALL_FIELDS = [...fields.p, ...fields.r, ...fields.s, ...fields.t, ...fields.e];
+const PER_OBJECT = f => f[0] === 't' || f[0] === 'e';      // trims and stretches: objects only
 // ------------------------------------------------------------ axis hints
 // A small gizmo on the selection: arrows for +X/+Y/+Z (position), arcs with the
 // direction a positive angle turns (rotation), or double arrows (scale). Click
@@ -509,6 +729,7 @@ function buildGizmo() {
   });
 }
 function setGizmoMode(mode, axis) {
+  if (!'prs'.includes(mode)) return;
   gizmoMode = mode; gizmoAxis = axis === undefined ? -1 : axis;
   document.querySelectorAll('#edit .mode').forEach(el => el.classList.toggle('on', el.dataset.mode === mode));
   buildGizmo();
@@ -518,7 +739,7 @@ document.querySelectorAll('#edit .mode').forEach(el => el.addEventListener('clic
 // ------------------------------------------------------------ selection
 function updateSelection() {
   selBox3.makeEmpty();
-  selected.forEach(id => { const pv = items[id] && items[id].pivot; if (pv && pv.visible) selBox3.expandByObject(pv); });
+  selected.forEach(k => { const it = items[k]; if (it && it.pivot && shown(it.pivot.children[0] || it.pivot)) worldBox(k, selBox3); });
   const any = !selBox3.isEmpty();
   selBox.visible = gizmo.visible = any;
   if (!any) return;
@@ -528,33 +749,81 @@ function updateSelection() {
   if (Math.abs(s - gizmoSize) > 1e-6 || !gizmo.children.length) { gizmoSize = s; buildGizmo(); }
 }
 // shift (additive): add the object, or take it out again if it is already selected
-function select(id, additive) {
-  if (!additive) { selected.forEach(i => items[i] && items[i].row.classList.remove('sel')); selected.clear(); selId = null; }
-  if (id !== null && items[id] && items[id].pivot) {
-    if (additive && selected.has(id)) {
-      selected.delete(id); items[id].row.classList.remove('sel');
-      if (selId === id) selId = selected.size ? [...selected].pop() : null;
-    } else { selected.add(id); items[id].row.classList.add('sel'); selId = id; }
+function select(k, additive) {
+  if (k !== null) k = K(k);
+  if (!additive) { selected.forEach(i => items[i] && items[i].row && items[i].row.classList.remove('sel')); selected.clear(); selId = null; }
+  if (k !== null && items[k] && items[k].pivot) {
+    if (additive && selected.has(k)) {
+      selected.delete(k); if (items[k].row) items[k].row.classList.remove('sel');
+      if (selId === k) selId = selected.size ? [...selected].pop() : null;
+    } else { selected.add(k); if (items[k].row) items[k].row.classList.add('sel'); selId = k; }
   }
+  if (selId !== null) closeRoom();
   F('edit').style.display = selId !== null ? 'block' : 'none';
   updateSelection();
-  if (selId === null) return;
+  if (selId === null) { cancelWall(); return; }
   const it = items[selId];
-  F('edit-title').textContent = selected.size > 1 ? `${selected.size} objects selected` : `${it.label} #${selId}`;
+  F('edit-title').textContent = selected.size > 1 ? `${selected.size} selected` : (it.kind === 'object' ? `${it.label}${it.copyOf !== undefined ? ' (copy)' : ''} #${selId}` : it.label);
   refreshPanel();
 }
-addEventListener('keydown', e => { if (e.key === 'Escape' && !(e.target && e.target.tagName === 'INPUT')) select(null); });
-function refreshPanel() {
-  const it = items[selId], e = edit(selId);
-  fields.p.forEach((f, i) => F(f).value = ((it.home.getComponent(i) + e.translate[i] - ORIGIN[i]) * UNIT).toFixed(2));
-  fields.r.forEach((f, i) => F(f).value = +e.rotate_deg[i].toFixed(2));
-  fields.s.forEach((f, i) => F(f).value = e.scale[i].toFixed(2));
-  F('edit-dim').textContent = selected.size > 1
-    ? `Values shown are ${it.label} #${selId}'s. A change moves every selected object by the same amount; turning and scaling act about the middle of the group.`
-    : `size ${fields.s.map((_, i) => (it.size.getComponent(i) * e.scale[i] * UNIT).toFixed(2)).join(' × ')} ${UNIT_NAME}. Position: centre, in ${UNIT_NAME}; Y is height above the floor.`;
+const DIGITS = { p: 2, r: 2, s: 2, t: 1, e: 1 };
+function fieldValue(k, f) {
+  const it = items[k], e = edit(k), i = 'xyz'.indexOf(f[f.length - 1]);
+  if (f[0] === 'p') return (it.home.getComponent(i) + e.translate[i] - ORIGIN[i]) * UNIT;
+  if (f[0] === 'r') return e.rotate_deg[i];
+  if (f[0] === 's') return e.scale[i];
+  const lo = it.lo.getComponent(i), sz = Math.max(it.size.getComponent(i), 1e-9);
+  if (f[0] === 'e') {
+    if (!e.extend) return 0;
+    return f[1] === '0' ? (e.extend[0][i] - e.extend[2][i]) / sz * 100 : (e.extend[3][i] - e.extend[1][i]) / sz * 100;
+  }
+  if (!e.crop) return 0;
+  return f[1] === '0' ? Math.max(0, (e.crop[0][i] - lo) / sz * 100) : Math.max(0, (lo + sz - e.crop[1][i]) / sz * 100);
 }
-function pivotPos(id) { const it = items[id], e = edit(id); return it.home.clone().add(new THREE.Vector3(...e.translate)); }
-function setPivotPos(id, p) { edit(id).translate = p.clone().sub(items[id].home).toArray(); }
+function setTrim(k, side, i, pct) {
+  const it = items[k], e = edit(k), lo = it.lo.getComponent(i), sz = it.size.getComponent(i);
+  pct = Math.max(0, Math.min(95, pct));
+  if (!e.crop) e.crop = [[-FAR, -FAR, -FAR], [FAR, FAR, FAR]];
+  const other = side === '0' ? fieldValue(k, 't1' + 'xyz'[i]) : fieldValue(k, 't0' + 'xyz'[i]);
+  pct = Math.min(pct, 98 - other);                       // keep at least 2% of the object
+  if (side === '0') e.crop[0][i] = pct > 1e-6 ? lo + pct / 100 * sz : -FAR;
+  else e.crop[1][i] = pct > 1e-6 ? lo + sz - pct / 100 * sz : FAR;
+  if (e.crop[0].every(v => v <= -FAR / 2) && e.crop[1].every(v => v >= FAR / 2)) e.crop = null;
+}
+// Stretch: the side moves out by pct of the object's size; only its half stretches.
+function setExtend(k, side, i, pct) {
+  const it = items[k], e = edit(k), lo = it.lo.getComponent(i), sz = it.size.getComponent(i);
+  pct = Math.max(-45, Math.min(500, pct));                // a half can shrink to a tenth, not vanish
+  if (!e.extend) e.extend = [it.lo.toArray(), it.lo.clone().add(it.size).toArray(), it.lo.toArray(), it.lo.clone().add(it.size).toArray()];
+  if (side === '0') e.extend[2][i] = lo - pct / 100 * sz; else e.extend[3][i] = lo + sz + pct / 100 * sz;
+  if ([0, 1, 2].every(j => Math.abs(e.extend[2][j] - e.extend[0][j]) < 1e-9 && Math.abs(e.extend[3][j] - e.extend[1][j]) < 1e-9)) e.extend = null;
+}
+function setFieldValue(k, f, v) {
+  const it = items[k], e = edit(k), i = 'xyz'.indexOf(f[f.length - 1]);
+  if (f[0] === 'p') e.translate[i] = v / UNIT + ORIGIN[i] - it.home.getComponent(i);
+  else if (f[0] === 'r') e.rotate_deg[i] = v;
+  else if (f[0] === 's') { v = Math.max(0.01, v); if (F('uniform').checked) e.scale = [v, v, v]; else e.scale[i] = v; }
+  else if (it.kind === 'object') (f[0] === 't' ? setTrim : setExtend)(k, f[1], i, v);
+}
+function refreshPanel() {
+  const ids = [...selected].filter(k => items[k]), it = items[selId];
+  const objs = ids.filter(k => items[k].kind === 'object');
+  document.querySelectorAll('#edit .trim').forEach(el => el.style.display = objs.length ? '' : 'none');
+  F('btn-dup').disabled = F('btn-stretch').disabled = !objs.length;
+  F('rigid-row').style.display = ids.length > 1 ? 'block' : 'none';
+  ALL_FIELDS.forEach(f => {
+    const vals = (PER_OBJECT(f) ? objs : ids).map(k => fieldValue(k, f));
+    const same = vals.length && vals.every(v => Math.abs(v - vals[0]) < 5e-3);
+    F(f).value = same ? (f[0] === 'p' || f[0] === 's' ? vals[0].toFixed(DIGITS[f[0]]) : +vals[0].toFixed(DIGITS[f[0]])) : '';
+    F(f).placeholder = same ? '' : 'mixed';
+  });
+  const e = edit(selId);
+  F('edit-dim').textContent = ids.length > 1
+    ? `Fields left blank differ between the selected objects.`
+    : `size ${[0, 1, 2].map(i => (it.size.getComponent(i) * e.scale[i] * UNIT).toFixed(2)).join(' × ')} ${UNIT_NAME}. Position: centre, in ${UNIT_NAME}; Y is height above the floor.`;
+}
+function pivotPos(k) { const it = items[k], e = edit(k); return it.home.clone().add(new THREE.Vector3(...e.translate)); }
+function setPivotPos(k, p) { edit(k).translate = p.clone().sub(items[k].home).toArray(); }
 function groupCentre() { updateSelection(); return selBox3.getCenter(new THREE.Vector3()); }
 function rotateGroup(ids, k, deg) {
   const c = groupCentre(), q = new THREE.Quaternion().setFromAxisAngle(AXES[k], THREE.MathUtils.degToRad(deg)), r = THREE.MathUtils.degToRad;
@@ -575,57 +844,383 @@ function scaleGroup(ids, ratios) {
     e.scale = e.scale.map((v, j) => Math.max(0.01, v * ratios[j]));
   });
 }
-function fromPanel(changed) {
+function changed(ids) { ids.forEach(applyEdit); updateSelection(); refreshPanel(); markDirty(); }
+// A typed value is set on every selected object (each about its own centre).
+function typed(f) {
   if (selId === null) return;
-  const it = items[selId], e = edit(selId), ids = [...selected];
-  const num = (f, d) => { const v = parseFloat(F(f).value); return Number.isFinite(v) ? v : d; };
-  const kind = changed[0], k = 'xyz'.indexOf(changed[1]);
-  if (kind === 'p') {
-    const d = num(changed, 0) / UNIT + ORIGIN[k] - it.home.getComponent(k) - e.translate[k];
-    ids.forEach(id => edit(id).translate[k] += d);
-  } else if (kind === 'r') {
-    const d = num(changed, 0) - e.rotate_deg[k];
-    if (ids.length === 1) e.rotate_deg[k] += d; else rotateGroup(ids, k, d);
-  } else {
-    const v = Math.max(0.01, num(changed, 1)), ratio = v / e.scale[k];
-    if (ids.length === 1) {
-      if (F('uniform').checked) e.scale = [v, v, v]; else e.scale[k] = v;
-    } else scaleGroup(ids, F('uniform').checked ? [ratio, ratio, ratio] : [0, 1, 2].map(j => j === k ? ratio : 1));
-  }
-  ids.forEach(applyEdit); updateSelection(); refreshPanel(); markDirty();
+  const v = parseFloat(F(f).value);
+  if (!Number.isFinite(v)) { refreshPanel(); return; }
+  const ids = [...selected];
+  if (ids.length > 1 && F('rigid').checked && !PER_OBJECT(f)) {
+    // as one piece: the shown object's value becomes v, the rest keep their place around it
+    const ref = fieldValue(selId, f), i = 'xyz'.indexOf(f[f.length - 1]);
+    if (f[0] === 'p') ids.forEach(k => edit(k).translate[i] += (v - ref) / UNIT);
+    else if (f[0] === 'r') rotateGroup(ids, i, v - ref);
+    else { const ratio = Math.max(0.01, v) / ref; scaleGroup(ids, F('uniform').checked ? [ratio, ratio, ratio] : [0, 1, 2].map(j => j === i ? ratio : 1)); }
+  } else ids.forEach(k => setFieldValue(k, f, v));
+  changed(ids);
 }
-[...fields.p, ...fields.r, ...fields.s].forEach(f => {
-  F(f).addEventListener('change', () => fromPanel(f));
-  ['focus', 'pointerdown'].forEach(ev => F(f).addEventListener(ev, () => setGizmoMode(f[0], 'xyz'.indexOf(f[1]))));
+// A step (▲▼, arrow keys) moves, turns or scales the selection together.
+const STEP = { p: 0.01, r: 5, s: 0.05, t: 1, e: 1 }, BIG = { p: 5, r: 2, s: 5, t: 5, e: 5 };
+function stepField(f, dir, big) {
+  if (selId === null) return;
+  const d = STEP[f[0]] * (big ? BIG[f[0]] : 1) * dir, i = 'xyz'.indexOf(f[f.length - 1]), ids = [...selected];
+  if (f[0] === 'p') ids.forEach(k => edit(k).translate[i] += d / UNIT);
+  else if (f[0] === 'r') { if (ids.length === 1) edit(ids[0]).rotate_deg[i] += d; else rotateGroup(ids, i, d); }
+  else if (f[0] === 's') {
+    const e = edit(selId), cur = e.scale[i], ratio = Math.max(0.01, cur + d) / cur;
+    const ratios = F('uniform').checked ? [ratio, ratio, ratio] : [0, 1, 2].map(j => j === i ? ratio : 1);
+    if (ids.length === 1) e.scale = e.scale.map((v, j) => Math.max(0.01, v * ratios[j])); else scaleGroup(ids, ratios);
+  } else ids.forEach(k => { if (items[k].kind === 'object') (f[0] === 't' ? setTrim : setExtend)(k, f[1], i, fieldValue(k, f) + d); });
+  changed(ids);
+}
+// Number fields with their own ▲▼ (bigger than the browser's, held down to repeat).
+function stepper(input, onStep) {
+  const wrap = document.createElement('span');
+  wrap.className = 'num ' + input.className;
+  input.replaceWith(wrap); wrap.appendChild(input);
+  const spin = document.createElement('span'); spin.className = 'spin';
+  [['▲', 1], ['▼', -1]].forEach(([t, d]) => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.textContent = t; b.tabIndex = -1; b.title = (d > 0 ? 'Up' : 'Down') + ' (Shift: a bigger step; hold to repeat)';
+    let timer = null;
+    const stop = () => { clearTimeout(timer); clearInterval(timer); timer = null; };
+    b.addEventListener('pointerdown', ev => {
+      ev.preventDefault(); stop(); onStep(d, ev.shiftKey);
+      timer = setTimeout(() => { timer = setInterval(() => onStep(d, ev.shiftKey), 70); }, 400);
+    });
+    ['pointerup', 'pointerleave', 'pointercancel'].forEach(x => b.addEventListener(x, stop));
+    spin.appendChild(b);
+  });
+  wrap.appendChild(spin);
+  input.addEventListener('keydown', ev => {
+    if (ev.key !== 'ArrowUp' && ev.key !== 'ArrowDown') return;
+    ev.preventDefault(); onStep(ev.key === 'ArrowUp' ? 1 : -1, ev.shiftKey);
+  });
+  input.addEventListener('wheel', ev => { if (document.activeElement === input) ev.preventDefault(); }, { passive: false });
+}
+ALL_FIELDS.forEach(f => {
+  const axis = () => 'xyz'.indexOf(f[f.length - 1]);
+  stepper(F(f), (d, big) => { setGizmoMode(f[0], axis()); stepField(f, d, big); });
+  F(f).addEventListener('change', () => typed(f));
+  ['focus', 'pointerdown'].forEach(ev => F(f).addEventListener(ev, () => setGizmoMode(f[0], axis())));
 });
 F('btn-reset').addEventListener('click', () => {
   if (selId === null) return;
-  selected.forEach(id => { delete edits[id]; applyEdit(id); }); updateSelection(); refreshPanel(); markDirty();
+  const ids = [...selected];
+  ids.forEach(k => { const keep = items[k].copyOf !== undefined; delete edits[k]; if (keep) edit(k); applyEdit(k); });
+  updateSelection(); refreshPanel(); markDirty();
 });
-F('btn-remove').addEventListener('click', () => {
+function removeSelected() {
   if (selId === null) return;
-  selected.forEach(id => { edit(id).hidden = true; applyEdit(id); }); markDirty(); select(null);
-});
+  [...selected].forEach(k => {
+    const it = items[k];
+    if (it.kind === 'builtin') setBuiltin(k, false);
+    else if (it.copyOf !== undefined) deleteCopy(k);
+    else { edit(k).hidden = true; applyEdit(k); }
+  });
+  markDirty(); select(null);
+}
+F('btn-remove').addEventListener('click', removeSelected);
 F('btn-close').addEventListener('click', () => select(null));
+function moveSelection(delta) {
+  [...selected].forEach(k => { const e = edit(k); e.translate = e.translate.map((v, i) => v + delta.getComponent(i)); applyEdit(k); });
+  updateSelection(); refreshPanel(); markDirty();
+}
 F('btn-floor').addEventListener('click', () => {
-  if (selId === null || !LAYOUT || LAYOUT.floor_y === undefined) return;
-  const d = LAYOUT.floor_y - groupCentre().y + selBox3.getSize(new THREE.Vector3()).y / 2;   // lowest point of the selection to the floor
-  selected.forEach(id => { edit(id).translate[1] += d; applyEdit(id); }); updateSelection(); refreshPanel(); markDirty();
+  if (selId === null) return;
+  updateSelection();
+  moveSelection(new THREE.Vector3(0, floorY() - selBox3.min.y, 0));   // lowest point of the selection to the floor
+});
+// How far the given objects can drop straight down before they rest on something
+// (an object, a built-in, or the floor). Rays go down from their lowest points,
+// one per cell of the footprint; the shortest gap is the drop. Rays start a
+// little above the bottom, so something that sank slightly into its support
+// gets a negative drop and comes back up.
+function dropDistance(keys) {
+  const box = new THREE.Box3(); keys.forEach(k => worldBox(k, box));
+  if (box.isEmpty()) return NaN;
+  const size = box.getSize(new THREE.Vector3()), N = 12, low = new Map();
+  const cell = Math.max(size.x, size.z) / N || 1;
+  keys.forEach(k => { const p = worldPoints(k);
+    for (let i = 0; i < p.length; i += 3) {
+      const c = Math.floor((p[i] - box.min.x) / cell) + ',' + Math.floor((p[i+2] - box.min.z) / cell);
+      const q = low.get(c); if (!q || p[i+1] < q[1]) low.set(c, [p[i], p[i+1], p[i+2]]);
+    } });
+  const exclude = new Set(keys), lift = 0.03 * size.y + 1e-4, down = new THREE.Vector3(0, -1, 0);
+  const targets = Object.entries(items).filter(([k, i]) => i.pivot && !exclude.has(K(k))).map(([, i]) => i.pivot);
+  let drop = Infinity;
+  for (const q of low.values()) {
+    let d = q[1] - floorY();
+    ray.set(new THREE.Vector3(q[0], q[1] + lift, q[2]), down);
+    const hit = ray.intersectObjects(targets, true).find(h => shown(h.object));
+    if (hit) d = Math.min(d, hit.distance - lift);
+    drop = Math.min(drop, d);
+  }
+  return drop;
+}
+F('btn-down').addEventListener('click', () => {
+  if (selId === null) return;
+  const drop = dropDistance([...selected]);
+  if (Number.isFinite(drop)) moveSelection(new THREE.Vector3(0, -drop, 0));
+});
+// Stretch down: each object's bottom half grows until its lowest point reaches what
+// is below it; its top stays where it is (legs that stop short of the floor).
+F('btn-stretch').addEventListener('click', () => {
+  if (selId === null) return;
+  const objs = [...selected].filter(k => items[k].kind === 'object');
+  for (const k of objs) {
+    const drop = dropDistance([k]);
+    if (!Number.isFinite(drop) || Math.abs(drop) < 1e-6) continue;
+    const it = items[k], e = edit(k), sy = Math.max(e.scale[1], 0.01);
+    const lo = it.lo.y, c = it.home.y, cut = e.crop ? Math.max(lo, e.crop[0][1]) : lo;     // the lowest point left
+    if (c - cut < 1e-9) continue;
+    const ext = e.extend || [it.lo.toArray(), it.lo.clone().add(it.size).toArray(), it.lo.toArray(), it.lo.clone().add(it.size).toArray()];
+    const f = (c - ext[2][1]) / (c - ext[0][1]) + drop / sy / (c - cut);      // the bottom half's new stretch factor
+    const pct = ((c - f * (c - ext[0][1])) - lo) / -it.size.y * 100;
+    if (!e.extend) e.extend = ext;
+    setExtend(k, '0', 1, pct);
+  }
+  changed(objs);
+});
+// To wall: the next click picks a surface; the selection moves along that
+// surface's normal until its nearest point touches it.
+let wallMode = false;
+function cancelWall() { wallMode = false; F('btn-wall').classList.remove('on'); F('prompt').style.display = 'none'; }
+F('btn-wall').addEventListener('click', () => {
+  if (selId === null) return;
+  if (wallMode) { cancelWall(); return; }
+  wallMode = true; F('btn-wall').classList.add('on');
+  F('prompt').textContent = 'Click a wall or any surface to push the selection against it (Esc cancels)';
+  F('prompt').style.display = 'block';
+});
+function toWall(ev) {
+  const p = pick(ev, true, selected);
+  cancelWall();
+  if (!p || !p.hit.face) return;
+  const n = p.hit.face.normal.clone().transformDirection(p.hit.object.matrixWorld);
+  if (n.dot(ray.ray.direction) > 0) n.negate();            // the side facing the camera
+  let gap = Infinity;
+  [...selected].forEach(k => { const w = worldPoints(k);
+    for (let i = 0; i < w.length; i += 3) gap = Math.min(gap, n.x * (w[i] - p.hit.point.x) + n.y * (w[i+1] - p.hit.point.y) + n.z * (w[i+2] - p.hit.point.z)); });
+  if (Number.isFinite(gap)) moveSelection(n.multiplyScalar(-gap));
+}
+
+// ------------------------------------------------------------ copies
+// A copy is a new object made from its original's mesh (a copy of a copy is a
+// copy of the original), saved with "source" in edits.json.
+function nextId() {
+  const ids = Object.keys(items).filter(k => /^\d+$/.test(k)).map(Number).concat(OBJECTS.map(o => o.id));
+  return Math.max(0, ...ids) + 1;
+}
+function makeCopy(root, id, e) {
+  const src = items[root];
+  if (!src || !src.node || items[id] && items[id].pivot) return false;
+  const node = src.node.clone(true);
+  const srcMeshes = [];
+  src.node.traverse(o => { if (o.isMesh) srcMeshes.push(o); });
+  let m = 0;
+  node.traverse(o => { if (o.isMesh) {
+    const from = srcMeshes[m++];
+    o.material = o.material.clone(); o.material.color.copy(WHITE); o.material.clippingPlanes = null;
+    o.geometry = o.geometry.clone();
+    if (from && meshBase.has(from)) {                     // the original's unstretched shape
+      o.geometry.attributes.position.array.set(meshBase.get(from).base);
+      o.geometry.computeBoundingBox(); o.geometry.computeBoundingSphere();
+    }
+  } });
+  const pivot = new THREE.Group();
+  pivot.position.copy(src.home); pivot.add(node); pivot.userData.key = id;
+  scene.add(pivot);
+  const o = { id, label: src.label, copyOf: root };
+  OBJECTS.push(o); byId[id] = o;
+  let after = src.row;
+  while (after && after.nextElementSibling && items[K(after.nextElementSibling.dataset.id)] && items[K(after.nextElementSibling.dataset.id)].copyOf === root) after = after.nextElementSibling;
+  addRow(o, after);
+  Object.assign(items[id], { kind: 'object', pivot, node, orig: src.orig, home: src.home.clone(), size: src.size.clone(), lo: src.lo.clone(), copyOf: root });
+  edits[id] = { translate: [...e.translate], rotate_deg: [...e.rotate_deg], scale: [...e.scale], hidden: !!e.hidden,
+                crop: e.crop ? e.crop.map(a => [...a]) : null, extend: e.extend ? e.extend.map(a => [...a]) : null };
+  applyEdit(id); updateCount();
+  return true;
+}
+function deleteCopy(id) {
+  const it = items[id];
+  if (hotId === id) setHot(null);
+  scene.remove(it.pivot);
+  it.pivot.traverse(o => { if (o.isMesh) { o.material.dispose(); o.geometry.dispose(); } });
+  if (it.row) it.row.remove();
+  delete items[id]; delete edits[id]; delete byId[id];
+  OBJECTS.splice(OBJECTS.findIndex(o => o.id === id), 1);
+  selected.delete(id); updateCount();
+}
+// Copies land beside their originals, one selection-width to the right on screen.
+function duplicate(keys) {
+  const ids = keys.filter(k => items[k] && items[k].kind === 'object');
+  if (!ids.length) return;
+  const box = new THREE.Box3(); ids.forEach(k => worldBox(k, box));
+  const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion); right.y = 0;
+  if (right.lengthSq() < 1e-6) right.set(1, 0, 0);
+  right.normalize();
+  const size = box.getSize(new THREE.Vector3()), off = right.multiplyScalar(1.05 * (Math.abs(right.x) * size.x + Math.abs(right.z) * size.z));
+  const made = [];
+  for (const k of ids) {
+    const id = nextId();
+    if (id > 999) { F('status').textContent = 'no more object ids (999)'; break; }
+    const e = edit(k), root = items[k].copyOf !== undefined ? items[k].copyOf : k;
+    if (makeCopy(root, id, { ...e, hidden: false, translate: e.translate.map((v, i) => v + off.getComponent(i)) })) made.push(id);
+  }
+  if (!made.length) return;
+  select(null); made.forEach(id => select(id, true)); markDirty();
+}
+F('btn-dup').addEventListener('click', () => duplicate([...selected]));
+let clipboard = [];
+
+// ------------------------------------------------------------ room size
+// The room's six sides move with the room editor. Each floor, wall and ceiling
+// vertex is mapped from the old box to the new one; texture coordinates follow
+// the photo where the room shrinks and stretch where it grows.
+const roomEdit = { min: [0, 0, 0], max: [0, 0, 0] };
+function fitAffine(P, UV) {             // least squares uv = [x y z 1] · A, A is 4×2
+  const n = P.length / 3, M = Array.from({ length: 4 }, () => [0, 0, 0, 0]), B = Array.from({ length: 4 }, () => [0, 0]);
+  for (let i = 0; i < n; i++) {
+    const x = [P[3*i], P[3*i+1], P[3*i+2], 1];
+    for (let a = 0; a < 4; a++) { for (let b = 0; b < 4; b++) M[a][b] += x[a] * x[b]; B[a][0] += x[a] * UV[2*i]; B[a][1] += x[a] * UV[2*i+1]; }
+  }
+  const lam = 1e-9 * (M[0][0] + M[1][1] + M[2][2] + M[3][3] + 1);
+  for (let a = 0; a < 4; a++) M[a][a] += lam;        // flat pieces: one coordinate is constant
+  for (let c = 0; c < 4; c++) {                       // Gaussian elimination with pivoting
+    let p = c; for (let r = c + 1; r < 4; r++) if (Math.abs(M[r][c]) > Math.abs(M[p][c])) p = r;
+    [M[c], M[p]] = [M[p], M[c]]; [B[c], B[p]] = [B[p], B[c]];
+    for (let r = 0; r < 4; r++) { if (r === c) continue; const f = M[r][c] / M[c][c];
+      for (let j = c; j < 4; j++) M[r][j] -= f * M[c][j]; B[r][0] -= f * B[c][0]; B[r][1] -= f * B[c][1]; }
+  }
+  const A = B.map((b, r) => [b[0] / M[r][r], b[1] / M[r][r]]);
+  for (let i = 0; i < n; i++) {
+    const x = [P[3*i], P[3*i+1], P[3*i+2], 1];
+    for (let j = 0; j < 2; j++) if (Math.abs(x.reduce((s, v, a) => s + v * A[a][j], 0) - UV[2*i+j]) > 1e-3) return null;
+  }
+  return A;
+}
+function roomBox() { return [BOX0[0].map((v, i) => v + roomEdit.min[i]), BOX0[1].map((v, i) => v + roomEdit.max[i])]; }
+function applyRoom() {
+  if (!BOX0) return;
+  const [lo0, hi0] = BOX0, [lo1, hi1] = roomBox();
+  for (const s of shellMeshes) {
+    const g = s.mesh.geometry, pa = g.attributes.position, uv = g.attributes.uv;
+    if (!s.P0) {
+      s.mesh.updateMatrixWorld(true);
+      s.mw = s.mesh.matrixWorld.clone(); s.inv = s.mw.clone().invert();
+      s.P0 = new Float32Array(pa.count * 3);
+      for (let i = 0; i < pa.count; i++) { V.fromBufferAttribute(pa, i).applyMatrix4(s.mw); s.P0.set([V.x, V.y, V.z], 3 * i); }
+      s.A = uv ? fitAffine(s.P0, uv.array) : null;
+    }
+    for (let i = 0; i < pa.count; i++) {
+      const q = [0, 1, 2].map(a => { const span = hi0[a] - lo0[a]; return lo1[a] + (s.P0[3*i+a] - lo0[a]) * (Math.abs(span) > 1e-9 ? (hi1[a] - lo1[a]) / span : 1); });
+      V.set(q[0], q[1], q[2]).applyMatrix4(s.inv); pa.setXYZ(i, V.x, V.y, V.z);
+      if (s.A) {
+        const c = [0, 1, 2].map(a => Math.min(Math.max(q[a], lo0[a]), hi0[a])).concat([1]);
+        uv.setXY(i, c.reduce((t, v, a) => t + v * s.A[a][0], 0), c.reduce((t, v, a) => t + v * s.A[a][1], 0));
+      }
+    }
+    pa.needsUpdate = true; if (s.A) uv.needsUpdate = true;
+    g.computeBoundingBox(); g.computeBoundingSphere();
+  }
+}
+const ROOM_FIELDS = ['rlx', 'rly', 'rlz', 'rhx', 'rhy', 'rhz', 'rsx', 'rsy', 'rsz'];
+const SIDE = { l: ['wall_x_min', 'floor', 'wall_z_min'], h: ['wall_x_max', 'ceiling', 'wall_z_max'] };
+function roomValue(f) {
+  const [lo, hi] = roomBox(), i = 'xyz'.indexOf(f[2]);
+  if (f[1] === 'l') return (lo[i] - ORIGIN[i]) * UNIT;
+  if (f[1] === 'h') return (hi[i] - ORIGIN[i]) * UNIT;
+  return (hi[i] - lo[i]) * UNIT;
+}
+// d: a change in display units; absolute: set the side (or size) to d instead
+function moveRoom(f, d, absolute) {
+  const i = 'xyz'.indexOf(f[2]), [lo, hi] = roomBox(), MIN = 0.1;
+  if (absolute) d = d - roomValue(f);
+  d /= UNIT;
+  if (f[1] === 'l') roomEdit.min[i] = Math.min(lo[i] + d, hi[i] - MIN) - BOX0[0][i];
+  else if (f[1] === 'h') roomEdit.max[i] = Math.max(hi[i] + d, lo[i] + MIN) - BOX0[1][i];
+  else {
+    const grow = Math.max(d, MIN - (hi[i] - lo[i]));
+    if (i === 1) roomEdit.max[i] += grow; else { roomEdit.min[i] -= grow / 2; roomEdit.max[i] += grow / 2; }
+  }
+  applyRoom(); refreshRoom(); markDirty();
+}
+function refreshRoom() {
+  ROOM_FIELDS.forEach(f => F(f).value = roomValue(f).toFixed(2));
+  const [lo, hi] = roomBox();
+  F('room-dim').textContent = `${[0, 1, 2].map(i => ((hi[i] - lo[i]) * UNIT).toFixed(2)).join(' × ')} ${UNIT_NAME} (was ${[0, 1, 2].map(i => ((BOX0[1][i] - BOX0[0][i]) * UNIT).toFixed(2)).join(' × ')}). X and Z are measured from the photo's camera, Y from the floor.`;
+}
+let roomHot = [];
+function hotSides(f) {
+  shellMeshes.forEach(s => { if (roomHot.includes(s)) s.mesh.material.color.copy(WHITE); });
+  roomHot = [];
+  if (!f) return;
+  const i = 'xyz'.indexOf(f[2]), names = f[1] === 's' ? [SIDE.l[i], SIDE.h[i]] : [SIDE[f[1]][i]];
+  roomHot = shellMeshes.filter(s => names.some(n => s.name === 'room_' + n));
+  roomHot.forEach(s => s.mesh.material.color.copy(HOT));
+}
+ROOM_FIELDS.forEach(f => {
+  stepper(F(f), (d, big) => moveRoom(f, 0.05 * (big ? 5 : 1) * d, false));
+  F(f).addEventListener('change', () => { const v = parseFloat(F(f).value); if (Number.isFinite(v)) moveRoom(f, v, true); else refreshRoom(); });
+  const wrap = F(f).parentElement;
+  wrap.addEventListener('mouseenter', () => hotSides(f));
+  wrap.addEventListener('mouseleave', () => hotSides(document.activeElement && ROOM_FIELDS.includes(document.activeElement.id) ? document.activeElement.id : null));
+  F(f).addEventListener('focus', () => hotSides(f));
+  F(f).addEventListener('blur', () => hotSides(null));
+});
+function closeRoom() { F('roomedit').style.display = 'none'; hotSides(null); }
+F('btn-room').addEventListener('click', () => {
+  if (F('roomedit').style.display === 'block') { closeRoom(); return; }
+  select(null); refreshRoom(); F('roomedit').style.display = 'block';
+});
+F('room-close').addEventListener('click', closeRoom);
+F('room-reset').addEventListener('click', () => { roomEdit.min = [0, 0, 0]; roomEdit.max = [0, 0, 0]; applyRoom(); refreshRoom(); markDirty(); });
+
+// ------------------------------------------------------------ keys
+addEventListener('keydown', e => {
+  const mod = e.ctrlKey || e.metaKey, key = e.key.toLowerCase();
+  if (mod && key === 's') {                 // the browser's "save page" is not useful here
+    e.preventDefault();
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();   // commit a value being typed
+    if (F('bar').offsetParent !== null) save();
+    return;
+  }
+  if (e.target && ['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName)) return;
+  if (e.key === 'Escape') { if (wallMode) cancelWall(); else { select(null); closeRoom(); } }
+  else if (mod && key === 'c' && !String(getSelection())) {
+    clipboard = [...selected].filter(k => items[k] && items[k].kind === 'object');
+    if (clipboard.length) F('status').textContent = `copied ${clipboard.length}: Ctrl+V to paste`;
+  } else if (mod && key === 'v' && clipboard.length) { e.preventDefault(); duplicate(clipboard.filter(k => items[k])); }
+  else if ((e.key === 'Delete' || e.key === 'Backspace') && selId !== null) { e.preventDefault(); removeSelected(); }
 });
 
-// Edits live in edits.json next to the scene. Served by the WorldBuilder
-// web app they are saved through its API (and applied to every GLB it hands
-// out); opened from a plain file server they are downloaded instead.
-const sceneMatch = location.pathname.match(/\/outputs\/([^\/]+)\/viewer\.html$/);
+// ------------------------------------------------------------ saving
+// Edits live in edits.json next to the scene. Served by the WorldBuilder web
+// app (python -m webapp.server) they are saved through its API; from any other
+// server, Chrome and Edge write the file into the scene folder once it has been
+// picked (remembered for this page); other browsers download it.
+const sceneMatch = location.pathname.match(/\/outputs\/(.+)\/viewer\.html$/);
 const API = sceneMatch ? `/api/scenes/${sceneMatch[1]}` : null;
 let dirty = false;
 function markDirty() { dirty = true; F('status').textContent = 'unsaved edits'; F('status').className = 'dirty'; }
+function saved(msg) { dirty = false; F('status').textContent = msg; F('status').className = ''; }
 function collect() {
-  const out = { version: 1, objects: {}, hidden_nodes: [...hiddenNodes] };
-  for (const [id, e] of Object.entries(edits)) {
-    if (isIdentity(e) || !items[id] || !items[id].home) continue;
-    out.objects[id] = { translate: e.translate, rotate_deg: e.rotate_deg, scale: e.scale, hidden: e.hidden, pivot: items[id].home.toArray() };
+  const out = { version: 1, objects: {}, nodes: {}, hidden_nodes: [...hiddenNodes] };
+  for (const [key, e] of Object.entries(edits)) {
+    const k = K(key), it = items[k];
+    if (!it || !it.home) continue;
+    const t = { translate: e.translate, rotate_deg: e.rotate_deg, scale: e.scale, pivot: it.home.toArray() };
+    if (it.kind === 'builtin') { if (!isIdentity(e)) out.nodes[it.prefix] = t; continue; }
+    if (isIdentity(e) && it.copyOf === undefined) continue;
+    const o = Object.assign(t, { hidden: e.hidden });
+    if (e.crop) o.crop = e.crop;
+    if (e.extend) o.extend = e.extend;
+    if (it.copyOf !== undefined) o.source = it.copyOf;
+    out.objects[k] = o;
   }
+  if (roomEdit.min.some(v => Math.abs(v) > 1e-9) || roomEdit.max.some(v => Math.abs(v) > 1e-9)) out.room = { min: [...roomEdit.min], max: [...roomEdit.max] };
   return out;
 }
 async function loadEdits() {
@@ -633,11 +1228,18 @@ async function loadEdits() {
     const r = await fetch('edits.json', { cache: 'no-store' });
     if (r.ok) {
       const d = await r.json();
-      for (const [id, e] of Object.entries(d.objects || {})) {
-        if (!items[id] || !items[id].pivot) continue;
-        edits[id] = { translate: e.translate, rotate_deg: e.rotate_deg, scale: e.scale, hidden: !!e.hidden };
+      const objs = Object.entries(d.objects || {});
+      for (const [id, e] of objs) {
+        if (e.source !== undefined || !items[id] || !items[id].pivot) continue;
+        edits[id] = { translate: e.translate, rotate_deg: e.rotate_deg, scale: e.scale, hidden: !!e.hidden, crop: e.crop || null, extend: e.extend || null };
         applyEdit(id);
       }
+      for (const [id, e] of objs) if (e.source !== undefined && items[e.source] && items[e.source].copyOf === undefined) makeCopy(e.source, K(id), e);
+      for (const [prefix, e] of Object.entries(d.nodes || {})) {
+        const k = Object.keys(items).find(k => items[k].prefix === prefix);
+        if (k) { edits[k] = { translate: e.translate, rotate_deg: e.rotate_deg, scale: e.scale, hidden: false, crop: null }; applyEdit(k); }
+      }
+      if (d.room && BOX0) { roomEdit.min = [...d.room.min]; roomEdit.max = [...d.room.max]; applyRoom(); }
       const hidden = new Set(d.hidden_nodes || []);
       Object.entries(builtins).forEach(([k, b]) => { if (b.names.some(n => hidden.has(n))) setBuiltin(k, false); });
       F('status').textContent = 'edits loaded';
@@ -647,19 +1249,54 @@ async function loadEdits() {
     try { const h = await fetch('/api/health'); if (h.ok) { F('lnk-glb').href = `${API}/glb?lite=1`; F('lnk-glb').style.display = 'inline'; } } catch (err) {}
   }
 }
-F('btn-save').addEventListener('click', async () => {
-  const data = collect();
+// The picked scene folder is kept in IndexedDB, per page, so it is asked for once.
+function folderStore(mode, fn) {
+  return new Promise((resolve, reject) => {
+    const rq = indexedDB.open('worldbuilder-viewer', 1);
+    rq.onupgradeneeded = () => rq.result.createObjectStore('folders');
+    rq.onerror = () => reject(rq.error);
+    rq.onsuccess = () => {
+      const tx = rq.result.transaction('folders', mode), r = fn(tx.objectStore('folders'));
+      tx.oncomplete = () => resolve(r.result); tx.onerror = () => reject(tx.error);
+    };
+  });
+}
+async function saveToFolder(text) {
+  const key = location.origin + location.pathname;
+  let folder = null;
+  try { folder = await folderStore('readonly', s => s.get(key)); } catch (err) { /* no IndexedDB */ }
+  if (folder && (await folder.queryPermission({ mode: 'readwrite' })) !== 'granted'
+      && (await folder.requestPermission({ mode: 'readwrite' })) !== 'granted') folder = null;
+  if (!folder) {
+    F('status').textContent = 'pick this scene\'s folder to save into';
+    folder = await showDirectoryPicker({ id: 'worldbuilder-scene', mode: 'readwrite' });
+    const here = decodeURIComponent(location.pathname.split('/').slice(-2, -1)[0] || '');
+    if (folder.name !== here && !confirm(`This page is in a folder named "${here}", but you picked "${folder.name}". Save edits.json there anyway?`))
+      throw new DOMException('wrong folder', 'AbortError');
+    try { await folderStore('readwrite', s => s.put(folder, key)); } catch (err) { /* asked again next time */ }
+  }
+  const fh = await folder.getFileHandle('edits.json', { create: true });
+  const w = await fh.createWritable(); await w.write(text); await w.close();
+  return folder.name;
+}
+async function save() {
+  const data = collect(), text = JSON.stringify(data, null, 1);
   if (API) {
     try {
       const r = await fetch(`${API}/edits`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
-      if (r.ok) { dirty = false; F('status').textContent = 'saved'; F('status').className = ''; return; }
-    } catch (err) { /* fall through to a download */ }
+      if (r.ok) { saved('saved to the scene folder'); return; }
+    } catch (err) { /* not the web app: try the folder */ }
+  }
+  if (window.showDirectoryPicker) {
+    try { saved(`saved to ${await saveToFolder(text)}/edits.json`); return; }
+    catch (err) { if (err.name === 'AbortError') { F('status').textContent = 'not saved'; return; } console.error(err); }
   }
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([JSON.stringify(data, null, 1)], { type: 'application/json' }));
+  a.href = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
   a.download = 'edits.json'; a.click();
-  dirty = false; F('status').textContent = 'downloaded: put edits.json in the scene folder'; F('status').className = '';
-});
+  saved('downloaded: put edits.json in the scene folder');
+}
+F('btn-save').addEventListener('click', save);
 addEventListener('beforeunload', e => { if (dirty) { e.preventDefault(); e.returnValue = ''; } });
 
 // ---------------------------------------------------------------- load
@@ -732,6 +1369,8 @@ renderer.setAnimationLoop(() => {
   if (renderer.xr.isPresenting) pollXRInput(dt); else controls.update();
   renderer.render(scene, camera);
 });
+// For scripted checks (tests drive the viewer headlessly through this).
+if (params.has('debug')) window.wb = { items, edits, select, collect, duplicate, roomEdit, applyRoom, moveRoom, worldBox, floorY, typed, stepField, dropDistance, F };
 </script>
 </body></html>
 """
