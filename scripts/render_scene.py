@@ -39,12 +39,15 @@ def _look_at(eye, target, up=(0, 1, 0)):
     return M
 
 
-def load_scene_meshes(scene: Path, include_room: bool = True):
-    """[(name, trimesh)] in the aligned world frame."""
+def load_scene_meshes(scene: Path, include_room: bool = True, lite: bool = False):
+    """[(name, trimesh)] in the aligned world frame. ``lite`` reads
+    ``scene_lite.glb`` (decimated, tens of MB) even when the dense
+    ``scene.glb`` exists: a cluttered scene's dense file can be over a GB."""
     import trimesh
     out = []
     glb = scene / "scene.glb"
-    if not glb.exists() and not any((scene / "3d_models").glob("[0-9]*.ply")):
+    if (lite and (scene / "scene_lite.glb").exists()) or (
+            not glb.exists() and not any((scene / "3d_models").glob("[0-9]*.ply"))):
         glb = scene / "scene_lite.glb"            # a run stripped of its dense meshes still renders
     if glb.exists():
         sc = trimesh.load(str(glb), process=False)
@@ -77,9 +80,9 @@ def load_scene_meshes(scene: Path, include_room: bool = True):
     return out
 
 
-def render_views(scene: Path, views, size=640, include_room=True, only=None, depth_out=None):
+def render_views(scene: Path, views, size=640, include_room=True, only=None, depth_out=None, lite=False):
     import pyrender
-    meshes = load_scene_meshes(scene, include_room)
+    meshes = load_scene_meshes(scene, include_room, lite)
     if only:        # e.g. --only room_relief: look at one part of the scene by itself
         meshes = [(n, m) for n, m in meshes if any(n.startswith(p) for p in only)]
     npz = np.load(scene / "3d_models" / "scene_pointmap.npz")
@@ -187,9 +190,10 @@ def main():
     ap.add_argument("--size", type=int, default=640)
     ap.add_argument("--no-room", action="store_true")
     ap.add_argument("--only", help="comma-separated node-name prefixes to render alone (e.g. room_relief)")
+    ap.add_argument("--lite", action="store_true", help="render scene_lite.glb (far less memory on big scenes)")
     a = ap.parse_args()
     renders, hw = render_views(a.scene, a.views.split(","), a.size, not a.no_room,
-                               a.only.split(",") if a.only else None)
+                               a.only.split(",") if a.only else None, lite=a.lite)
     out = contact_sheet(a.scene, renders, hw, a.out or a.scene / "renders.png", a.size)
     print(f"✓ {out}")
 
